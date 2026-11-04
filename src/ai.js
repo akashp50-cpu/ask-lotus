@@ -105,10 +105,33 @@ async function pickSop(cfg, question, candidates, catalog, { sourceOnly }) {
   };
 }
 
+// Write a short, direct answer to the staff member's exact question, using only the
+// matched SOP (already token-resolved, [CHECK] notes removed). Returns null if the
+// SOP doesn't speak to it.
+async function answerFromSop(cfg, question, sop) {
+  const system = [
+    "You help hotel front desk staff. Answer the staff member's question using ONLY the SOP provided.",
+    "Write 1 to 3 short, plain sentences: the direct answer first, then the key action. No preamble, no headings, no markdown.",
+    "Use the exact names, phone numbers, amounts and times in the SOP. Never invent a price, policy, time, room number or phone number.",
+    'Where the SOP says "ask a manager", tell them to ask a manager for that detail.',
+    "If the SOP does not answer this specific question, reply with exactly: NONE",
+  ].join(" ");
+  const body = [
+    `SOP ${sop.id}: ${sop.title} (${sop.category})`,
+    "Steps:",
+    ...sop.steps.map((t, i) => `${i + 1}. ${t}`),
+    sop.script ? `What to say to the guest: ${sop.script}` : "",
+    sop.flag ? `Call a manager if: ${sop.flag}` : "",
+  ].filter(Boolean).join("\n");
+  const text = String(await complete(cfg, system, `${body}\n\nStaff question: """${question}"""`)).trim();
+  if (!text || /^none\.?$/i.test(text)) return null;
+  return text.slice(0, 600);
+}
+
 async function testConnection(cfg) {
   const t0 = Date.now();
   const text = await complete(cfg, "Reply with the single word OK.", "Connection test");
   return { ms: Date.now() - t0, reply: String(text).trim().slice(0, 40) };
 }
 
-module.exports = { PROVIDERS, pickSop, testConnection };
+module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection };

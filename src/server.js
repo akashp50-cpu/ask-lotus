@@ -115,6 +115,23 @@ function aiConfig(s) {
   return { provider: s.provider, model: s.model, baseUrl: s.base_url, apiKey: decrypt(s.key_enc) };
 }
 
+// SOP text as staff would see it, for the model: contact tokens filled in,
+// [CHECK] manager notes removed, [FILL] gaps marked as "ask a manager".
+function forModel(sop, contacts) {
+  const n = (x) => String(x).toLowerCase().replace(/[^a-z0-9]/g, "");
+  const fill = (t) =>
+    String(t || "")
+      .replace(/\{([^}]+)\}/g, (m, r) => {
+        const c = contacts.find((x) => n(x.role) === n(r));
+        return c ? `${c.name} (${c.role}) ${c.phone}` : m;
+      })
+      .replace(/\[CHECK:[^\]]*\]|\[CHECK\]/g, "")
+      .replace(/\[FILL:?[^\]]*\]/g, "(not set: ask a manager)")
+      .trim();
+  const steps = (Array.isArray(sop.steps) ? sop.steps : []).map((x) => fill(typeof x === "string" ? x : x.t)).filter(Boolean);
+  return { id: sop.id, title: sop.title, category: sop.category, steps, script: fill(sop.script), flag: fill(sop.flag) };
+}
+
 const sopOut = (r) => ({
   id: r.id,
   cat: r.category,
@@ -236,11 +253,22 @@ app.post(
       sop = best(question, sops);
       if (sop) by = "keyword";
     }
+    // AI answer to the exact question, guided by the matched SOP. Any failure just
+    // leaves the SOP card on its own.
+    let answer = null;
+    if (cfg && sop && !aiError) {
+      try {
+        const contacts = (await q("SELECT role, name, phone FROM contacts WHERE hotel_id=$1", [req.hotel])).rows;
+        answer = await ai.answerFromSop(cfg, question, forModel(sop, contacts));
+      } catch (e) {
+        console.error("AI answer error:", e.message);
+      }
+    }
     const ins = await q(
       "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by) VALUES ($1,$2,$3,$4,$5) RETURNING id",
       [req.hotel, req.user.id, question, sop ? sop.id : null, by]
     );
-    res.json({ logId: ins.rows[0].id, sop: sop ? sopOut(sop) : null, general, aiDown: !!aiError && !sop });
+    res.json({ logId: ins.rows[0].id, sop: sop ? sopOut(sop) : null, answer, general, aiDown: !!aiError && !sop });
   })
 );
 

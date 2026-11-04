@@ -101,6 +101,8 @@ header.scrolled{border-bottom-color:var(--sep)}
 .say{background:var(--tint-soft)} .esc{background:var(--orange-soft);margin-top:8px}
 .say b,.esc b{display:block;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase;margin-bottom:2px}
 .say b{color:var(--tint)} .esc b{color:var(--orange)}
+.aiAns{margin:6px 12px 4px;padding:12px 14px;border-radius:14px;font-size:1rem;line-height:1.4;background:var(--fill,rgba(127,127,127,.1));border-left:3px solid var(--tint)}
+.aiAns b{display:block;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase;margin-bottom:2px;color:var(--tint)}
 .ft{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 16px 14px;font-size:.78rem;color:var(--label2)}
 .tag{font-family:var(--f-m);font-size:.72rem;padding:2px 7px;border-radius:6px;background:var(--fill);color:var(--label);letter-spacing:0}
 .fb{margin-left:auto;display:flex;gap:6px}

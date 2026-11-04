@@ -230,9 +230,10 @@ function appear(el, origin) {
   if (RM.matches) return; el.style.transformOrigin = origin;
   Spring(0, (p) => { el.style.opacity = Math.min(1, p * 1.4); el.style.transform = `translateY(${(1 - p) * 14}px) scale(${0.96 + 0.04 * p})`; }).to(1, { damping: 0.82, response: 0.4 }, () => (el.style.transform = ""));
 }
-function sopCard(s, logId) {
+function sopCard(s, logId, answer) {
   const card = document.createElement("div"); card.className = "a";
   card.innerHTML = `<div class="hd"><div class="eyebrow">${esc(s.cat)}</div><h3>${esc(s.title)}</h3></div>
+    ${answer ? `<div class="aiAns"><b>Answer</b>${esc(answer)}</div>` : ""}
     <ol class="steps">${s.steps.map((x) => `<li><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
     ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
@@ -262,7 +263,7 @@ async function ask(text) {
   try {
     const r = await api("/api/ask", { body: { q: text } });
     wait.remove();
-    const card = r.sop ? sopCard(r.sop, r.logId) : missCard(r.general, r.aiDown);
+    const card = r.sop ? sopCard(r.sop, r.logId, r.answer) : missCard(r.general, r.aiDown);
     th.appendChild(card); appear(card, "bottom left");
     card.scrollIntoView({ behavior: RM.matches ? "auto" : "smooth", block: "start" });
   } catch (e) { wait.textContent = e.message; }
