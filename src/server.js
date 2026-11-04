@@ -663,8 +663,17 @@ app.get("/healthz", wrap(async (req, res) => {
   await q("SELECT 1");
   res.json({ ok: true });
 }));
-app.use(express.static(path.join(__dirname, "..", "public"), { index: "index.html", maxAge: 0 } /* always revalidate so updates show right away */));
-app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, "..", "public", "index.html")));
+// index.html is never cached, and points at versioned app.js/style.css, so a new
+// deploy reaches every browser on the next page load.
+const BUILD = String(Date.now());
+const INDEX = require("fs")
+  .readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8")
+  .replace('href="/style.css"', `href="/style.css?v=${BUILD}"`)
+  .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`);
+const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);
+app.get(["/", "/index.html"], sendIndex);
+app.use(express.static(path.join(__dirname, "..", "public"), { index: false, maxAge: 0 }));
+app.get(/^\/(?!api\/).*/, sendIndex);
 
 app.use((err, req, res, next) => {
   console.error(err);
