@@ -663,7 +663,7 @@ app.get("/healthz", wrap(async (req, res) => {
   await q("SELECT 1");
   res.json({ ok: true });
 }));
-app.use(express.static(path.join(__dirname, "..", "public"), { index: "index.html", maxAge: PROD ? "1h" : 0 }));
+app.use(express.static(path.join(__dirname, "..", "public"), { index: "index.html", maxAge: 0 } /* always revalidate so updates show right away */));
 app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, "..", "public", "index.html")));
 
 app.use((err, req, res, next) => {
