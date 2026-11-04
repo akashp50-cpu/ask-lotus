@@ -107,6 +107,7 @@ function Menu(btn, menu) {
 function closeMenus(except) { menus.forEach((m) => m !== except && m._close()); }
 document.addEventListener("click", (e) => { if (!e.target.closest(".menu")) closeMenus(); });
 Menu($("propBtn"), $("propMenu"));
+$("propBtn").addEventListener("click", (e) => { if ($("propBtn").classList.contains("single")) { e.stopImmediatePropagation(); closeMenus(); } }, true);
 Menu($("avBtn"), $("acctMenu"));
 
 /* ---------- screens ---------- */
@@ -170,6 +171,7 @@ async function enterApp() {
   $("hello").textContent = `Hi ${u.name.split(" ")[0]}, how can I help?`;
   $("modeSeg").hidden = !canManage(); $("appTitle").hidden = canManage();
   $("adminTitle").textContent = isAdmin() ? "Admin" : "Manager";
+  $("gearBtn").hidden = !isAdmin();
   await loadHotel();
   if (!canManage() && location.hash === "#admin") location.hash = "chat";
   mode = null; route();
@@ -177,6 +179,7 @@ async function enterApp() {
 
 function renderPropMenu() {
   const mine = STATE.hotels.filter((h) => STATE.me.hotels.includes(h.id));
+  $("propBtn").classList.toggle("single", mine.length < 2); $("propBtn").setAttribute("aria-haspopup", mine.length < 2 ? "false" : "menu");
   $("propBtn").querySelector(".lbl").textContent = hotelName(STATE.hotel).replace("Hampton Inn Overland Park", "Hampton OP");
   $("propMenu").innerHTML = mine.map((h) => `<button class="mi" role="menuitemradio" data-h="${esc(h.id)}" aria-checked="${h.id === STATE.hotel}" ${h.ready ? "" : "disabled"}>${esc(h.name)} ${h.id === STATE.hotel ? `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="var(--tint)" stroke-width="2" stroke-linecap="round"><path d="M2.5 7.5 5.5 10.5 11.5 3.5"/></svg>` : h.ready ? "" : "<small>Not set up</small>"}</button>`).join("");
   $("propMenu").querySelectorAll("[data-h]:not([disabled])").forEach((b) => (b.onclick = async () => {
@@ -203,6 +206,7 @@ function route() {
   const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat";
   const inEl = $(v); if (prev) $(prev).hidden = true; inEl.hidden = false;
   if (v === "admin") renderAdmin(true);
+  else $("gearBtn").setAttribute("aria-pressed", false);
   if (prev && !RM.matches) { const dir = v === "admin" ? 1 : -1; Spring(0, (p) => { inEl.style.opacity = p; inEl.style.transform = `translateX(${(1 - p) * 24 * dir}px)`; }).to(1, { damping: 1, response: 0.38 }, () => (inEl.style.transform = "")); }
   scrollTo(0, 0);
 }
@@ -277,12 +281,14 @@ $("ask").addEventListener("submit", (e) => { e.preventDefault(); ask($("askInput
 /* ---------- admin ---------- */
 let tab = "sops", cat = "", empFilter = null;
 const TABS = [["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
+// Settings opens from the gear by the account button, not the tab bar.
+$("gearBtn").onclick = () => { closeMenus(); tab = "settings"; if (mode === "admin") renderAdmin(true); else location.hash = "admin"; };
 const gaps = () => STATE.log.filter((l) => (!l.sop || l.fb === "n") && !l.dismissed);
 const weekLog = () => STATE.log.filter((l) => Date.now() - new Date(l.when) < 7 * 864e5);
 
 function renderTabs() {
   const g = gaps().length;
-  $("tabs").innerHTML = TABS.filter((t) => t[0] !== "settings" || isAdmin()).map(([k, l]) => `<button type="button" role="tab" class="press" data-t="${k}" aria-pressed="${k === tab}">${l}${k === "gaps" && g ? `<span class="badge">${g}</span>` : ""}</button>`).join("");
+  $("tabs").innerHTML = TABS.filter((t) => t[0] !== "settings").map(([k, l]) => `<button type="button" role="tab" class="press" data-t="${k}" aria-pressed="${k === tab}">${l}${k === "gaps" && g ? `<span class="badge">${g}</span>` : ""}</button>`).join("");
   $("tabs").querySelectorAll("button").forEach((b) => (b.onclick = () => { tab = b.dataset.t; renderAdmin(true); }));
 }
 function renderCatPills() {
@@ -301,6 +307,7 @@ async function renderAdmin(refresh) {
     } catch (e) { fail(e); }
   }
   renderTabs(); TABS.forEach(([k]) => ($("tab-" + k).hidden = k !== tab));
+  $("gearBtn").setAttribute("aria-pressed", tab === "settings");
   const wk = weekLog(), ans = wk.filter((l) => l.sop).length;
   $("sLive").textContent = STATE.sops.filter((s) => s.status === "live").length;
   $("sQ").textContent = wk.length;

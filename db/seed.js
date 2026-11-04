@@ -6,8 +6,6 @@ const data = require("./seed-data/hampton-sops.json");
 
 const HOTELS = [
   { id: "hop", name: "Hampton Inn Overland Park", ready: true },
-  { id: "hlm", name: "Hotel Lotus Merriam", ready: false },
-  { id: "hls", name: "Hotel Lotus Stadium", ready: false },
 ];
 
 const CONTACTS = [
