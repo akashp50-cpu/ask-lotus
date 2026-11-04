@@ -221,8 +221,12 @@ function routeText(r) {
   const a = contact(r.first), b = r.then && contact(r.then);
   return [a && who(r.first), b && who(r.then)].filter(Boolean).join(r.join === "and" ? " and " : ", then ") || "Not set";
 }
+const TEL_IC = `<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M3.5 1.5h2.2l1.1 3.1-1.5 1.1a8 8 0 0 0 4.4 4.4l1.1-1.5 3.1 1.1v2.2a1.5 1.5 0 0 1-1.6 1.5A11.5 11.5 0 0 1 2 3.1 1.5 1.5 0 0 1 3.5 1.5Z"/></svg>`;
+const PHONE_RE = /(^|[^\d+])((?:\+?1[\s.-]?)?\(?([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4}))(?!\d)/g;
+// Runs on already-escaped text: wraps US phone numbers in a tap-to-call link.
+const telize = (h) => h.replace(PHONE_RE, (m, pre, num, a, b, c) => `${pre}<a class="tel" href="tel:+1${a}${b}${c}">${TEL_IC}${num}</a>`);
 function staffText(t) {
-  return esc(fill(t)).replace(/\[CHECK:[^\]]*\]|\[CHECK\]/g, "").replace(/\[FILL:?[^\]]*\]/g, '<span class="fillMark">ask a manager</span>');
+  return telize(esc(fill(t)).replace(/\[CHECK:[^\]]*\]|\[CHECK\]/g, "").replace(/\[FILL:?[^\]]*\]/g, '<span class="fillMark">ask a manager</span>'));
 }
 const SPARK = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2.5c.4 3.4 2.6 5.6 6 6-3.4.4-5.6 2.6-6 6-.4-3.4-2.6-5.6-6-6 3.4-.4 5.6-2.6 6-6Z"/><path d="M15.5 12c.2 1.6 1.2 2.6 2.8 2.8-1.6.2-2.6 1.2-2.8 2.8-.2-1.6-1.2-2.6-2.8-2.8 1.6-.2 2.6-1.2 2.8-2.8Z"/><path d="M15 2c.15 1.1.85 1.8 2 2-1.15.15-1.85.85-2 2-.15-1.15-.85-1.85-2-2 1.15-.2 1.85-.9 2-2Z"/></svg>`;
 const imgUrl = (id) => `/api/images/${encodeURIComponent(id)}`;
@@ -240,7 +244,7 @@ function appear(el, origin) {
 function sopCard(s, logId, answer) {
   const card = document.createElement("div"); card.className = "a";
   card.innerHTML = `<div class="hd"><div class="eyebrow">${esc(s.cat)}</div><h3>${esc(s.title)}</h3></div>
-    ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${esc(answer)}</div>` : ""}
+    ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${telize(esc(answer))}</div>` : ""}
     <ol class="steps">${s.steps.map((x) => `<li><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
     ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
@@ -258,7 +262,7 @@ function missCard(general, aiDown) {
   card.innerHTML = `<div class="hd"><div class="eyebrow">Not covered yet</div><h3>Check with the manager on duty</h3></div>
     ${general ? `<p class="generalAns"><b>General guidance (not an SOP):</b> ${esc(general)}</p>` : ""}
     <p>${aiDown ? "The assistant is having trouble right now. " : ""}This isn't in ${esc(hotelName(STATE.hotel))}'s procedures. Ask before you answer the guest. Your question was sent to the managers so it gets added.</p>
-    <div class="esc"><b>Who to call</b>${STATE.routes.map((r) => `<span class="who-line">${esc(r.label)}: ${r.id === "emergency" ? "call 911 first, then " : ""}${esc(routeText(r))}</span>`).join("")}</div><div style="height:14px"></div>`;
+    <div class="esc"><b>Who to call</b>${STATE.routes.map((r) => `<span class="who-line">${esc(r.label)}: ${r.id === "emergency" ? "call 911 first, then " : ""}${telize(esc(routeText(r)))}</span>`).join("")}</div><div style="height:14px"></div>`;
   return card;
 }
 let asking = false;
@@ -282,7 +286,15 @@ $("ask").addEventListener("submit", (e) => { e.preventDefault(); ask($("askInput
 let tab = "sops", cat = "", empFilter = null;
 const TABS = [["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
 // Settings opens from the gear by the account button, not the tab bar.
-$("gearBtn").onclick = () => { closeMenus(); tab = "settings"; if (mode === "admin") renderAdmin(true); else location.hash = "admin"; };
+let prevTab = "sops";
+const leaveSettings = () => { tab = prevTab; renderAdmin(true); scrollTo(0, 0); };
+$("gearBtn").onclick = () => {
+  closeMenus();
+  if (tab === "settings" && mode === "admin") return leaveSettings();
+  prevTab = mode === "admin" && tab !== "settings" ? tab : "sops"; tab = "settings";
+  if (mode === "admin") { renderAdmin(true); scrollTo(0, 0); } else location.hash = "admin";
+};
+$("backBtn").onclick = leaveSettings;
 const gaps = () => STATE.log.filter((l) => (!l.sop || l.fb === "n") && !l.dismissed);
 const weekLog = () => STATE.log.filter((l) => Date.now() - new Date(l.when) < 7 * 864e5);
 
@@ -307,7 +319,11 @@ async function renderAdmin(refresh) {
     } catch (e) { fail(e); }
   }
   renderTabs(); TABS.forEach(([k]) => ($("tab-" + k).hidden = k !== tab));
-  $("gearBtn").setAttribute("aria-pressed", tab === "settings");
+  const onSet = tab === "settings";
+  $("gearBtn").setAttribute("aria-pressed", onSet);
+  $("tiles").hidden = $("tabs").hidden = onSet; $("backBtn").hidden = !onSet;
+  $("adminTitle").textContent = onSet ? "Settings" : isAdmin() ? "Admin" : "Manager";
+  $("adminHotel").textContent = onSet ? "AI and answer options" : hotelName(STATE.hotel);
   const wk = weekLog(), ans = wk.filter((l) => l.sop).length;
   $("sLive").textContent = STATE.sops.filter((s) => s.status === "live").length;
   $("sQ").textContent = wk.length;
@@ -318,10 +334,12 @@ async function renderAdmin(refresh) {
 
 function renderList() {
   const f = norm($("filter").value);
-  const rows = STATE.sops.filter((s) => (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id).includes(f)));
+  const rows = STATE.sops.filter((s) => (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id).includes(f)))
+    .sort((a, b) => (a.status === "draft" ? 0 : 1) - (b.status === "draft" ? 0 : 1) || a.id.localeCompare(b.id, "en", { numeric: true }));
   $("libCount").textContent = rows.length + " SOP" + (rows.length === 1 ? "" : "s");
-  $("sopList").innerHTML = rows.length ? rows.map((s) => `<button type="button" class="cell" data-edit="${esc(s.id)}"><span class="dot ${s.status}"></span>
-    <span class="body"><span class="t">${esc(s.title)}</span><span class="m">${esc(s.id)} · v${s.ver} · ${s.status === "live" ? "Live" : "Draft"} · ${fmtD(s.updated)}</span></span>${chev}</button>`).join("") : `<div class="empty">No SOPs match that search.</div>`;
+  $("sopList").innerHTML = rows.length ? rows.map((s) => { const ph = s.steps.filter((x) => x.img).length;
+    return `<button type="button" class="cell" data-edit="${esc(s.id)}"><span class="dot ${s.status}"></span>
+    <span class="body"><span class="t">${esc(s.title)}</span><span class="m">${esc(s.id)} · v${s.ver}${cat ? "" : " · " + esc(s.cat)}${ph ? ` · <span class="ph">${IC.img}${ph}</span>` : ""} · ${fmtD(s.updated)}</span></span>${s.status === "draft" ? `<span class="status draft">Draft</span>` : ""}${chev}</button>`; }).join("") : `<div class="empty">No SOPs match that search.</div>`;
   $("sopList").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => openSop(b.dataset.edit)));
 }
 
@@ -373,8 +391,8 @@ function renderTeam() {
 /* ----- contacts ----- */
 function roleOpts(sel, allowNone) { return (allowNone ? `<option value="">None</option>` : "") + STATE.contacts.map((c) => `<option ${norm(c.role) === norm(sel) ? "selected" : ""}>${esc(c.role)}</option>`).join(""); }
 function renderContacts() {
-  $("routeList").innerHTML = STATE.routes.map((r) => `<div class="cell" style="flex-wrap:wrap"><span class="body" style="min-width:160px"><span class="t">${esc(r.label)}</span><span class="m">${esc(r.sub)}</span></span>
-    <span class="routesel"><select data-r="${esc(r.id)}" data-k="first" aria-label="${esc(r.label)} first call">${roleOpts(r.first)}</select><small>${r.join === "and" ? "and" : "then"}</small><select data-r="${esc(r.id)}" data-k="then" aria-label="${esc(r.label)} second call">${roleOpts(r.then, true)}</select></span></div>`).join("");
+  $("routeList").innerHTML = STATE.routes.map((r) => `<div class="cell route"><span class="body"><span class="t">${esc(r.label)}</span><span class="m">${esc(r.sub)}</span></span>
+    <span class="routesel"><label class="pick"><small>First call</small><select data-r="${esc(r.id)}" data-k="first" aria-label="${esc(r.label)} first call">${roleOpts(r.first)}</select></label><label class="pick"><small>${r.join === "and" ? "And" : "Then"}</small><select data-r="${esc(r.id)}" data-k="then" aria-label="${esc(r.label)} second call">${roleOpts(r.then, true)}</select></label></span></div>`).join("");
   $("routeList").querySelectorAll("select").forEach((s) => (s.onchange = async () => {
     const r = STATE.routes.find((x) => x.id === s.dataset.r);
     try { await api(`/api/routes/${encodeURIComponent(r.id)}`, { method: "PUT", body: { field: s.dataset.k, value: s.value } }); r[s.dataset.k] = s.value; toast(`${r.label}: ${routeText(r)}`); }
@@ -474,9 +492,11 @@ function openSop(id, seedQ, logId) {
   $("f-kw").value = editing ? editing.kw : seedQ ? norm(seedQ) : "";
   $("f-status").setAttribute("aria-checked", editing ? editing.status === "live" : true);
   $("delEd").hidden = !editing; $("delEd").dataset.armed = ""; $("delEd").textContent = "Delete SOP";
-  showSheet("editor");
+  showSheet("editor"); growAll(); requestAnimationFrame(growAll);
 }
 function grow(t) { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
+const growAll = () => document.querySelectorAll("#stepsEd textarea").forEach(grow);
+addEventListener("resize", () => { if (!sheet.hidden) growAll(); });
 function renderSteps(focusIdx) {
   const n = draftSteps.length;
   $("stepsEd").innerHTML = draftSteps.map((s, i) => `<div class="stepRow" data-i="${i}"><span class="num">${i + 1}</span>
