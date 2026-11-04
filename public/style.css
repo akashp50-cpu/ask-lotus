@@ -249,7 +249,7 @@ button.cell:not([disabled]):active{background:var(--fill)}
   -webkit-mask:url(/wm.png) center/contain no-repeat;mask:url(/wm.png) center/contain no-repeat}
 #login,#app{position:relative;z-index:1}
 .logo{background:#0B0B0C;width:72px;height:72px;border-radius:18px;box-shadow:0 6px 20px rgba(0,0,0,.18)}
-.logo img{width:50px;height:auto}
+.logo img{width:54px;height:auto;max-height:50px;object-fit:contain}
 @media (max-width:600px){.tiles{grid-template-columns:repeat(2,1fr)}}
 @media (max-width:380px){.propbtn .lbl{display:none}}
 @media (prefers-reduced-transparency:reduce){.wm{display:none}header,.composer,.menu,.toast,body::before{background:var(--surface);backdrop-filter:none;-webkit-backdrop-filter:none}}
