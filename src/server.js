@@ -112,7 +112,13 @@ function publicSettings(s, full) {
 
 function aiConfig(s) {
   if (!s.key_enc || s.provider === "none") return null;
-  return { provider: s.provider, model: s.model, baseUrl: s.base_url, apiKey: decrypt(s.key_enc) };
+  try {
+    return { provider: s.provider, model: s.model, baseUrl: s.base_url, apiKey: decrypt(s.key_enc) };
+  } catch (e) {
+    // e.g. APP_SECRET changed since the key was saved: fall back to keyword matching
+    console.error("Saved AI key can't be decrypted; re-enter it in Settings.", e.message);
+    return null;
+  }
 }
 
 // SOP text as staff would see it, for the model: contact tokens filled in,

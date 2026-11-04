@@ -190,6 +190,8 @@ async function loadHotel() {
   const d = await api("/api/bootstrap");
   Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, settings: d.settings });
   $("helloSub").textContent = `Answers from ${hotelName(STATE.hotel)} procedures.`;
+  $("aiPill").hidden = !STATE.settings.aiOn;
+  $("askInput").placeholder = STATE.settings.aiOn ? "Ask anything" : "Ask about a procedure";
   $("adminHotel").textContent = hotelName(STATE.hotel);
   renderCatPills();
 }
@@ -218,6 +220,7 @@ function routeText(r) {
 function staffText(t) {
   return esc(fill(t)).replace(/\[CHECK:[^\]]*\]|\[CHECK\]/g, "").replace(/\[FILL:?[^\]]*\]/g, '<span class="fillMark">ask a manager</span>');
 }
+const SPARK = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2.5c.4 3.4 2.6 5.6 6 6-3.4.4-5.6 2.6-6 6-.4-3.4-2.6-5.6-6-6 3.4-.4 5.6-2.6 6-6Z"/><path d="M15.5 12c.2 1.6 1.2 2.6 2.8 2.8-1.6.2-2.6 1.2-2.8 2.8-.2-1.6-1.2-2.6-2.8-2.8 1.6-.2 2.6-1.2 2.8-2.8Z"/><path d="M15 2c.15 1.1.85 1.8 2 2-1.15.15-1.85.85-2 2-.15-1.15-.85-1.85-2-2 1.15-.2 1.85-.9 2-2Z"/></svg>`;
 const imgUrl = (id) => `/api/images/${encodeURIComponent(id)}`;
 $("lightbox").onclick = () => ($("lightbox").hidden = true);
 function openLB(src) { $("lbImg").src = src; $("lightbox").hidden = false; }
@@ -233,7 +236,7 @@ function appear(el, origin) {
 function sopCard(s, logId, answer) {
   const card = document.createElement("div"); card.className = "a";
   card.innerHTML = `<div class="hd"><div class="eyebrow">${esc(s.cat)}</div><h3>${esc(s.title)}</h3></div>
-    ${answer ? `<div class="aiAns"><b>Answer</b>${esc(answer)}</div>` : ""}
+    ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${esc(answer)}</div>` : ""}
     <ol class="steps">${s.steps.map((x) => `<li><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
     ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
@@ -407,11 +410,11 @@ $("saveAi").onclick = async () => {
   if (draftProvider !== st.provider && !key) { toast("Paste the API key for this provider"); $("st-key").focus(); return; }
   try {
     STATE.settings = await api("/api/settings", { hotel: false, method: "PUT", body: { provider: draftProvider, model: $("st-model").value, baseUrl: $("st-url").value, apiKey: key || undefined } });
-    $("st-key").value = ""; toast("AI settings saved"); renderSettings();
+    $("st-key").value = ""; toast("AI settings saved"); renderSettings(); $("aiPill").hidden = !STATE.settings.aiOn;
   } catch (e) { fail(e); }
 };
 $("removeKey").onclick = async () => {
-  try { STATE.settings = await api("/api/settings", { hotel: false, method: "PUT", body: { provider: "none", removeKey: true } }); draftProvider = null; toast("Key removed. Answers use keyword matching."); renderSettings(); } catch (e) { fail(e); }
+  try { STATE.settings = await api("/api/settings", { hotel: false, method: "PUT", body: { provider: "none", removeKey: true } }); draftProvider = null; toast("Key removed. Answers use keyword matching."); renderSettings(); $("aiPill").hidden = true; } catch (e) { fail(e); }
 };
 document.querySelectorAll("[data-set]").forEach((sw) => (sw.onclick = async () => {
   const k = sw.dataset.set, v = !STATE.settings[k];
