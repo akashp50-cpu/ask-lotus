@@ -1,0 +1,9 @@
+{
+  "name": "Ask Lotus",
+  "short_name": "Ask Lotus",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B0B0C",
+  "theme_color": "#0B0B0C",
+  "icons": [{ "src": "/logo-mark.png", "sizes": "180x206", "type": "image/png" }]
+}

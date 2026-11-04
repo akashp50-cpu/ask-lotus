@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0B0C">
+<title>Ask Lotus</title>
+<link rel="icon" href="/logo-mark.png">
+<link rel="apple-touch-icon" href="/logo-mark.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+
+<div class="wm" aria-hidden="true"></div>
+<!-- SIGN IN -->
+<section id="login" class="gut">
+  <div class="col" style="max-width:440px;width:100%">
+    <div class="logo"><img alt="Lotus Hospitality" src="/logo-mark.png"></div>
+    <h1 class="brandname">Ask Lotus<svg class="star" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5c.5 5.6 4.9 10 10.5 10.5-5.6.5-10 4.9-10.5 10.5-.5-5.6-4.9-10-10.5-10.5C7.1 11.5 11.5 7.1 12 1.5Z"/></svg></h1>
+    <p class="sub">Lotus Hospitality · sign in with your work email</p>
+    <form id="loginForm" novalidate>
+      <div class="form">
+        <label class="fld"><span>Email</span><input id="lg-email" type="email" autocomplete="username" placeholder="name@lotusgroupinc.com"></label>
+        <label class="fld"><span>Password</span><input id="lg-pass" type="password" autocomplete="current-password" placeholder="Required"></label>
+      </div>
+      <p class="err" id="lg-err" hidden></p>
+      <button class="bigbtn press" type="submit">Sign In</button>
+    </form>
+    <p class="foot">Forgot your password? Ask your manager to reset it.</p>
+  </div>
+</section>
+
+<!-- SET PASSWORD -->
+<section id="pwScreen" class="gut" hidden>
+  <div class="col" style="max-width:440px;width:100%">
+    <div class="logo"><img alt="Lotus Hospitality" src="/logo-mark.png"></div>
+    <h1>Set your password</h1>
+    <p class="sub">Choose a new password to finish signing in. Use at least 10 characters.</p>
+    <form id="pwForm" novalidate>
+      <div class="form">
+        <label class="fld"><span>Current or temporary password</span><input id="pw-cur" type="password" autocomplete="current-password"></label>
+        <label class="fld"><span>New password</span><input id="pw-new" type="password" autocomplete="new-password"></label>
+        <label class="fld"><span>New password again</span><input id="pw-new2" type="password" autocomplete="new-password"></label>
+      </div>
+      <p class="err" id="pw-err" hidden></p>
+      <button class="bigbtn press" type="submit">Save Password</button>
+      <button class="plain press" type="button" id="pwCancel">Sign Out</button>
+    </form>
+  </div>
+</section>
+
+<!-- APP -->
+<div id="app" hidden>
+<header id="hdr" class="gut">
+  <div class="col navrow">
+    <span class="apptitle brandname" id="appTitle">Ask Lotus<svg class="star" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5c.5 5.6 4.9 10 10.5 10.5-5.6.5-10 4.9-10.5 10.5-.5-5.6-4.9-10-10.5-10.5C7.1 11.5 11.5 7.1 12 1.5Z"/></svg></span>
+    <div class="seg" id="modeSeg" role="tablist" aria-label="Mode">
+      <span class="thumb"></span>
+      <button role="tab" data-v="chat" class="press">Front Desk</button>
+      <button role="tab" data-v="admin" class="press">Manager</button>
+    </div>
+    <div class="navright">
+      <button class="propbtn press" id="propBtn" aria-haspopup="menu" aria-label="Property"><span class="lbl">Hampton OP</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 4.5 6 7.5 9 4.5"/></svg></button>
+      <button class="av press" id="avBtn" aria-haspopup="menu" aria-label="Account"></button>
+    </div>
+  </div>
+</header>
+<div class="menu" id="propMenu" role="menu" hidden></div>
+<div class="menu" id="acctMenu" role="menu" hidden>
+  <div class="who" id="acctWho"></div>
+  <button class="mi" id="changePw" role="menuitem">Change Password</button>
+  <button class="mi red" id="signOut" role="menuitem">Sign Out</button>
+</div>
+
+<main class="gut">
+  <div class="col">
+    <section id="chat">
+      <div class="large"><h1 id="hello">How can I help?</h1><p id="helloSub">Answers from your hotel's procedures.</p></div>
+      <div class="chips" id="chips"></div>
+      <div class="thread" id="thread"></div>
+    </section>
+
+    <section id="admin" hidden>
+      <div class="large"><h1 id="adminTitle">Manager</h1><p id="adminHotel"></p></div>
+      <div class="tiles">
+        <div class="tile"><span>Live SOPs</span><strong id="sLive">0</strong></div>
+        <div class="tile"><span>Questions, 7 days</span><strong id="sQ">0</strong></div>
+        <div class="tile"><span>Answered from SOP</span><strong id="sRate">0%</strong></div>
+        <div class="tile warn"><span>Needs an answer</span><strong id="sGap">0</strong></div>
+      </div>
+      <div class="pills" id="tabs" role="tablist"></div>
+
+      <div id="tab-sops" class="tabp">
+        <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="filter" placeholder="Search SOPs" aria-label="Search SOPs"></div>
+        <div class="pills small" id="cats" style="padding-top:10px"></div>
+        <div class="sec"><span id="libCount">SOPs</span><button id="newSop">New SOP</button></div>
+        <div class="group" id="sopList"></div>
+        <p class="foot">Saving publishes to the front desk chat and bumps the version number.</p>
+      </div>
+
+      <div id="tab-gaps" class="tabp" hidden>
+        <div class="sec"><span>Questions without an answer</span></div>
+        <div class="group" id="gapList"></div>
+        <p class="foot">Write an SOP from a question and the next person who asks gets an answer.</p>
+      </div>
+
+      <div id="tab-activity" class="tabp" hidden>
+        <div id="actFilter"></div>
+        <div class="sec"><span>By employee</span></div>
+        <div class="group" id="byEmp"></div>
+        <div class="sec"><span id="topTitle">Most asked topics</span></div>
+        <div class="group" id="usage"></div>
+        <div class="sec"><span id="feedTitle">Recent questions</span></div>
+        <div class="group" id="feed"></div>
+        <p class="foot">Tap an employee to see only their questions. Spotting who asks about what helps target coaching.</p>
+      </div>
+
+      <div id="tab-team" class="tabp" hidden>
+        <div class="sec"><span id="teamCount">Team</span><button id="newUser">Add Employee</button></div>
+        <div class="group" id="teamList"></div>
+        <p class="foot" id="teamFoot"></p>
+      </div>
+
+      <div id="tab-contacts" class="tabp" hidden>
+        <div class="sec"><span>Who to call</span></div>
+        <div class="group" id="routeList"></div>
+        <p class="foot">Staff see these names and numbers in answers and when a question isn't covered. Change a person here and every SOP updates.</p>
+        <div class="sec"><span>Contacts by role</span><button id="newContact">Add Role</button></div>
+        <div class="group" id="contactList"></div>
+        <p class="foot">In an SOP, type a role in curly brackets, like {AGM} or {Engineer}, and the current person and number appear in its place.</p>
+      </div>
+
+      <div id="tab-settings" class="tabp" hidden>
+        <div class="sec"><span>AI connection</span></div>
+        <div class="group"><div class="conn" id="connRow"></div></div>
+        <div class="sec"><span>Provider</span></div>
+        <div class="group" id="provList" role="radiogroup" aria-label="AI provider"></div>
+        <div class="sec"><span>Model and key</span></div>
+        <div class="form">
+          <label class="fld"><span>Model</span><input id="st-model" autocomplete="off" list="modelList" placeholder="Model name"><datalist id="modelList"></datalist></label>
+          <label class="fld" id="baseUrlFld" hidden><span id="st-urlLabel">Base URL</span><input id="st-url" autocomplete="off" placeholder="https://"></label>
+          <label class="fld"><span>API key</span><input id="st-key" type="password" autocomplete="off" placeholder="Paste a new key to replace the saved one"></label>
+        </div>
+        <p class="hint">The key is encrypted on the server. Only its last 4 characters are ever shown again, and staff devices never see it.</p>
+        <button type="button" class="bigbtn press" id="saveAi">Save AI Settings</button>
+        <button type="button" class="plain press" id="testConn">Test Connection</button>
+        <button type="button" class="danger" id="removeKey" hidden>Remove Key</button>
+        <div class="sec"><span>How answers work</span></div>
+        <div class="form">
+          <div class="rowline"><span>Answer only from SOPs<small>If it isn't in an SOP, send staff to the manager</small></span><button type="button" class="switch" data-set="sourceOnly" role="switch" aria-label="Answer only from SOPs"><i></i></button></div>
+          <div class="rowline"><span>Show SOP source on answers</span><button type="button" class="switch" data-set="showSource" role="switch" aria-label="Show SOP source"><i></i></button></div>
+          <div class="rowline"><span>Keyword fallback<small>Keep answering if the AI provider is down</small></span><button type="button" class="switch" data-set="fallback" role="switch" aria-label="Keyword fallback"><i></i></button></div>
+        </div>
+        <p class="hint">Escalation contacts are on the Contacts tab. These settings apply to every Lotus hotel. Per-hotel keys can be added later if you want AI costs tracked by property.</p>
+      </div>
+      <div style="height:40px"></div>
+    </section>
+  </div>
+</main>
+
+<div class="composer gut" id="composer">
+  <form class="col" id="ask">
+    <input id="askInput" autocomplete="off" placeholder="Ask about a procedure" aria-label="Ask a question">
+    <button class="sendbtn press" type="submit" aria-label="Ask"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button>
+  </form>
+</div>
+</div>
+
+<!-- SHEETS -->
+<div class="scrim" id="scrim" hidden></div>
+<div class="sheet" id="sheet" hidden>
+  <div class="card" id="card">
+    <div class="grab"><i></i></div>
+
+    <form id="editor" hidden>
+      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2 id="edTitle">Edit SOP</h2><button type="submit" class="done">Publish</button></div>
+      <div class="sbody">
+        <div class="form">
+          <label class="fld"><span>Title</span><input id="f-title"></label>
+          <label class="fld"><span>Category</span><select id="f-cat"></select></label>
+        </div>
+        <div class="sec"><span>Steps</span></div>
+        <div class="stepsEd" id="stepsEd"></div>
+        <button type="button" class="plain press" id="addStep" style="margin-top:8px">Add Step</button>
+        <p class="hint">Each step is its own line. Use the arrows to reorder, and the photo button to attach a picture staff will see under that step.</p>
+        <input type="file" id="imgPick" accept="image/*" hidden>
+        <div class="sec"><span>Guest-facing</span></div>
+        <div class="form">
+          <label class="fld"><span>What to say to the guest</span><textarea id="f-script" rows="2"></textarea></label>
+          <label class="fld"><span>Call the manager if</span><textarea id="f-flag" rows="2"></textarea></label>
+        </div>
+        <div class="sec"><span>Matching</span></div>
+        <div class="form"><label class="fld"><span>Ways staff might ask</span><input id="f-kw"></label></div>
+        <p class="hint">Comma separated, e.g. "late check out, stay later, extend checkout".</p>
+        <div class="sec"><span>Visibility</span></div>
+        <div class="form"><div class="rowline"><span>Live for front desk</span><button type="button" class="switch" id="f-status" role="switch" aria-label="Live for front desk"><i></i></button></div></div>
+        <button type="button" class="danger" id="delEd">Delete SOP</button>
+      </div>
+    </form>
+
+    <form id="contactEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2 id="cTitle">Contact</h2><button type="submit" class="done">Save</button></div>
+      <div class="sbody">
+        <div class="form">
+          <label class="fld"><span>Role</span><input id="c-role" autocomplete="off" placeholder="e.g. Night Manager"></label>
+          <label class="fld"><span>Name</span><input id="c-name" autocomplete="off"></label>
+          <label class="fld"><span>Phone</span><input id="c-phone" type="tel" autocomplete="off" placeholder="(913) 555-0100"></label>
+        </div>
+        <p class="hint" id="c-hint"></p>
+        <button type="button" class="danger" id="c-del">Remove Role</button>
+      </div>
+    </form>
+
+    <form id="userEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2 id="uTitle">Employee</h2><button type="submit" class="done" id="uSave">Save</button></div>
+      <div class="sbody">
+        <div class="form">
+          <label class="fld"><span>Full name</span><input id="u-name" autocomplete="off"></label>
+          <label class="fld"><span>Work email</span><input id="u-email" type="email" autocomplete="off"></label>
+        </div>
+        <div class="sec"><span>Role</span></div>
+        <div class="group" id="u-roles" role="radiogroup" aria-label="Role"></div>
+        <div class="sec"><span>Hotels</span></div>
+        <div class="form" id="u-hotels"></div>
+        <div class="sec"><span>Access</span></div>
+        <div class="form"><div class="rowline"><span>Can sign in<small id="u-activeNote">Turn off when someone leaves. Their question history stays.</small></span><button type="button" class="switch" id="u-active" role="switch" aria-label="Can sign in"><i></i></button></div></div>
+        <button type="button" class="plain press" id="u-reset">Reset Password</button>
+        <div class="tempbox" id="u-tempBox" hidden><span>Temporary password</span><code id="u-temp"></code><button type="button" class="pillbtn tint press" id="u-copy">Copy</button><small>Give this to them in person or by text. They'll set their own password the first time they sign in. It won't be shown again.</small></div>
+        <p class="hint" id="u-hint"></p>
+      </div>
+    </form>
+  </div>
+</div>
+<div class="lightbox" id="lightbox" hidden><img alt="" id="lbImg"></div>
+<div class="toast" id="toast" hidden><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span id="toastT"></span></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
