@@ -96,7 +96,7 @@
     {
       "key": "Early check-in fee",
       "hint": "Fee when early check-in is allowed, e.g. $50",
-      "group": null
+      "group": "early_checkin"
     },
     {
       "key": "Entrance lock time",
@@ -359,11 +359,6 @@
       "group": null
     },
     {
-      "key": "Sofa sleeper room type",
-      "hint": "Same room type, as you say it to guests",
-      "group": null
-    },
-    {
       "key": "Toiletries storage",
       "hint": "Where guest toiletries, toilet paper and cups are kept",
       "group": null
@@ -387,6 +382,81 @@
       "key": "Bath amenities storage",
       "hint": "Where shampoo, conditioner, lotion and soap are kept",
       "group": null
+    },
+    {
+      "key": "Cash policy",
+      "hint": "Hotel-wide cash rule as one sentence, e.g. The hotel is completely cashless: no cash for rooms, deposits or the treat shop.",
+      "group": "cash"
+    },
+    {
+      "key": "Cash payment step",
+      "hint": "Step telling staff what to do when a guest wants to pay cash (or the card-only alternative)",
+      "group": "cash"
+    },
+    {
+      "key": "Cash payment script",
+      "hint": "What staff say when a guest asks to pay cash, without quote marks",
+      "group": "cash"
+    },
+    {
+      "key": "Cash deposit step",
+      "hint": "Whether cash can be used for the room and deposit, as one sentence",
+      "group": "cash"
+    },
+    {
+      "key": "Shop payment step",
+      "hint": "How guests pay for items in the lobby shop, as one sentence",
+      "group": "cash"
+    },
+    {
+      "key": "Starting cash note",
+      "hint": "Starting cash for a front desk shift, shown inside the Start Shift step, e.g. Starting Cash $0",
+      "group": "cash"
+    },
+    {
+      "key": "Card machine down cash step",
+      "hint": "What staff do about cash when the card machine is down, as one sentence",
+      "group": "cash"
+    },
+    {
+      "key": "Early check-in cutoff",
+      "hint": "Time before which early check-in rules apply, e.g. 12 PM",
+      "group": "early_checkin"
+    },
+    {
+      "key": "Early check-in occupancy limit",
+      "hint": "Occupancy above which the early check-in fee applies, e.g. 70%",
+      "group": "early_checkin"
+    },
+    {
+      "key": "Rollaway policy",
+      "hint": "Whether rollaways are offered, as one sentence, e.g. No rollaways are available.",
+      "group": "rooms_policy"
+    },
+    {
+      "key": "Rollaway script",
+      "hint": "What staff say when a guest asks for a sofa bed or rollaway, no quote marks",
+      "group": "rooms_policy"
+    },
+    {
+      "key": "Rollaway crib script",
+      "hint": "What staff say about rollaways and cribs together, no quote marks",
+      "group": "rooms_policy"
+    },
+    {
+      "key": "Pack-and-play policy",
+      "hint": "Whether pack-and-plays are stocked, as one sentence, e.g. No pack-and-plays are stocked.",
+      "group": "rooms_policy"
+    },
+    {
+      "key": "Connecting rooms policy",
+      "hint": "Whether connecting rooms exist, as one sentence",
+      "group": "rooms_policy"
+    },
+    {
+      "key": "Connecting rooms script",
+      "hint": "What staff say when a guest asks for connecting rooms, no quote marks",
+      "group": "rooms_policy"
     }
   ],
   "hampton_details": {
@@ -446,12 +516,26 @@
     "Fridge and microwave rooms": "KXLX King Deluxe rooms",
     "Fridge and microwave storage": "217 Backup Storage has fridges and 517 Storage has microwaves",
     "Sofa sleeper rooms": "KXTY King Study rooms",
-    "Sofa sleeper room type": "King Study rooms",
     "Toiletries storage": "221 Storage",
     "Pillow storage": "217 Backup Storage",
     "Crib storage": "317 Storage",
     "Cribs on hand": "2 in 317 Storage",
-    "Bath amenities storage": "5th floor new storage"
+    "Bath amenities storage": "5th floor new storage",
+    "Cash policy": "The hotel is completely cashless: no cash for rooms, deposits or the treat shop.",
+    "Cash payment step": "Offer a credit card or debit card in the guest's name.",
+    "Cash payment script": "We're a cashless hotel, so we'll need a card. If someone else is paying, I can send them a quick form.",
+    "Cash deposit step": "The hotel is cashless. Cash can't be used for the room or the deposit.",
+    "Shop payment step": "The hotel is cashless: post the item to the room or take a card.",
+    "Starting cash note": "Starting Cash $0, the hotel is cashless",
+    "Card machine down cash step": "The hotel is cashless, so cash can't replace it.",
+    "Early check-in cutoff": "12 PM",
+    "Early check-in occupancy limit": "70%",
+    "Rollaway policy": "No rollaways are available.",
+    "Rollaway script": "We don't have rollaways, but our King Study rooms have a sofa sleeper.",
+    "Rollaway crib script": "We don't have rollaways, but I can bring a crib up for you at no charge.",
+    "Pack-and-play policy": "No pack-and-plays are stocked.",
+    "Connecting rooms policy": "The hotel doesn't offer connecting rooms.",
+    "Connecting rooms script": "We don't have connecting rooms, but I can put you right next to each other."
   },
   "sops": [
     {
@@ -551,7 +635,7 @@
           "hk": null
         },
         {
-          "t": "If one is ready, check the guest in. Before 12 PM when occupancy is above 70%, there's a {Early check-in fee} early check-in fee.",
+          "t": "If one is ready, check the guest in. Before {Early check-in cutoff} when occupancy is above {Early check-in occupancy limit}, there's a {Early check-in fee} early check-in fee.",
           "hk": null
         },
         {
@@ -788,7 +872,7 @@
           "hk": null
         },
         {
-          "t": "The hotel is cashless. Cash can't be used for the room or the deposit.",
+          "t": "{Cash deposit step}",
           "hk": null
         },
         {
@@ -2120,11 +2204,11 @@
       "kw": "cash, pay cash, cash only, cashless, no card",
       "steps": [
         {
-          "t": "The hotel is completely cashless: no cash for rooms, deposits or the {Market name}.",
+          "t": "{Cash policy}",
           "hk": null
         },
         {
-          "t": "Offer a credit card or debit card in the guest's name.",
+          "t": "{Cash payment step}",
           "hk": null
         },
         {
@@ -2132,7 +2216,7 @@
           "hk": null
         }
       ],
-      "script": "\"We're a cashless hotel, so we'll need a card. If someone else is paying, I can send them a quick form.\"",
+      "script": "\"{Cash payment script}\"",
       "script_hk": null,
       "flag": "",
       "flag_hk": null,
@@ -2398,7 +2482,7 @@
       "kw": "treat shop, snacks, market, pantry, buy snack",
       "steps": [
         {
-          "t": "The hotel is cashless: post the item to the room or take a card.",
+          "t": "{Shop payment step}",
           "hk": null
         },
         {
@@ -2677,7 +2761,7 @@
       "kw": "rollaway, sofa bed, extra bed, crib",
       "steps": [
         {
-          "t": "No rollaways are available.",
+          "t": "{Rollaway policy}",
           "hk": null
         },
         {
@@ -2689,7 +2773,7 @@
           "hk": null
         }
       ],
-      "script": "\"We don't have rollaways, but our {Sofa sleeper room type} have a sofa sleeper.\"",
+      "script": "\"{Rollaway script}\"",
       "script_hk": null,
       "flag": "",
       "flag_hk": null,
@@ -2735,7 +2819,7 @@
       "kw": "connecting rooms, adjoining, rooms next to each other",
       "steps": [
         {
-          "t": "The hotel doesn't offer connecting rooms.",
+          "t": "{Connecting rooms policy}",
           "hk": null
         },
         {
@@ -2747,7 +2831,7 @@
           "hk": null
         }
       ],
-      "script": "\"We don't have connecting rooms, but I can put you right next to each other.\"",
+      "script": "\"{Connecting rooms script}\"",
       "script_hk": null,
       "flag": "",
       "flag_hk": null,
@@ -3418,7 +3502,7 @@
       "kw": "crib, rollaway, pack and play, baby bed, playpen",
       "steps": [
         {
-          "t": "No rollaways are available.",
+          "t": "{Rollaway policy}",
           "hk": null
         },
         {
@@ -3426,7 +3510,7 @@
           "hk": null
         },
         {
-          "t": "No pack-and-plays are stocked.",
+          "t": "{Pack-and-play policy}",
           "hk": null
         },
         {
@@ -3434,7 +3518,7 @@
           "hk": null
         }
       ],
-      "script": "\"We don't have rollaways, but I can bring a crib up for you at no charge.\"",
+      "script": "\"{Rollaway crib script}\"",
       "script_hk": null,
       "flag": "",
       "flag_hk": null,
@@ -4954,8 +5038,8 @@
           "hk": null
         },
         {
-          "t": "PEP: Dashboard > Start Shift (Starting Cash $0, the hotel is cashless).",
-          "hk": "HotelKey: Dashboard > Start Shift (Starting Cash $0, the hotel is cashless)."
+          "t": "PEP: Dashboard > Start Shift ({Starting cash note}).",
+          "hk": "HotelKey: Dashboard > Start Shift ({Starting cash note})."
         }
       ],
       "script": "",
@@ -6607,7 +6691,7 @@
           "hk": null
         },
         {
-          "t": "The hotel is cashless, so cash can't replace it.",
+          "t": "{Card machine down cash step}",
           "hk": null
         }
       ],
@@ -7160,5 +7244,64 @@
       "requires": null,
       "hk_status": "same"
     }
-  ]
+  ],
+  "setup_defaults": {
+    "cash": {
+      "no": {
+        "Cash policy": "The hotel is completely cashless: no cash for rooms, deposits or the treat shop.",
+        "Cash payment step": "Offer a credit card or debit card in the guest's name.",
+        "Cash payment script": "We're a cashless hotel, so we'll need a card. If someone else is paying, I can send them a quick form.",
+        "Cash deposit step": "The hotel is cashless. Cash can't be used for the room or the deposit.",
+        "Shop payment step": "The hotel is cashless: post the item to the room or take a card.",
+        "Starting cash note": "Starting Cash $0, the hotel is cashless",
+        "Card machine down cash step": "The hotel is cashless, so cash can't replace it."
+      },
+      "yes": {
+        "Cash policy": "The hotel accepts cash. [FILL: cash rules for rooms, deposits and the shop]",
+        "Cash payment step": "Accept cash, count it twice in front of the guest, and put it in the drawer. [FILL: cash handling steps]",
+        "Cash payment script": "We can take cash for that. [FILL: what to tell the guest about cash and deposits]",
+        "Cash deposit step": "Cash can be used for the room and the deposit. [FILL: cash deposit rules]",
+        "Shop payment step": "Post the item to the room, or take a card or cash. [FILL: shop cash handling]",
+        "Starting cash note": "Starting Cash [FILL: starting drawer amount]",
+        "Card machine down cash step": "Cash can be taken while the machine is down. [FILL: cash backup procedure]"
+      }
+    },
+    "early_checkin": {
+      "default": {
+        "Early check-in cutoff": "[FILL: early check-in cutoff time]",
+        "Early check-in occupancy limit": "[FILL: occupancy percentage]",
+        "Early check-in fee": "[FILL: early check-in fee]"
+      }
+    },
+    "rollaways": {
+      "no": {
+        "Rollaway policy": "No rollaways are available.",
+        "Rollaway script": "We don't have rollaways, but our King Study rooms have a sofa sleeper.",
+        "Rollaway crib script": "We don't have rollaways, but I can bring a crib up for you at no charge."
+      },
+      "yes": {
+        "Rollaway policy": "Rollaways are available. [FILL: rollaway fee, where they are stored and how to request one]",
+        "Rollaway script": "We can bring a rollaway up for you. [FILL: rollaway fee and how long it takes]",
+        "Rollaway crib script": "I can bring a crib or a rollaway up for you. [FILL: fees, if any]"
+      }
+    },
+    "pack_and_plays": {
+      "no": {
+        "Pack-and-play policy": "No pack-and-plays are stocked."
+      },
+      "yes": {
+        "Pack-and-play policy": "Pack-and-plays are available. [FILL: fee, storage location and how to request one]"
+      }
+    },
+    "connecting_rooms": {
+      "no": {
+        "Connecting rooms policy": "The hotel doesn't offer connecting rooms.",
+        "Connecting rooms script": "We don't have connecting rooms, but I can put you right next to each other."
+      },
+      "yes": {
+        "Connecting rooms policy": "Connecting rooms are available on request. [FILL: which rooms connect and how to request them]",
+        "Connecting rooms script": "We can try to connect your rooms. [FILL: how to request, and any fee]"
+      }
+    }
+  }
 }

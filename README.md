@@ -15,13 +15,15 @@ npm start              # http://localhost:3000
 
 ## Roles
 - **Front Desk**: chat only
-- **Manager**: SOPs, team, contacts, activity for their hotels
-- **Admin**: everything, including AI settings
+- **Manager**: SOPs, team (Front Desk and Manager), contacts, activity for their hotels
+- **GM**: everything a Manager does, plus setup, turning SOPs on and off, hotel details, master updates, and users up to GM at their hotels
+- **Owner**: everything at every hotel: add hotels, assign GMs, the master library, AI settings (the old `Admin` role)
 
 ## AI
-Off by default: answers use keyword matching. An Admin can add a key for Anthropic, OpenAI, Google, Azure OpenAI or any OpenAI-compatible endpoint in Settings. The model only picks which SOP answers; staff always see the SOP text as managers wrote it. Keys are encrypted with `APP_SECRET`.
+Off by default: answers use keyword matching. An Owner can add a key for Anthropic, OpenAI, Google, Azure OpenAI or any OpenAI-compatible endpoint in Settings. The model only picks which SOP answers; staff always see the SOP text as managers wrote it. Keys are encrypted with `APP_SECRET`.
 
 ## SOP text tokens
 - `{AGM}`, `{GM}`, any contact role in braces: replaced with name, role and phone from Contacts
+- `{Detail name}`: replaced with the hotel's own detail (e.g. `{Breakfast hours}`); shows "ask a manager" until set. Contacts win if a name matches both
 - `[FILL: ...]`: shown to staff as "ask a manager" until filled in
 - `[CHECK ...]`: manager note, hidden from staff

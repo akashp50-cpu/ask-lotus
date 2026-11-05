@@ -11,10 +11,15 @@ const PROVIDERS = {
 };
 
 const TIMEOUT_MS = 15000;
+const fs = require("fs");
 
-async function post(url, headers, body) {
+// Test hook: with AI_MOCK_FILE set (never in production) complete() returns that file's text instead of calling a provider.
+const mockFile = () => (process.env.NODE_ENV !== "production" && process.env.AI_MOCK_FILE) || "";
+const mockEnabled = () => !!mockFile();
+
+async function post(url, headers, body, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const r = await fetch(url, {
       method: "POST",
@@ -34,14 +39,17 @@ async function post(url, headers, body) {
   }
 }
 
-// Send one system + user message, get text back.
-async function complete(cfg, system, user) {
+// Send one system + user message, get text back. opts: { maxTokens (default 400), timeoutMs (default 15s) }.
+async function complete(cfg, system, user, opts = {}) {
+  if (mockEnabled()) return fs.readFileSync(mockFile(), "utf8");
   const { provider, model, baseUrl, apiKey } = cfg;
+  const maxTokens = opts.maxTokens || 400, timeoutMs = opts.timeoutMs || TIMEOUT_MS;
   if (provider === "anthropic") {
     const j = await post(
       "https://api.anthropic.com/v1/messages",
       { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      { model: model || PROVIDERS.anthropic.defaultModel, max_tokens: 400, system, messages: [{ role: "user", content: user }] }
+      { model: model || PROVIDERS.anthropic.defaultModel, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] },
+      timeoutMs
     );
     return (j.content || []).map((c) => c.text || "").join("");
   }
@@ -50,7 +58,8 @@ async function complete(cfg, system, user) {
     const j = await post(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
       { "x-goog-api-key": apiKey },
-      { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }] }
+      { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }], ...(opts.maxTokens ? { generationConfig: { maxOutputTokens: maxTokens } } : {}) },
+      timeoutMs
     );
     return j.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
   }
@@ -66,9 +75,9 @@ async function complete(cfg, system, user) {
     url = baseUrl.replace(/\/+$/, "") + "/chat/completions";
   }
   if (provider !== "azure" && !model) throw new Error("Enter a model name in Settings");
-  const body = { messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: 400 };
+  const body = { messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: maxTokens };
   if (model) body.model = model;
-  const j = await post(url, headers, body);
+  const j = await post(url, headers, body, timeoutMs);
   return j.choices?.[0]?.message?.content || "";
 }
 
@@ -83,9 +92,9 @@ function parseJSON(text) {
 }
 
 // candidates: [{id,title,category,steps:[{t}]}]; catalog: every live SOP id + title
-async function pickSop(cfg, question, candidates, catalog, { sourceOnly }) {
+async function pickSop(cfg, question, candidates, catalog, { sourceOnly, hotelName }) {
   const system = [
-    "You route front desk questions at a Hampton Inn to the hotel's standard operating procedures (SOPs).",
+    `You route front desk questions at ${hotelName || "a hotel"} to the hotel's standard operating procedures (SOPs).`,
     "Pick the ONE SOP that best answers the staff member's question. Use only the SOP ids given.",
     'Reply with JSON only: {"sop_id": "XX-00"} or {"sop_id": null} if none fits.',
     sourceOnly
@@ -134,4 +143,4 @@ async function testConnection(cfg) {
   return { ms: Date.now() - t0, reply: String(text).trim().slice(0, 40) };
 }
 
-module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection };
+module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled };

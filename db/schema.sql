@@ -3,16 +3,23 @@
 CREATE TABLE IF NOT EXISTS hotels (
   id          TEXT PRIMARY KEY,               -- short code, e.g. 'hop'
   name        TEXT NOT NULL,
-  ready       BOOLEAN NOT NULL DEFAULT FALSE, -- has SOPs and is open to staff
+  ready       BOOLEAN NOT NULL DEFAULT FALSE, -- has SOPs and is open to staff (kept in sync: ready = setup = 'live')
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Multi-hotel columns (idempotent).
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS brand   TEXT  NOT NULL DEFAULT 'independent';  -- 'hilton' | 'independent'
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS system  TEXT  NOT NULL DEFAULT 'hotelkey';     -- 'pep' | 'hotelkey'
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS setup   TEXT  NOT NULL DEFAULT 'new';          -- 'new' | 'setup' | 'live'
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}';           -- setup answers {breakfast,pool,pets,laundry,market}
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}';           -- hotel details, key -> value
 
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,
   name            TEXT NOT NULL,
   username        TEXT,                        -- sign-in name, stored lower-case (NOT NULL enforced below)
   email           TEXT UNIQUE,                 -- optional, stored lower-case
-  role            TEXT NOT NULL CHECK (role IN ('Front Desk','Manager','Admin')),
+  role            TEXT NOT NULL CHECK (role IN ('Front Desk','Manager','GM','Owner')),
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','off')),
   password_hash   TEXT NOT NULL,
   must_change_pw  BOOLEAN NOT NULL DEFAULT TRUE,
@@ -63,11 +70,109 @@ CREATE TABLE IF NOT EXISTS sops (
   script      TEXT NOT NULL DEFAULT '',
   flag        TEXT NOT NULL DEFAULT '',
   keywords    TEXT NOT NULL DEFAULT '',
-  status      TEXT NOT NULL DEFAULT 'live' CHECK (status IN ('live','draft')),
+  status      TEXT NOT NULL DEFAULT 'live' CHECK (status IN ('live','draft','off')),
   version     INTEGER NOT NULL DEFAULT 1,
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
   PRIMARY KEY (hotel_id, id)
+);
+
+-- Link each hotel copy to the Owner's master library (null = hotel-only SOP).
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS master_id      TEXT;
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS master_version INTEGER;
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS kept           BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Widen the status check to include 'off'. Replaces the old constraint only when it lacks 'off'.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT conname FROM pg_constraint
+            WHERE conrelid = 'sops'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%status%' AND pg_get_constraintdef(oid) NOT LIKE '%off%' LOOP
+    EXECUTE format('ALTER TABLE sops DROP CONSTRAINT %I', r.conname);
+  END LOOP;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'sops'::regclass AND contype = 'c'
+                    AND pg_get_constraintdef(oid) LIKE '%status%' AND pg_get_constraintdef(oid) LIKE '%off%') THEN
+    ALTER TABLE sops ADD CONSTRAINT sops_status_check CHECK (status IN ('live','draft','off'));
+  END IF;
+END $$;
+
+-- Roles: Front Desk < Manager < GM < Owner. Old 'Admin' becomes 'Owner'.
+-- Drop the old check first, move the rows, then add the new check.
+DO $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN SELECT conname FROM pg_constraint
+            WHERE conrelid = 'users'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%role%' AND pg_get_constraintdef(oid) NOT LIKE '%Owner%' LOOP
+    EXECUTE format('ALTER TABLE users DROP CONSTRAINT %I', r.conname);
+  END LOOP;
+  UPDATE users SET role = 'Owner' WHERE role = 'Admin';
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                  WHERE conrelid = 'users'::regclass AND contype = 'c'
+                    AND pg_get_constraintdef(oid) LIKE '%role%' AND pg_get_constraintdef(oid) LIKE '%Owner%') THEN
+    ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('Front Desk','Manager','GM','Owner'));
+  END IF;
+END $$;
+
+-- The Owner's master library. Hotels get their own copy of each SOP (sops.master_id).
+CREATE TABLE IF NOT EXISTS master_categories (
+  name    TEXT PRIMARY KEY,
+  prefix  TEXT NOT NULL,
+  sort    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS master_sops (
+  id          TEXT PRIMARY KEY,                -- same ids as before, e.g. 'CI-01'
+  category    TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  steps       JSONB NOT NULL DEFAULT '[]',     -- [{ "t": PEP/default text, "hk": HotelKey text | null, "img": id | null }]
+  script      TEXT NOT NULL DEFAULT '',
+  script_hk   TEXT,
+  flag        TEXT NOT NULL DEFAULT '',
+  flag_hk     TEXT,
+  keywords    TEXT NOT NULL DEFAULT '',
+  applies     TEXT NOT NULL DEFAULT 'all' CHECK (applies IN ('all','hilton')),
+  requires    TEXT CHECK (requires IN ('breakfast','pool','pets','laundry','market')),
+  hk_status   TEXT NOT NULL DEFAULT 'same' CHECK (hk_status IN ('same','draft','approved')),
+  version     INTEGER NOT NULL DEFAULT 1,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by  INTEGER REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- 'live' = offered to hotels; 'draft' = being written (imports and new SOPs start here), not offered until the Owner publishes it.
+ALTER TABLE master_sops ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'live';
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'master_sops'::regclass AND conname = 'master_sops_status_check') THEN
+    ALTER TABLE master_sops ADD CONSTRAINT master_sops_status_check CHECK (status IN ('live','draft'));
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS master_history (
+  id          SERIAL PRIMARY KEY,
+  master_id   TEXT NOT NULL,
+  version     INTEGER NOT NULL,
+  snapshot    JSONB NOT NULL,
+  changed_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  changed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS master_history_idx ON master_history (master_id, version);
+
+-- Hotel detail names the master library expects (e.g. "Breakfast hours"), shown in setup and the master editor.
+CREATE TABLE IF NOT EXISTS master_details (
+  key      TEXT PRIMARY KEY,
+  example  TEXT NOT NULL DEFAULT '',
+  sort     INTEGER NOT NULL DEFAULT 0
+);
+-- Amenity a detail belongs to ('breakfast','pool','pets','laundry','market'), null = general hotel detail.
+ALTER TABLE master_details ADD COLUMN IF NOT EXISTS grp TEXT;
+
+-- Small named JSON values that come with the master file (e.g. 'setup_defaults': the wording the setup yes/no questions fill in).
+CREATE TABLE IF NOT EXISTS master_meta (
+  key    TEXT PRIMARY KEY,
+  value  JSONB NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS sop_history (
@@ -146,3 +251,17 @@ CREATE TABLE IF NOT EXISTS "session" (
   "expire" TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
+
+-- Import batches (Owner -> master library, GM -> their hotel). The review survives a reload.
+-- hotel_id NULL = the master library. result = { matches, new, details, meta }, each item carrying its own "state".
+CREATE TABLE IF NOT EXISTS imports (
+  id          SERIAL PRIMARY KEY,
+  hotel_id    TEXT REFERENCES hotels(id) ON DELETE CASCADE,
+  created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  filenames   TEXT[] NOT NULL DEFAULT '{}',
+  kind        TEXT NOT NULL DEFAULT 'ai' CHECK (kind IN ('ai','sheet')),
+  status      TEXT NOT NULL DEFAULT 'review' CHECK (status IN ('review','done','discarded')),
+  result      JSONB NOT NULL DEFAULT '{}',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS imports_hotel_idx ON imports (hotel_id, created_at DESC);

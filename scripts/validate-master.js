@@ -10,7 +10,7 @@ const err = (m) => errors.push(m);
 const CONTACT_ROLES = new Set(['AGM', 'GM', 'COO', 'Engineer', 'Head Housekeeper']);
 const APPLIES = new Set(['all', 'hilton']);
 const REQUIRES = new Set([null, 'breakfast', 'pool', 'pets', 'laundry', 'market']);
-const GROUPS = new Set([null, 'breakfast', 'pool', 'pets', 'laundry', 'market']);
+const GROUPS = new Set([null, 'cash', 'early_checkin', 'rooms_policy', 'breakfast', 'pool', 'pets', 'laundry', 'market']);
 const STATUS = new Set(['same', 'draft']);
 const TOKEN = /\{([^{}]+)\}/g;
 

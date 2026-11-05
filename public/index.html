@@ -63,6 +63,7 @@
     </div>
     <div class="navright">
       <button class="propbtn press" id="propBtn" aria-haspopup="menu" aria-label="Property"><span class="lbl">Hampton OP</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 4.5 6 7.5 9 4.5"/></svg></button>
+      <button class="gearbtn press" id="ownerBtn" aria-label="Hotels and master library" title="Hotels and master library" aria-pressed="false" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V6.5a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 15 6.5V21"/><path d="M15 10h3.5A1.5 1.5 0 0 1 20 11.5V21"/><path d="M2.5 21h19"/><path d="M8 9h3M8 13h3M8 17h3"/></svg></button>
       <button class="gearbtn press" id="gearBtn" aria-label="Settings" title="Settings" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>
       <button class="av press" id="avBtn" aria-haspopup="menu" aria-label="Account"></button>
     </div>
@@ -84,7 +85,7 @@
     </section>
 
     <section id="admin" hidden>
-      <div class="large"><button type="button" class="backbtn press" id="backBtn" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back</button><h1 id="adminTitle">Manager</h1><p id="adminHotel"></p></div>
+      <div class="large"><button type="button" class="backbtn press" id="backBtn" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back</button><button type="button" class="backbtn press" id="toSetup" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back to setup</button><h1 id="adminTitle">Manager</h1><p id="adminHotel"></p></div>
       <div class="tiles" id="tiles">
         <div class="tile"><span>Live SOPs</span><strong id="sLive">0</strong></div>
         <div class="tile"><span>Questions, 7 days</span><strong id="sQ">0</strong></div>
@@ -93,7 +94,11 @@
       </div>
       <div class="pills" id="tabs" role="tablist"></div>
 
-      <div id="tab-sops" class="tabp">
+      <div id="tab-home" class="tabp">
+        <div id="homeBody"></div>
+      </div>
+
+      <div id="tab-sops" class="tabp" hidden>
         <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="filter" placeholder="Search SOPs" aria-label="Search SOPs"></div>
         <div class="pills small" id="cats" style="padding-top:10px"></div>
         <div class="sec"><span id="libCount">SOPs</span><button id="newSop">New SOP</button></div>
@@ -158,6 +163,41 @@
       </div>
       <div style="height:40px"></div>
     </section>
+
+    <section id="owner" hidden>
+      <div class="large"><h1 id="ownerTitle">Hotels</h1><p id="ownerSub"></p></div>
+      <div class="pills" id="ownerTabs" role="tablist"></div>
+
+      <div id="ownerHotels">
+        <div class="sec"><span id="hotelCount">Hotels</span><button id="newHotel">Add a hotel</button></div>
+        <div class="hcards" id="hotelCards"></div>
+        <p class="foot">Open a hotel to work in it like its manager. Invite a GM and they get a temporary password and only see their own hotel.</p>
+      </div>
+
+      <div id="ownerMaster" hidden>
+        <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="mFilter" placeholder="Search the master library" aria-label="Search the master library"></div>
+        <div class="pills small" id="masterFilters" style="padding-top:10px"></div>
+        <div class="sec"><span id="masterCount">SOPs</span><button id="newMaster">New SOP</button></div>
+        <div class="group" id="masterList"></div>
+        <p class="foot">Editing a master SOP bumps its version. Each hotel then sees it as an update to accept or keep their own. New and imported SOPs start as drafts: hotels only see them once you publish.</p>
+        <div class="sec" id="masterDetailsSec" hidden><span>Hotel details used in SOPs</span></div>
+        <div class="group" id="masterDetails"></div>
+      </div>
+      <div id="ownerImport" hidden></div>
+      <div style="height:40px"></div>
+    </section>
+
+    <section id="import" hidden>
+      <div class="large"><button type="button" class="backbtn press" id="impBack"><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg><span>Home</span></button><h1>Import</h1><p id="impSub"></p></div>
+      <div id="impBody"></div>
+      <div style="height:40px"></div>
+    </section>
+
+    <section id="setup" hidden>
+      <div class="large"><button type="button" class="backbtn press" id="setupBack" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Hotels</button><h1 id="setupTitle">Set up</h1><p id="setupSub"></p></div>
+      <div id="suBody"></div>
+      <div style="height:40px"></div>
+    </section>
   </div>
 </main>
 
@@ -197,8 +237,54 @@
         <div class="form"><label class="fld"><span>Ways staff might ask</span><input id="f-kw"></label></div>
         <p class="hint">Comma separated, e.g. "late check out, stay later, extend checkout".</p>
         <div class="sec"><span>Visibility</span></div>
-        <div class="form"><div class="rowline"><span>Live for front desk</span><button type="button" class="switch" id="f-status" role="switch" aria-label="Live for front desk"><i></i></button></div></div>
+        <div class="form"><div class="rowline"><span>Live for front desk<small id="f-statusNote"></small></span><button type="button" class="switch" id="f-status" role="switch" aria-label="Live for front desk"><i></i></button></div></div>
         <button type="button" class="danger" id="delEd">Delete SOP</button>
+      </div>
+    </form>
+
+    <form id="hotelEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2>Add a hotel</h2><button type="submit" class="done">Add</button></div>
+      <div class="sbody">
+        <div class="form"><label class="fld"><span>Hotel name</span><input id="h-name" autocomplete="off" placeholder="e.g. Hotel Lotus Westport"></label></div>
+        <div class="sec"><span>Brand</span></div>
+        <div class="group" id="h-brand" role="radiogroup" aria-label="Brand"></div>
+        <div class="sec"><span>Property system</span></div>
+        <div class="group" id="h-system" role="radiogroup" aria-label="Property system"></div>
+        <p class="hint">The hotel starts as Not started. Its GM sets it up, picks which procedures apply, and goes live.</p>
+      </div>
+    </form>
+
+    <form id="masterEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2 id="mTitleBar">Master SOP</h2><button type="submit" class="done">Save</button></div>
+      <div class="sbody">
+        <div class="form">
+          <label class="fld"><span>Title</span><input id="m-title"></label>
+          <label class="fld"><span>Category</span><select id="m-cat"></select></label>
+          <label class="fld"><span>Applies to</span><select id="m-applies"><option value="all">Every hotel</option><option value="hilton">Hilton hotels only</option></select></label>
+          <label class="fld"><span>Only if the hotel has</span><select id="m-requires"><option value="">None</option><option value="breakfast">Breakfast</option><option value="pool">Pool</option><option value="pets">Pets</option><option value="laundry">Laundry</option><option value="market">Market</option></select></label>
+        </div>
+        <div class="sec"><span>Wording</span></div>
+        <div class="seg viewseg" id="mView" role="tablist" aria-label="Wording view"><span class="thumb"></span><button type="button" role="tab" data-v="pep" class="press">PEP</button><button type="button" role="tab" data-v="hk" class="press">HotelKey</button></div>
+        <p class="hint" id="mViewHint"></p>
+        <div class="stepsEd" id="mSteps" style="margin-top:10px"></div>
+        <button type="button" class="plain press" id="mAddStep" style="margin-top:8px">Add Step</button>
+        <div class="sec"><span>Guest-facing</span></div>
+        <div class="form">
+          <label class="fld"><span>What to say to the guest</span><textarea id="m-script" rows="2"></textarea></label>
+          <label class="fld" hidden><span>What to say to the guest (HotelKey)</span><textarea id="m-script-hk" rows="2" placeholder="Same as PEP"></textarea></label>
+          <label class="fld"><span>Call the manager if</span><textarea id="m-flag" rows="2"></textarea></label>
+          <label class="fld" hidden><span>Call the manager if (HotelKey)</span><textarea id="m-flag-hk" rows="2" placeholder="Same as PEP"></textarea></label>
+        </div>
+        <div class="sec"><span>Matching</span></div>
+        <div class="form"><label class="fld"><span>Ways staff might ask</span><input id="m-kw"></label></div>
+        <p class="hint">Comma separated. Type {Role} for a contact or {Detail name} for a hotel detail, like {Breakfast hours}. Each hotel fills these in.</p>
+        <div class="sec" id="mStatusRow"><span>Status</span><span id="mStatusState"></span></div>
+        <p class="hint" id="mStatusHint" style="margin-top:0"></p>
+        <button type="button" class="plain press" id="mPublish" style="margin-top:4px" hidden>Publish to hotels</button>
+        <div class="sec" id="mHkRow"><span>HotelKey wording</span><span id="mHkState"></span></div>
+        <button type="button" class="plain press" id="mApprove" style="margin-top:4px" hidden>Approve HotelKey wording</button>
+        <div class="sec"><span>Preview</span></div>
+        <div class="group prev" id="mPreview"></div>
       </div>
     </form>
 
