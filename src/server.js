@@ -52,10 +52,19 @@ const bad = (res, code, msg) => res.status(code).json({ error: msg });
 const RANK = { "Front Desk": 0, Manager: 1, Admin: 2 };
 const tempPassword = () => crypto.randomBytes(9).toString("base64").replace(/[+/=]/g, "").slice(0, 10) + "!7";
 const cleanEmail = (e) => String(e || "").trim().toLowerCase();
+const cleanUsername = (u) => String(u || "").trim().toLowerCase();
+// Returns an error message, or null when the username is acceptable.
+const usernameError = (u) =>
+  !u ? "Add a username."
+  : u.length < 3 || u.length > 32 ? "Username must be 3 to 32 characters."
+  : !/^[a-z0-9._-]+$/.test(u) ? "Username can use letters, numbers, dots, dashes and underscores only."
+  : null;
+// Email is optional: returns an error message only when something was entered and it isn't an email.
+const optionalEmailError = (e) => (e && !/^\S+@\S+\.\S+$/.test(e) ? "That email doesn't look right. Leave it blank if they don't have one." : null);
 
 async function loadUser(id) {
   const { rows } = await q(
-    `SELECT u.id, u.name, u.email, u.role, u.status, u.must_change_pw, u.last_seen,
+    `SELECT u.id, u.name, u.username, u.email, u.role, u.status, u.must_change_pw, u.last_seen,
             COALESCE(array_agg(uh.hotel_id) FILTER (WHERE uh.hotel_id IS NOT NULL), '{}') AS hotels
        FROM users u LEFT JOIN user_hotels uh ON uh.user_id = u.id
       WHERE u.id = $1 GROUP BY u.id`,
@@ -158,12 +167,15 @@ app.post(
   "/api/login",
   loginLimiter,
   wrap(async (req, res) => {
-    const email = cleanEmail(req.body.email);
+    // Accept {username}; older clients may still send {email}. A value with '@' is matched on email.
+    const who = cleanUsername(req.body.username ?? req.body.email);
     const pw = String(req.body.password || "");
-    if (!email || !pw) return bad(res, 400, "Enter your email and password.");
-    const { rows } = await q("SELECT id, password_hash, status FROM users WHERE email=$1", [email]);
+    if (!who || !pw) return bad(res, 400, "Enter your username and password.");
+    const { rows } = who.includes("@")
+      ? await q("SELECT id, password_hash, status FROM users WHERE email=$1", [who])
+      : await q("SELECT id, password_hash, status FROM users WHERE lower(username)=$1", [who]);
     const u = rows[0];
-    if (!u || !(await bcrypt.compare(pw, u.password_hash))) return bad(res, 401, "That email and password don't match.");
+    if (!u || !(await bcrypt.compare(pw, u.password_hash))) return bad(res, 401, "That username and password don't match.");
     if (u.status !== "active") return bad(res, 403, "This account is turned off. Ask your manager to turn it back on.");
     await q("UPDATE users SET last_seen=now() WHERE id=$1", [u.id]);
     req.session.regenerate((err) => {
@@ -436,7 +448,7 @@ app.get(
   auth("Manager"),
   wrap(async (req, res) => {
     const { rows } = await q(
-      `SELECT u.id, u.name, u.email, u.role, u.status, u.must_change_pw, u.last_seen,
+      `SELECT u.id, u.name, u.username, u.email, u.role, u.status, u.must_change_pw, u.last_seen,
               COALESCE(array_agg(uh.hotel_id) FILTER (WHERE uh.hotel_id IS NOT NULL), '{}') AS hotels
          FROM users u LEFT JOIN user_hotels uh ON uh.user_id=u.id
         GROUP BY u.id ORDER BY u.name`
@@ -463,17 +475,20 @@ app.post(
   auth("Manager"),
   wrap(async (req, res) => {
     const name = String(req.body.name || "").trim();
-    const email = cleanEmail(req.body.email);
+    const username = cleanUsername(req.body.username);
+    const email = cleanEmail(req.body.email) || null;
     if (!name) return bad(res, 400, "Add their name.");
-    if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 400, "Enter a valid work email.");
+    const uerr = usernameError(username) || optionalEmailError(email);
+    if (uerr) return bad(res, 400, uerr);
     const err = checkUserEdit(req, null, req.body);
     if (err) return bad(res, 400, err);
-    if ((await q("SELECT 1 FROM users WHERE email=$1", [email])).rows.length) return bad(res, 400, "Someone already uses that email.");
+    if ((await q("SELECT 1 FROM users WHERE lower(username)=$1", [username])).rows.length) return bad(res, 400, "That username is taken.");
+    if (email && (await q("SELECT 1 FROM users WHERE email=$1", [email])).rows.length) return bad(res, 400, "Someone already uses that email.");
     const pw = tempPassword();
     const id = await tx(async (c) => {
       const r = await c.query(
-        "INSERT INTO users (name, email, role, password_hash, must_change_pw) VALUES ($1,$2,$3,$4,TRUE) RETURNING id",
-        [name, email, req.body.role, await bcrypt.hash(pw, 12)]
+        "INSERT INTO users (name, username, email, role, password_hash, must_change_pw) VALUES ($1,$2,$3,$4,$5,TRUE) RETURNING id",
+        [name, username, email, req.body.role, await bcrypt.hash(pw, 12)]
       );
       for (const h of req.body.hotels) await c.query("INSERT INTO user_hotels VALUES ($1,$2)", [r.rows[0].id, h]);
       return r.rows[0].id;
@@ -491,16 +506,20 @@ app.put(
     const err = checkUserEdit(req, target, req.body);
     if (err) return bad(res, 400, err);
     const name = String(req.body.name || "").trim();
-    const email = cleanEmail(req.body.email);
+    const username = cleanUsername(req.body.username);
+    const email = cleanEmail(req.body.email) || null;
     if (!name) return bad(res, 400, "Add their name.");
-    if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 400, "Enter a valid work email.");
-    if ((await q("SELECT 1 FROM users WHERE email=$1 AND id<>$2", [email, target.id])).rows.length)
+    const uerr = usernameError(username) || optionalEmailError(email);
+    if (uerr) return bad(res, 400, uerr);
+    if ((await q("SELECT 1 FROM users WHERE lower(username)=$1 AND id<>$2", [username, target.id])).rows.length)
+      return bad(res, 400, "That username is taken.");
+    if (email && (await q("SELECT 1 FROM users WHERE email=$1 AND id<>$2", [email, target.id])).rows.length)
       return bad(res, 400, "Someone already uses that email.");
     const self = target.id === req.user.id;
     const status = self ? "active" : req.body.status === "off" ? "off" : "active";
     if (self && req.body.role !== req.user.role) return bad(res, 400, "You can't change your own role.");
     await tx(async (c) => {
-      await c.query("UPDATE users SET name=$1, email=$2, role=$3, status=$4 WHERE id=$5", [name, email, req.body.role, status, target.id]);
+      await c.query("UPDATE users SET name=$1, username=$2, email=$3, role=$4, status=$5 WHERE id=$6", [name, username, email, req.body.role, status, target.id]);
       // Keep hotels the editor can't see; replace the ones they can.
       await c.query("DELETE FROM user_hotels WHERE user_id=$1 AND hotel_id = ANY($2)", [target.id, req.user.hotels]);
       for (const h of req.body.hotels) await c.query("INSERT INTO user_hotels VALUES ($1,$2) ON CONFLICT DO NOTHING", [target.id, h]);
@@ -678,6 +697,7 @@ app.get(/^\/(?!api\/).*/, sendIndex);
 app.use((err, req, res, next) => {
   console.error(err);
   if (res.headersSent) return next(err);
+  if (err.code === "23505") return bad(res, 400, "That's already in use. Try a different one."); // unique clash from a race
   bad(res, 500, "Something went wrong on our side. Try again.");
 });
 

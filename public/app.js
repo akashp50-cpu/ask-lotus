@@ -116,7 +116,7 @@ function showScreen() {
   $("login").hidden = !!u;
   $("pwScreen").hidden = !(u && u.must_change_pw);
   $("app").hidden = !(u && !u.must_change_pw);
-  if (!u) { setTimeout(() => $("lg-email").focus(), 50); }
+  if (!u) { setTimeout(() => $("lg-user").focus(), 50); }
 }
 
 async function start() {
@@ -132,7 +132,7 @@ $("loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const err = $("lg-err"); err.hidden = true;
   try {
-    await api("/api/login", { hotel: false, quiet401: true, body: { email: $("lg-email").value, password: $("lg-pass").value } });
+    await api("/api/login", { hotel: false, quiet401: true, body: { username: $("lg-user").value, password: $("lg-pass").value } });
     $("lg-pass").value = "";
     await start();
   } catch (x) { err.textContent = x.message; err.hidden = false; }
@@ -167,7 +167,7 @@ async function enterApp() {
   if (!STATE.hotel) { toast("You aren't assigned to a hotel yet. Ask your manager."); return; }
   renderPropMenu();
   $("avBtn").style.background = color(u.id); $("avBtn").textContent = initials(u.name);
-  $("acctWho").innerHTML = `${avatar(u, 36)}<span><b>${esc(u.name)}</b><small>${esc(u.role)} · ${esc(u.email)}</small></span>`;
+  $("acctWho").innerHTML = `${avatar(u, 36)}<span><b>${esc(u.name)}</b><small>${esc(u.role)} · @${esc(u.username)}</small></span>`;
   $("hello").textContent = `Hi ${u.name.split(" ")[0]}, how can I help?`;
   $("modeSeg").hidden = !canManage(); $("appTitle").hidden = canManage();
   $("adminTitle").textContent = isAdmin() ? "Admin" : "Manager";
@@ -382,10 +382,10 @@ function renderTeam() {
     const locked = !isAdmin() && u.role === "Admin";
     const st = u.status === "off" ? `<span class="status off">Off</span>` : u.must_change_pw ? `<span class="status invited">Not signed in yet</span>` : "";
     return `<button type="button" class="cell" data-user="${u.id}" ${locked ? "disabled" : ""}>${avatar(u)}
-      <span class="body"><span class="t">${esc(u.name)}${u.id === STATE.me.id ? " (you)" : ""}</span><span class="m">${esc(u.role)} · ${u.hotels.length > 1 ? u.hotels.length + " hotels" : esc(hotelName(u.hotels[0]))} · ${u.last_seen ? "Active " + fmtD(u.last_seen) : "Never signed in"}</span></span>${st}${locked ? "" : chev}</button>`;
+      <span class="body"><span class="t">${esc(u.name)}${u.id === STATE.me.id ? " (you)" : ""}</span><span class="m">@${esc(u.username)} · ${esc(u.role)} · ${u.hotels.length > 1 ? u.hotels.length + " hotels" : esc(hotelName(u.hotels[0]))} · ${u.last_seen ? "Active " + fmtD(u.last_seen) : "Never signed in"}</span></span>${st}${locked ? "" : chev}</button>`;
   }).join("");
   $("teamList").querySelectorAll("[data-user]:not([disabled])").forEach((b) => (b.onclick = () => openUser(+b.dataset.user)));
-  $("teamFoot").textContent = isAdmin() ? "Everyone signs in with their own email, so every question is tied to them." : "Managers can add and edit Front Desk and Manager accounts. Only an Admin can change Admin accounts.";
+  $("teamFoot").textContent = isAdmin() ? "Everyone signs in with their own username, so every question is tied to them." : "Managers can add and edit Front Desk and Manager accounts. Only an Admin can change Admin accounts.";
 }
 
 /* ----- contacts ----- */
@@ -607,7 +607,7 @@ $("u-copy").onclick = async () => {
 function openUser(id) {
   eu = id ? STATE.users.find((u) => u.id === id) : null; const self = eu && eu.id === STATE.me.id;
   $("uTitle").textContent = eu ? eu.name : "Add Employee"; $("uSave").textContent = eu ? "Save" : "Create";
-  $("u-name").value = eu ? eu.name : ""; $("u-email").value = eu ? eu.email : "";
+  $("u-name").value = eu ? eu.name : ""; $("u-username").value = eu ? eu.username : ""; $("u-email").value = eu && eu.email ? eu.email : "";
   draftRole = eu ? eu.role : "Front Desk"; draftHotels = eu ? [...eu.hotels] : [STATE.hotel];
   renderRoles(); renderHotels();
   const act = $("u-active"); act.setAttribute("aria-checked", eu ? eu.status !== "off" : true); act.disabled = !!self;
@@ -621,10 +621,10 @@ $("u-reset").onclick = async () => {
 };
 $("userEd").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = { name: $("u-name").value.trim(), email: $("u-email").value.trim(), role: draftRole, hotels: draftHotels, status: $("u-active").getAttribute("aria-checked") === "true" ? "active" : "off" };
+  const body = { name: $("u-name").value.trim(), username: $("u-username").value.trim().toLowerCase(), email: $("u-email").value.trim(), role: draftRole, hotels: draftHotels, status: $("u-active").getAttribute("aria-checked") === "true" ? "active" : "off" };
   try {
     if (eu) { await api(`/api/users/${eu.id}`, { hotel: false, method: "PUT", body }); toast("Saved " + body.name); hideSheet(); }
-    else { const r = await api("/api/users", { hotel: false, body }); showTemp(r.tempPassword); $("u-hint").textContent = `${body.name} is set up. Sign-in: ${body.email.toLowerCase()} with the temporary password above.`; $("uSave").textContent = "Done"; eu = { id: r.id, ...body }; }
+    else { const r = await api("/api/users", { hotel: false, body }); showTemp(r.tempPassword); $("u-hint").textContent = `${body.name} is set up. Sign-in: username ${body.username} with the temporary password above.`; $("uSave").textContent = "Done"; eu = { id: r.id, ...body }; }
     STATE.users = await api("/api/users", { hotel: false }); renderAdmin();
   } catch (x) { fail(x); }
 });

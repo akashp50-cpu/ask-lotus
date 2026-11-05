@@ -9,7 +9,7 @@ Node 22 + Express, Postgres (Neon), sessions in Postgres. Plain HTML/CSS/JS fron
 ```
 cp .env.example .env   # fill in values
 npm install
-npm run setup          # migrate + seed (Hampton Inn Overland Park, 234 SOPs, contacts, first admin)
+npm run setup          # migrate + seed (Hampton Inn Overland Park, 234 SOPs, contacts, first admin from ADMIN_USERNAME, or the part of ADMIN_EMAIL before the @)
 npm start              # http://localhost:3000
 ```
 

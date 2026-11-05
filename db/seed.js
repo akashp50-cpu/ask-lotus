@@ -71,24 +71,26 @@ const ROUTES = [
       );
     }
 
-    const email = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+    const email = (process.env.ADMIN_EMAIL || "").trim().toLowerCase() || null;
+    const username = (process.env.ADMIN_USERNAME || (email ? email.split("@")[0] : ""))
+      .trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
     const pw = process.env.ADMIN_PASSWORD || "";
-    if (email && pw) {
-      const exists = await c.query("SELECT id FROM users WHERE email=$1", [email]);
+    if (username && pw) {
+      const exists = await c.query("SELECT id FROM users WHERE lower(username)=$1 OR ($2::text IS NOT NULL AND email=$2)", [username, email]);
       if (!exists.rows.length) {
         const hash = await bcrypt.hash(pw, 12);
         const u = await c.query(
-          `INSERT INTO users (name, email, role, password_hash, must_change_pw)
-           VALUES ($1,$2,'Admin',$3,TRUE) RETURNING id`,
-          [process.env.ADMIN_NAME || "Admin", email, hash]
+          `INSERT INTO users (name, username, email, role, password_hash, must_change_pw)
+           VALUES ($1,$2,$3,'Admin',$4,TRUE) RETURNING id`,
+          [process.env.ADMIN_NAME || "Admin", username, email, hash]
         );
         for (const h of HOTELS) {
           await c.query("INSERT INTO user_hotels (user_id, hotel_id) VALUES ($1,$2)", [u.rows[0].id, h.id]);
         }
-        console.log(`Created Admin ${email}. They must change the password at first sign-in.`);
+        console.log(`Created Admin ${username}. They must change the password at first sign-in.`);
       }
     } else {
-      console.log("ADMIN_EMAIL / ADMIN_PASSWORD not set; no Admin account created.");
+      console.log("ADMIN_USERNAME (or ADMIN_EMAIL) / ADMIN_PASSWORD not set; no Admin account created.");
     }
   });
   await pool.end();

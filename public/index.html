@@ -19,10 +19,10 @@
   <div class="col" style="max-width:440px;width:100%">
     <div class="logo"><img alt="Lotus Hospitality" src="/logo-mark.png"></div>
     <h1 class="brandname">Ask Lotus<svg class="star" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5c.5 5.6 4.9 10 10.5 10.5-5.6.5-10 4.9-10.5 10.5-.5-5.6-4.9-10-10.5-10.5C7.1 11.5 11.5 7.1 12 1.5Z"/></svg></h1>
-    <p class="sub">Lotus Hospitality · sign in with your work email</p>
+    <p class="sub">Lotus Hospitality</p>
     <form id="loginForm" novalidate>
       <div class="form">
-        <label class="fld"><span>Email</span><input id="lg-email" type="email" autocomplete="username" placeholder="name@lotusgroupinc.com"></label>
+        <label class="fld"><span>Username</span><input id="lg-user" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. jsmith"></label>
         <label class="fld"><span>Password</span><input id="lg-pass" type="password" autocomplete="current-password" placeholder="Required"></label>
       </div>
       <p class="err" id="lg-err" hidden></p>
@@ -220,7 +220,8 @@
       <div class="sbody">
         <div class="form">
           <label class="fld"><span>Full name</span><input id="u-name" autocomplete="off"></label>
-          <label class="fld"><span>Work email</span><input id="u-email" type="email" autocomplete="off"></label>
+          <label class="fld"><span>Username</span><input id="u-username" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="e.g. jsmith"></label>
+          <label class="fld"><span>Email (optional)</span><input id="u-email" type="email" autocomplete="off" autocapitalize="none"></label>
         </div>
         <div class="sec"><span>Role</span></div>
         <div class="group" id="u-roles" role="radiogroup" aria-label="Role"></div>

@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS hotels (
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,
   name            TEXT NOT NULL,
-  email           TEXT NOT NULL UNIQUE,        -- stored lower-case
+  username        TEXT,                        -- sign-in name, stored lower-case (NOT NULL enforced below)
+  email           TEXT UNIQUE,                 -- optional, stored lower-case
   role            TEXT NOT NULL CHECK (role IN ('Front Desk','Manager','Admin')),
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','off')),
   password_hash   TEXT NOT NULL,
@@ -18,6 +19,26 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen       TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Username sign-in (idempotent; also upgrades databases created with email-only users).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
+ALTER TABLE users ALTER COLUMN email DROP NOT NULL;
+UPDATE users SET email = NULL WHERE email IS NOT NULL AND btrim(email) = '';
+DO $$
+DECLARE r RECORD; base TEXT; cand TEXT;
+BEGIN
+  FOR r IN SELECT id, email FROM users WHERE username IS NULL OR btrim(username) = '' ORDER BY id LOOP
+    base := regexp_replace(lower(split_part(COALESCE(r.email, ''), '@', 1)), '[^a-z0-9._-]', '', 'g');
+    IF base = '' THEN base := 'user'; END IF;
+    cand := base;
+    IF EXISTS (SELECT 1 FROM users WHERE lower(username) = cand AND id <> r.id) THEN
+      cand := base || r.id::text;
+    END IF;
+    UPDATE users SET username = cand WHERE id = r.id;
+  END LOOP;
+END $$;
+ALTER TABLE users ALTER COLUMN username SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_lower_idx ON users (lower(username));
 
 CREATE TABLE IF NOT EXISTS user_hotels (
   user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
