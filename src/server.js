@@ -9,6 +9,7 @@ const bcrypt = require("bcryptjs");
 const { pool, q, tx } = require("./db");
 const { best, rank } = require("./match");
 const ai = require("./ai");
+const { runTurn } = require("./turn");
 const { encrypt, decrypt } = require("./crypto");
 const { tokKey, forModel } = require("./tokens");
 const { ROUTES } = require("./defaults");
@@ -127,6 +128,7 @@ function publicSettings(s, full) {
     addedBy: s.key_added_by,
     addedAt: s.key_added_at,
     sourceOnly: s.source_only,
+    expertAdvice: s.expert_advice !== false,
     fallback: s.fallback,
     providers: Object.entries(ai.PROVIDERS).map(([id, p]) => ({ id, ...p })),
   };
@@ -241,6 +243,16 @@ app.get(
   })
 );
 
+const CONVO_TTL = "2 hours";
+const loadConvo = async (id, userId, hotelId) => {
+  if (typeof id !== "string" || id.length > 64) return null;
+  const r = await q(
+    `SELECT * FROM conversations WHERE id=$1 AND user_id=$2 AND hotel_id=$3 AND updated_at > now() - interval '${CONVO_TTL}'`,
+    [id, userId, hotelId]
+  );
+  return r.rows[0] || null;
+};
+
 app.post(
   "/api/ask",
   auth(),
@@ -254,50 +266,54 @@ app.post(
     const contacts = (await q("SELECT role, name, phone FROM contacts WHERE hotel_id=$1", [req.hotel])).rows;
     const s = await settingsRow();
     const cfg = aiConfig(s);
-    let sop = null,
-      by = "none",
-      general = null,
-      aiError = null;
-    if (cfg) {
-      try {
-        // The model reads the same text staff would see: tokens filled in, manager notes removed.
-        const shortlist = rank(question, sops, 8).map((x) => {
-          const m = forModel(x.s, contacts, h.details);
-          return { id: m.id, category: m.category, title: m.title, steps: m.steps.map((t) => ({ t })) };
-        });
-        const out = await ai.pickSop(cfg, question, shortlist, sops, { sourceOnly: s.source_only, hotelName: h.name });
-        if (out.sopId) {
-          sop = sops.find((x) => x.id === out.sopId);
-          by = "ai";
-        }
-        general = out.general;
-      } catch (e) {
-        aiError = e.message;
-        console.error("AI provider error:", e.message);
-        if (s.fallback) {
-          sop = best(question, sops);
-          if (sop) by = "keyword";
-        }
-      }
-    } else {
-      sop = best(question, sops);
-      if (sop) by = "keyword";
+    // Conversation state lives on the server. A missing, expired or someone else's id starts a new conversation.
+    let convo = await loadConvo(req.body.convoId, req.user.id, req.hotel);
+    if (!convo) {
+      const id = crypto.randomUUID();
+      await q("INSERT INTO conversations (id, hotel_id, user_id) VALUES ($1,$2,$3)", [id, req.hotel, req.user.id]);
+      convo = { id, turns: [], last_sop: null, asks: 0 };
     }
-    // AI answer to the exact question, guided by the matched SOP. Any failure just
-    // leaves the SOP card on its own.
-    let answer = null;
-    if (cfg && sop && !aiError) {
-      try {
-        answer = await ai.answerFromSop(cfg, question, forModel(sop, contacts, h.details));
-      } catch (e) {
-        console.error("AI answer error:", e.message);
-      }
-    }
+    const byId = new Map(sops.map((x) => [x.id, x]));
+    const { result: res0, by: by0, aiError, turns } = await runTurn({
+      cfg, hotel: h, sops, contacts, convo, question, expert: s.expert_advice !== false, fallback: s.fallback,
+    });
+    const result = res0;
+    let by = by0;
+
+    const sop = result.kind === "answer" ? byId.get(result.sopId) : null;
+    const kind = result.kind;
+    if (kind === "none") by = "none";
+    if (kind === "advise") by = "ai";
+    // Log the turn. Ask turns have no SOP and are not gaps; only conversations that end without one are.
+    const turnNo = turns.filter((t) => t.role === "staff").length;
     const ins = await q(
-      "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by) VALUES ($1,$2,$3,$4,$5) RETURNING id",
-      [req.hotel, req.user.id, question, sop ? sop.id : null, by]
+      "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by, convo_id, turn, kind) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+      [req.hotel, req.user.id, question, sop ? sop.id : null, kind === "ask" ? "ai" : by, convo.id, turnNo, kind]
     );
-    res.json({ logId: ins.rows[0].id, sop: sop ? sopOut(sop) : null, answer, general, aiDown: !!aiError && !sop });
+    const bot = kind === "ask" ? { role: "assistant", kind, question: result.question, options: result.options }
+      : kind === "answer" ? { role: "assistant", kind, sop_id: sop.id, answer: result.answer }
+      : { role: "assistant", kind };
+    await q("UPDATE conversations SET turns=$1, last_sop=$2, asks=$3, updated_at=now() WHERE id=$4", [
+      JSON.stringify([...turns, bot].slice(-40)),
+      kind === "answer" ? sop.id : kind === "ask" ? convo.last_sop : convo.last_sop,
+      kind === "ask" ? convo.asks + 1 : 0,
+      convo.id,
+    ]);
+    res.json({
+      logId: ins.rows[0].id,
+      convoId: convo.id,
+      kind,
+      sop: sop ? sopOut(sop) : null,
+      answer: kind === "answer" ? result.answer : null,
+      tip: kind === "answer" ? result.tip : null,
+      focusSteps: kind === "answer" ? result.focusSteps : [],
+      question: kind === "ask" ? result.question : null,
+      options: kind === "ask" ? result.options : [],
+      advice: kind === "advise" ? result.advice : null,
+      confirm: kind === "advise" ? !!result.confirm : false,
+      general: null,
+      aiDown: !!aiError && !sop,
+    });
   })
 );
 
@@ -439,7 +455,7 @@ app.get(
   wrap(async (req, res) => {
     const { rows } = await q(
       `SELECT qn.id, qn.user_id AS uid, u.name AS user_name, qn.question AS q, qn.sop_id AS sop,
-              qn.matched_by, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when"
+              qn.matched_by, qn.convo_id AS convo, qn.turn, qn.kind, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when"
          FROM questions qn LEFT JOIN users u ON u.id = qn.user_id
         WHERE qn.hotel_id=$1 AND qn.asked_at > now() - interval '90 days'
         ORDER BY qn.asked_at DESC LIMIT 2000`,
@@ -454,7 +470,10 @@ app.post(
   auth("Manager"),
   hotel,
   wrap(async (req, res) => {
-    await q("UPDATE questions SET dismissed=TRUE WHERE id=$1 AND hotel_id=$2", [req.params.id, req.hotel]);
+    await q(
+      "UPDATE questions SET dismissed=TRUE WHERE hotel_id=$2 AND (id=$1 OR (convo_id IS NOT NULL AND convo_id=(SELECT convo_id FROM questions WHERE id=$1 AND hotel_id=$2)))",
+      [req.params.id, req.hotel]
+    );
     res.json({ ok: true });
   })
 );
@@ -1506,6 +1525,7 @@ app.put(
     } else if (switching || b.removeKey) {
       keySql = ", key_enc=NULL, key_last4=NULL, key_added_by=NULL, key_added_at=NULL";
     }
+    if (b.expertAdvice !== undefined) await q("UPDATE settings SET expert_advice=$1 WHERE id=1", [!!b.expertAdvice]);
     await q(
       `UPDATE settings SET provider=$1, model=$2, base_url=$3, source_only=$4, show_source=$5, fallback=$6${keySql} WHERE id=1`,
       params

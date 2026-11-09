@@ -265,3 +265,22 @@ CREATE TABLE IF NOT EXISTS imports (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS imports_hotel_idx ON imports (hotel_id, created_at DESC);
+
+-- Conversational chat: the server keeps each conversation (staff messages, the assistant's questions and answers).
+CREATE TABLE IF NOT EXISTS conversations (
+  id          TEXT PRIMARY KEY,
+  hotel_id    TEXT NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  turns       JSONB NOT NULL DEFAULT '[]',
+  last_sop    TEXT,
+  asks        INTEGER NOT NULL DEFAULT 0,   -- questions asked since the last answer
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS conversations_user ON conversations (user_id, updated_at DESC);
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS convo_id TEXT;
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS turn     INTEGER;
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS kind     TEXT;   -- 'answer' | 'ask' | 'advise' | 'none' (null on older rows)
+CREATE INDEX IF NOT EXISTS questions_convo ON questions (convo_id);
+-- "Expert guidance when no SOP fits" (replaces source_only for the AI path; on for everyone until an Owner turns it off).
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS expert_advice BOOLEAN NOT NULL DEFAULT TRUE;

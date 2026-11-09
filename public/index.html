@@ -155,7 +155,7 @@
         <button type="button" class="danger" id="removeKey" hidden>Remove Key</button>
         <div class="sec"><span>How answers work</span></div>
         <div class="form">
-          <div class="rowline"><span>Answer only from SOPs<small>If it isn't in an SOP, send staff to the manager</small></span><button type="button" class="switch" data-set="sourceOnly" role="switch" aria-label="Answer only from SOPs"><i></i></button></div>
+          <div class="rowline"><span>Expert guidance when no SOP fits<small>Labeled advice with who to call, instead of only sending staff to the manager</small></span><button type="button" class="switch" data-set="expertAdvice" role="switch" aria-label="Expert guidance when no SOP fits"><i></i></button></div>
           <div class="rowline"><span>Show SOP source on answers</span><button type="button" class="switch" data-set="showSource" role="switch" aria-label="Show SOP source"><i></i></button></div>
           <div class="rowline"><span>Keyword fallback<small>Keep answering if the AI provider is down</small></span><button type="button" class="switch" data-set="fallback" role="switch" aria-label="Keyword fallback"><i></i></button></div>
         </div>
@@ -202,6 +202,7 @@
 </main>
 
 <div class="composer gut" id="composer">
+  <div class="col newRow" id="newRow" hidden><button type="button" class="pillbtn press" id="newChat">New chat</button></div>
   <form class="col" id="ask">
     <span class="aiPill" id="aiPill" hidden title="AI is on. Answers are written from your SOPs."><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2.5c.4 3.4 2.6 5.6 6 6-3.4.4-5.6 2.6-6 6-.4-3.4-2.6-5.6-6-6 3.4-.4 5.6-2.6 6-6Z"/><path d="M15.5 12c.2 1.6 1.2 2.6 2.8 2.8-1.6.2-2.6 1.2-2.8 2.8-.2-1.6-1.2-2.6-2.8-2.8 1.6-.2 2.6-1.2 2.8-2.8Z"/><path d="M15 2c.15 1.1.85 1.8 2 2-1.15.15-1.85.85-2 2-.15-1.15-.85-1.85-2-2 1.15-.2 1.85-.9 2-2Z"/></svg>AI</span>
     <input id="askInput" autocomplete="off" placeholder="Ask about a procedure" aria-label="Ask a question">

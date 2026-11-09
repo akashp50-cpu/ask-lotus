@@ -158,7 +158,7 @@ $("pwForm").addEventListener("submit", async (e) => {
     await start();
   } catch (x) { err.textContent = x.message; err.hidden = false; }
 });
-async function signOut() { try { await api("/api/logout", { hotel: false, body: {} }); } catch {} STATE.me = null; $("thread").innerHTML = ""; closeMenus(); showScreen(); }
+async function signOut() { try { await api("/api/logout", { hotel: false, body: {} }); } catch {} STATE.me = null; newChat(true); closeMenus(); showScreen(); }
 $("pwCancel").onclick = signOut;
 $("signOut").onclick = signOut;
 $("changePw").onclick = () => { closeMenus(); STATE.me.must_change_pw = true; showScreen(); $("pw-cur").focus(); };
@@ -214,7 +214,7 @@ function renderPropMenu() {
 async function selectHotel(id, target) {
   STATE.hotel = id; STATE.home = null;
   if (hotelObj(id).ready) { try { localStorage.setItem("asklotus.hotel", id); } catch {} }
-  $("thread").innerHTML = ""; renderPropMenu();
+  newChat(true); renderPropMenu();
   try { await loadHotel(); } catch (e) { fail(e); }
   if (mode === "admin") renderAdmin();
   // A hotel that isn't live goes to its setup page, whatever screen we came from.
@@ -232,6 +232,7 @@ async function loadHotel() {
   $("adminHotel").textContent = hotelName(STATE.hotel);
   renderCatPills();
   setupHeader();
+  restoreConvo();
 }
 
 const MODE_ORDER = ["chat", "admin", "owner", "import", "setup"];
@@ -293,11 +294,13 @@ function appear(el, origin) {
   if (RM.matches) return; el.style.transformOrigin = origin;
   Spring(0, (p) => { el.style.opacity = Math.min(1, p * 1.4); el.style.transform = `translateY(${(1 - p) * 14}px) scale(${0.96 + 0.04 * p})`; }).to(1, { damping: 0.82, response: 0.4 }, () => (el.style.transform = ""));
 }
-function sopCard(s, logId, answer) {
+const TIP_IC = `<svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2.5a5.2 5.2 0 0 0-3 9.5c.5.4.8 1 .8 1.7V14.5h4.4v-.8c0-.7.3-1.3.8-1.7a5.2 5.2 0 0 0-3-9.5Z"/><path d="M8 16.5h4M8.6 18.3h2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+function sopCard(s, logId, answer, extra = {}) {
+  const focus = new Set(extra.focusSteps || []);
   const card = document.createElement("div"); card.className = "a";
   card.innerHTML = `<div class="hd"><div class="eyebrow">${esc(s.cat)}</div><h3>${esc(s.title)}</h3></div>
-    ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${telize(esc(answer))}</div>` : ""}
-    <ol class="steps">${s.steps.map((x) => `<li><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
+    ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${telize(esc(answer))}${extra.tip ? `<div class="tipLine">${TIP_IC}<span><b>Tip</b> ${telize(esc(extra.tip))}</span></div>` : ""}</div>` : ""}
+    <ol class="steps">${s.steps.map((x, i) => `<li${focus.has(i + 1) ? ' class="hl"' : ""}><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
     ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
     <div class="ft">${STATE.settings.showSource ? `<span class="tag">${esc(s.id)} · v${s.ver}</span><span>Updated ${fmtD(s.updated)}</span>` : ""}
@@ -309,27 +312,85 @@ function sopCard(s, logId, answer) {
   }));
   return card;
 }
+const whoBlock = () => `<div class="esc"><b>Who to call</b>${STATE.routes.map((r) => `<span class="who-line">${esc(r.label)}: ${r.id === "emergency" ? "call 911 first, then " : ""}${telize(esc(routeText(r)))}</span>`).join("")}</div>`;
 function missCard(general, aiDown) {
   const card = document.createElement("div"); card.className = "a miss";
   card.innerHTML = `<div class="hd"><div class="eyebrow">Not covered yet</div><h3>Check with the manager on duty</h3></div>
     ${general ? `<p class="generalAns"><b>General guidance (not an SOP):</b> ${esc(general)}</p>` : ""}
     <p>${aiDown ? "The assistant is having trouble right now. " : ""}This isn't in ${esc(hotelName(STATE.hotel))}'s procedures. Ask before you answer the guest. Your question was sent to the managers so it gets added.</p>
-    <div class="esc"><b>Who to call</b>${STATE.routes.map((r) => `<span class="who-line">${esc(r.label)}: ${r.id === "emergency" ? "call 911 first, then " : ""}${telize(esc(routeText(r)))}</span>`).join("")}</div><div style="height:14px"></div>`;
+    ${whoBlock()}<div style="height:14px"></div>`;
   return card;
+}
+function adviceCard(r) {
+  const card = document.createElement("div"); card.className = "a advice";
+  card.innerHTML = `<div class="hd"><div class="eyebrow">Not in your SOPs &middot; Expert guidance</div><h3>General best practice</h3></div>
+    <p class="adviceTxt">${telize(esc(r.advice))}</p>
+    ${r.confirm ? `<div class="confirmBox"><b>Confirm with a manager before acting</b></div>` : ""}
+    ${r.confirm ? whoBlock() : ""}
+    <p class="adviceNote">This isn't ${esc(hotelName(STATE.hotel))}'s procedure. It was sent to the managers so it gets added.</p>`;
+  return card;
+}
+function askCard(r, onPick) {
+  const card = document.createElement("div"); card.className = "a askq";
+  card.innerHTML = `<div class="hd"><div class="eyebrow">Quick question</div></div><p class="askText">${esc(r.question)}</p>
+    <div class="opts" role="group" aria-label="Choose an answer">${r.options.map((o) => `<button type="button" class="chip opt">${esc(o)}</button>`).join("")}</div>
+    <p class="askHint">Or type your answer below.</p>`;
+  card.querySelectorAll(".opt").forEach((b) => (b.onclick = () => { if (card.classList.contains("done")) return; onPick(b.textContent, b); }));
+  return card;
+}
+function lockAsk(card, picked) {
+  card.classList.add("done");
+  card.querySelectorAll(".opt").forEach((b) => { b.disabled = true; if (picked && b.textContent === picked) b.classList.add("picked"); });
+}
+
+/* conversation: the server keeps the context, we keep the id (and a light copy of the thread so a refresh continues) */
+let convoId = null, convoLog = [];
+const CK = () => "asklotus.convo." + (STATE.me ? STATE.me.id : "x");
+function saveConvo() {
+  try { if (convoId) sessionStorage.setItem(CK(), JSON.stringify({ hotel: STATE.hotel, convoId, log: convoLog.slice(-30) })); else sessionStorage.removeItem(CK()); } catch {}
+}
+function newChat(silent) {
+  convoId = null; convoLog = []; $("thread").innerHTML = ""; saveConvo(); $("newRow").hidden = true;
+  if (!silent) $("askInput").focus();
+}
+$("newChat").onclick = () => newChat();
+function renderTurn(item, live) {
+  const th = $("thread");
+  if (item.t === "q") { const q = document.createElement("div"); q.className = "q"; q.textContent = item.text; th.appendChild(q); if (live) appear(q, "bottom right"); return q; }
+  const r = item.r;
+  const card = r.kind === "ask" ? askCard(r, (text, btn) => { lockAsk(card, text); ask(text); })
+    : r.kind === "answer" && r.sop ? sopCard(r.sop, r.logId, r.answer, { tip: r.tip, focusSteps: r.focusSteps })
+    : r.kind === "advise" ? adviceCard(r)
+    : missCard(r.general, r.aiDown);
+  th.appendChild(card); if (live) appear(card, "bottom left");
+  return card;
+}
+function restoreConvo() {
+  if (convoId || $("thread").children.length) return;
+  let d = null; try { d = JSON.parse(sessionStorage.getItem(CK()) || "null"); } catch {}
+  if (!d || d.hotel !== STATE.hotel || !d.convoId || !Array.isArray(d.log)) return;
+  convoId = d.convoId; convoLog = d.log;
+  convoLog.forEach((it, i) => { const el = renderTurn(it, false); if (it.t === "r" && it.r.kind === "ask" && i < convoLog.length - 1) lockAsk(el, (convoLog[i + 1] || {}).text); });
+  $("newRow").hidden = false;
 }
 let asking = false;
 async function ask(text) {
   text = text.trim(); if (!text || asking) return; asking = true;
   const th = $("thread");
-  const q = document.createElement("div"); q.className = "q"; q.textContent = text; th.appendChild(q); appear(q, "bottom right");
-  const wait = document.createElement("div"); wait.className = "loading"; wait.textContent = "Looking that up…"; th.appendChild(wait);
+  // A chat that was still waiting on a question: typing instead of tapping closes that card.
+  th.querySelectorAll(".askq:not(.done)").forEach((c) => lockAsk(c, text));
+  convoLog.push({ t: "q", text }); renderTurn({ t: "q", text }, true);
+  const wait = document.createElement("div"); wait.className = "loading"; wait.setAttribute("role", "status"); wait.innerHTML = `Thinking<span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>`; th.appendChild(wait);
+  wait.scrollIntoView({ block: "nearest" });
+  $("newRow").hidden = false;
   try {
-    const r = await api("/api/ask", { body: { q: text } });
+    const r = await api("/api/ask", { body: { q: text, convoId } });
     wait.remove();
-    const card = r.sop ? sopCard(r.sop, r.logId, r.answer) : missCard(r.general, r.aiDown);
-    th.appendChild(card); appear(card, "bottom left");
+    convoId = r.convoId || convoId;
+    convoLog.push({ t: "r", r }); saveConvo();
+    const card = renderTurn({ t: "r", r }, true);
     card.scrollIntoView({ behavior: RM.matches ? "auto" : "smooth", block: "start" });
-  } catch (e) { wait.textContent = e.message; }
+  } catch (e) { wait.textContent = e.message; wait.classList.add("err"); convoLog.pop(); }
   asking = false;
 }
 $("ask").addEventListener("submit", (e) => { e.preventDefault(); ask($("askInput").value); $("askInput").value = ""; });
@@ -347,8 +408,29 @@ $("gearBtn").onclick = () => {
   if (mode === "admin") { renderAdmin(true); scrollTo(0, 0); } else location.hash = "admin";
 };
 $("backBtn").onclick = leaveSettings;
-const gaps = () => STATE.log.filter((l) => (!l.sop || l.fb === "n") && !l.dismissed);
-const weekLog = () => STATE.log.filter((l) => Date.now() - new Date(l.when) < 7 * 864e5);
+// The feed is one row per staff message; a conversation (same convo id) is one item. Older rows are one item each.
+function groupLog(rows) {
+  const m = new Map(), out = [];
+  for (const l of rows) {
+    const k = l.convo || "r" + l.id; let g = m.get(k);
+    if (!g) { g = { key: k, uid: l.uid, user_name: l.user_name, rows: [] }; m.set(k, g); out.push(g); }
+    g.rows.push(l);
+  }
+  for (const g of out) {
+    g.rows.sort((a, b) => a.id - b.id);
+    const last = g.rows[g.rows.length - 1], ans = [...g.rows].reverse().find((r) => r.sop);
+    g.sop = ans ? ans.sop : null; g.when = last.when; g.id = last.id;
+    g.fb = g.rows.some((r) => r.fb === "n") ? "n" : (ans && ans.fb) || null;
+    g.dismissed = g.rows.every((r) => r.dismissed);
+    g.open = !g.sop && last.kind === "ask"; // still waiting on the staff member's answer: not a gap
+    g.q = g.rows.map((r) => r.q).join(". ");
+  }
+  return out;
+}
+const setLog = (rows) => { STATE.log = rows; STATE.convos = groupLog(rows); };
+const markDismissed = (id) => { const l = STATE.log.find((x) => x.id == id); if (l) STATE.log.forEach((x) => { if (x.id == id || (l.convo && x.convo === l.convo)) x.dismissed = true; }); setLog(STATE.log); };
+const gaps = () => STATE.convos.filter((g) => ((!g.sop && !g.open) || g.fb === "n") && !g.dismissed);
+const weekLog = () => STATE.convos.filter((g) => !g.open && Date.now() - new Date(g.when) < 7 * 864e5);
 
 function renderTabs() {
   const g = gaps().length;
@@ -368,7 +450,7 @@ async function renderAdmin(refresh) {
   if (refresh) {
     try {
       const [log, users] = await Promise.all([api("/api/activity"), api("/api/users", { hotel: false })]);
-      STATE.log = log; STATE.users = users;
+      setLog(log); STATE.users = users;
     } catch (e) { fail(e); }
   }
   renderTabs(); TABS.forEach(([k]) => ($("tab-" + k).hidden = k !== tab));
@@ -400,22 +482,22 @@ function renderList() {
 function renderGaps() {
   const g = gaps();
   $("gapList").innerHTML = g.length ? g.map((l) => `<div class="cell" style="flex-wrap:wrap">
-    <span class="body" style="min-width:180px"><span class="t wrap">${esc(l.q)}</span><span class="m">${esc(l.user_name || "Removed user")} · ${l.sop ? "Marked not helpful on " + esc(l.sop) : "No SOP matched"} · ${fmtDT(l.when)}</span></span>
+    <span class="body" style="min-width:180px"><span class="t wrap">${esc(l.q)}</span><span class="m">${esc(l.user_name || "Removed user")} · ${l.sop ? "Marked not helpful on " + esc(l.sop) : "No SOP matched"}${l.rows.length > 1 ? ` · ${l.rows.length}-message chat` : ""} · ${fmtDT(l.when)}</span></span>
     <span class="acts"><button type="button" class="pillbtn press" data-dismiss="${l.id}">Dismiss</button><button type="button" class="pillbtn tint press" data-make="${l.id}">Write SOP</button></span></div>`).join("") : `<div class="empty">Every question has an answer right now.</div>`;
-  $("gapList").querySelectorAll("[data-make]").forEach((b) => (b.onclick = () => { const l = STATE.log.find((x) => x.id == b.dataset.make); l.sop && l.fb === "n" && sop(l.sop) ? openSop(l.sop, null, l.id) : openSop(null, l.q, l.id); }));
+  $("gapList").querySelectorAll("[data-make]").forEach((b) => (b.onclick = () => { const l = STATE.convos.find((x) => x.id == b.dataset.make); l.sop && l.fb === "n" && sop(l.sop) ? openSop(l.sop, null, l.id) : openSop(null, l.q, l.id); }));
   $("gapList").querySelectorAll("[data-dismiss]").forEach((b) => (b.onclick = async () => {
-    try { await api(`/api/activity/${b.dataset.dismiss}/dismiss`, { body: {} }); STATE.log.find((x) => x.id == b.dataset.dismiss).dismissed = true; renderAdmin(); } catch (e) { fail(e); }
+    try { await api(`/api/activity/${b.dataset.dismiss}/dismiss`, { body: {} }); markDismissed(b.dataset.dismiss); renderAdmin(); } catch (e) { fail(e); }
   }));
 }
 
 function topOf(ls) { const c = {}; ls.forEach((l) => { if (l.sop) { const s = sop(l.sop); if (s) c[s.title] = (c[s.title] || 0) + 1; } }); const t = Object.entries(c).sort((a, b) => b[1] - a[1])[0]; return t && t[0]; }
 function renderActivity() {
-  const all = STATE.log, log = empFilter ? all.filter((l) => l.uid === empFilter) : all;
+  const all = STATE.convos, log = empFilter ? all.filter((l) => l.uid === empFilter) : all;
   const fu = empFilter && STATE.users.find((u) => u.id === empFilter);
   $("actFilter").innerHTML = fu ? `<button type="button" class="filterchip press" id="clearEmp">Showing ${esc(fu.name)} <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 2l6 6M8 2 2 8"/></svg></button>` : "";
   if (fu) $("clearEmp").onclick = () => { empFilter = null; renderActivity(); };
   const by = {}; all.forEach((l) => { if (l.uid) (by[l.uid] = by[l.uid] || []).push(l); });
-  const emps = Object.entries(by).map(([uid, ls]) => ({ u: STATE.users.find((u) => u.id == uid) || { id: +uid, name: ls[0].user_name || "Removed user" }, n: ls.length, miss: ls.filter((l) => !l.sop).length, top: topOf(ls) })).sort((a, b) => b.n - a.n);
+  const emps = Object.entries(by).map(([uid, ls]) => ({ u: STATE.users.find((u) => u.id == uid) || { id: +uid, name: ls[0].user_name || "Removed user" }, n: ls.length, miss: ls.filter((l) => !l.sop && !l.open).length, top: topOf(ls) })).sort((a, b) => b.n - a.n);
   $("byEmp").innerHTML = emps.length ? emps.map((e) => `<button type="button" class="cell" data-emp="${e.u.id}">${avatar(e.u)}
     <span class="body"><span class="t">${esc(e.u.name)}</span><span class="m">${e.top ? "Asks most about " + esc(e.top) : "No answered questions yet"}${e.miss ? ` · <span class="no">${e.miss} not covered</span>` : ""}</span></span>
     <span class="val">${e.n}</span>${chev}</button>`).join("") : `<div class="empty">No questions yet. They'll show here as staff use the chat.</div>`;
@@ -426,7 +508,7 @@ function renderActivity() {
   $("usage").innerHTML = e.length ? e.map(([k, v]) => `<div class="bar"><span class="nm">${esc(k)}</span><span class="n">${v}</span><div class="track"><div class="fill" style="width:${(v / max) * 100}%"></div></div></div>`).join("") : `<div class="empty">No answered questions yet.</div>`;
   $("feedTitle").textContent = `Recent questions (${log.length})`;
   $("feed").innerHTML = log.length ? log.slice(0, 50).map((l) => { const u = { id: l.uid || 0, name: l.user_name || "Removed user" }, s = l.sop && sop(l.sop);
-    return `<div class="cell">${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.q)}</span><span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""} · ${fmtDT(l.when)}</span></span></div>`; }).join("") : `<div class="empty">No questions yet.</div>`;
+    return `<div class="cell">${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.rows[0].q)}</span>${l.rows.length > 1 ? `<span class="convoTurns">${l.rows.slice(1).map((r) => `<span class="ct">&#8627; ${esc(r.q)}</span>`).join("")}</span>` : ""}<span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : l.open ? "Waiting on an answer" : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""} · ${fmtDT(l.when)}</span></span></div>`; }).join("") : `<div class="empty">No questions yet.</div>`;
 }
 
 function renderTeam() {
@@ -612,7 +694,7 @@ $("editor").addEventListener("submit", async (e) => {
     const out = editing ? await api(`/api/sops/${encodeURIComponent(editing.id)}`, { method: "PUT", body: d }) : await api("/api/sops", { body: d });
     if (editing) Object.assign(editing, out); else STATE.sops.push(out);
     STATE.sops.sort((a, b) => a.id.localeCompare(b.id));
-    if (fromLog) { try { await api(`/api/activity/${fromLog}/dismiss`, { body: {} }); const l = STATE.log.find((x) => x.id == fromLog); if (l) l.dismissed = true; } catch {} }
+    if (fromLog) { try { await api(`/api/activity/${fromLog}/dismiss`, { body: {} }); markDismissed(fromLog); } catch {} }
     toast(`Published ${out.id} v${out.ver}`); hideSheet(); renderAdmin();
   } catch (x) { fail(x); }
   saving = false;

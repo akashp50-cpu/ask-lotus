@@ -16,6 +16,20 @@ const fs = require("fs");
 // Test hook: with AI_MOCK_FILE set (never in production) complete() returns that file's text instead of calling a provider.
 const mockFile = () => (process.env.NODE_ENV !== "production" && process.env.AI_MOCK_FILE) || "";
 const mockEnabled = () => !!mockFile();
+// The file may hold a JSON array: its entries (strings, or {"error": "msg"} to simulate a provider failure) are
+// returned one per call, in order, and the list starts over whenever the file's content changes. Past the end it fails.
+const mockState = { content: null, i: 0 };
+function mockNext() {
+  const content = fs.readFileSync(mockFile(), "utf8");
+  if (mockState.content !== content) { mockState.content = content; mockState.i = 0; }
+  let arr = null;
+  if (content.trim().startsWith("[")) { try { const a = JSON.parse(content); if (Array.isArray(a)) arr = a; } catch { /* plain text */ } }
+  if (!arr) return content;
+  if (mockState.i >= arr.length) throw new Error("mock AI: no more scripted responses");
+  const v = arr[mockState.i++];
+  if (v && typeof v === "object" && v.error) throw new Error(String(v.error));
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
 
 async function post(url, headers, body, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
@@ -41,7 +55,7 @@ async function post(url, headers, body, timeoutMs = TIMEOUT_MS) {
 
 // Send one system + user message, get text back. opts: { maxTokens (default 400), timeoutMs (default 15s) }.
 async function complete(cfg, system, user, opts = {}) {
-  if (mockEnabled()) return fs.readFileSync(mockFile(), "utf8");
+  if (mockEnabled()) return mockNext();
   const { provider, model, baseUrl, apiKey } = cfg;
   const maxTokens = opts.maxTokens || 400, timeoutMs = opts.timeoutMs || TIMEOUT_MS;
   if (provider === "anthropic") {
@@ -143,4 +157,122 @@ async function testConnection(cfg) {
   return { ms: Date.now() - t0, reply: String(text).trim().slice(0, 40) };
 }
 
-module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled };
+// ---------- conversational turn ----------
+const MAX_ASKS = 3;
+const EMERGENCY_RE = /\b(fire|smoke|smoking|burning|medical|ambulance|911|unconscious|passed out|collapsed|bleeding|blood|injur\w*|hurt|heart attack|seizure|stroke|overdos\w*|not breathing|can'?t breathe|choking|drown\w*|gun|weapon|knife|shots?|shooting|stabb\w*|assault\w*|attack\w*|violen\w*|threaten\w*|gas leak|smell gas|smells? like gas|carbon monoxide|flood\w*|water pouring|burst pipe|suicid\w*)\b/i;
+const isEmergency = (text) => EMERGENCY_RE.test(String(text || ""));
+// Money, safety, security, legal/ID or policy: expert advice must be confirmed with a manager.
+const CONFIRM_RE = /\b(refund\w*|comp|comps|comped|compensat\w*|discount\w*|rebate|waive\w*|charge\w*|fee|fees|price|rate|rates|money|cash|payment|pay|paid|deposit|credit card|chargeback|dispute\w*|lawsuit|legal|lawyer|police|safety|unsafe|security|theft|stolen|id|identification|passport|license|policy|policies|injur\w*|medical|fire|weapon|threat\w*|harass\w*|discriminat\w*|bed ?bugs?|insurance|liabilit\w*)\b/i;
+const needsConfirm = (text) => CONFIRM_RE.test(String(text || ""));
+
+const clip = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
+
+// Turns the model's parsed JSON into one safe result, applying the rules the server enforces whatever the model says.
+// ctx: { valid:Set<sopId>, stepCount:{id:n}, asks:int (asks since the last answer), expert:bool, emergency:bool,
+//        emergencyId:string|null, fallbackIds:[ids best first], staffText:string }
+function coerceTurn(raw, ctx) {
+  if (!raw || typeof raw !== "object") throw new Error("The AI reply wasn't understood");
+  const valid = (id) => (typeof id === "string" && ctx.valid.has(id.trim().toUpperCase()) ? id.trim().toUpperCase() : null);
+  const action = String(raw.action || "").toLowerCase();
+  const cands = (Array.isArray(raw.candidates) ? raw.candidates : []).map(valid).filter(Boolean);
+  const toAnswer = (id, extra = {}) => {
+    const n = ctx.stepCount[id] || 0;
+    const focus = [...new Set((Array.isArray(extra.focus_steps) ? extra.focus_steps : []).map(Number).filter((k) => Number.isInteger(k) && k >= 1 && k <= n))].sort((a, b) => a - b).slice(0, 6);
+    return { kind: "answer", sopId: id, answer: clip(extra.answer, 600) || null, tip: clip(extra.tip, 220) || null, focusSteps: focus.length && focus.length < n ? focus : [], coerced: !!extra.coerced };
+  };
+  const advise = () => {
+    const advice = ctx.expert && !ctx.emergency ? clip(raw.advice, 700) : "";
+    if (!advice) return { kind: "none" };
+    return { kind: "advise", advice, confirm: raw.confirm === true || needsConfirm(ctx.staffText) || needsConfirm(advice) };
+  };
+  if (ctx.emergency && action !== "answer") {
+    const id = ctx.emergencyId && valid(ctx.emergencyId) || cands[0] || null;
+    return id ? toAnswer(id, { coerced: true }) : { kind: "none" };
+  }
+  if (action === "answer") {
+    const id = valid(raw.sop_id);
+    return id ? toAnswer(id, raw) : advise();
+  }
+  if (action === "ask") {
+    const question = clip(raw.question, 200);
+    let options = [...new Set((Array.isArray(raw.options) ? raw.options : []).map((o) => clip(String(o ?? ""), 40)).filter(Boolean))].slice(0, 4);
+    if (options.length === 1) options.push("Something else");
+    if (!question || options.length < 2 || ctx.asks >= MAX_ASKS) {
+      const id = cands[0] || (ctx.fallbackIds || [])[0] || null;
+      return id ? toAnswer(id, { coerced: true }) : { kind: "none" };
+    }
+    return { kind: "ask", question, options, why: raw.why === "troubleshoot" ? "troubleshoot" : "clarify", candidates: cands };
+  }
+  if (action === "advise") return advise();
+  if (action === "none") return { kind: "none" };
+  throw new Error("The AI reply wasn't understood");
+}
+
+function looseParse(text) {
+  const s = String(text || "").replace(/[\u201C\u201D]/g, '"').replace(/```(?:json)?/gi, "");
+  const m = s.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  for (const t of [m[0], m[0].replace(/,\s*([}\]])/g, "$1")]) { try { return JSON.parse(t); } catch { /* next */ } }
+  return null;
+}
+
+function converseSystem({ hotelName, system, expert }) {
+  return [
+    `You are the voice of Ask Lotus at ${hotelName || "this hotel"}: a seasoned master hotel operator with 20+ years running select-service and full-service hotels, from the front desk to general manager. You know PMS work, guest recovery, safety and revenue basics. You are coaching a front desk agent in the middle of a shift.`,
+    system ? `Front desk system: ${system}.` : "",
+    "VOICE: Confident and direct. Lead with the action. No hedging (no \"I think\", \"you may want to\", \"maybe\", \"perhaps\"). Plain words a front desk agent can follow mid-shift. 1 to 3 short sentences.",
+    "AUTHORITY: The hotel's SOPs are the authority. Answer from them and never contradict them. Use the exact names, phone numbers, amounts and times in the SOP. Never invent a procedure, price, fee, policy, time, room number or phone number. Where the SOP says \"ask a manager\", tell them to ask a manager.",
+    "You see a conversation between a staff member and the assistant, a shortlist of SOPs with full text, the SOP shown last turn (if any), and a list of all SOP titles. Reply with ONE JSON object and nothing else, in one of these shapes:",
+    '{"action":"answer","sop_id":"XX-00","answer":"1-3 plain sentences answering THIS conversation from the SOP","tip":"optional","focus_steps":[step numbers, optional]}',
+    '{"action":"ask","question":"one short question","options":["2-4 short answers"],"why":"clarify" or "troubleshoot","candidates":["sop ids you are considering"]}',
+    expert
+      ? '{"action":"advise","advice":"2-4 short sentences of practical operator guidance","confirm":true or false}'
+      : '{"action":"none"}',
+    expert ? '{"action":"none"} is only for a message that is not a hotel question at all.' : "",
+    "WHEN TO ASK: If the question is vague, or it describes a problem and the SOP has branches that change what the agent should do (still staying or checked out, card or cash, lock flashes red or shows nothing, which of two SOPs applies), ask ONE question back, like a manager would, before answering. Questions must come from the SOP text provided (a choice between candidate SOPs, or which branch of an SOP applies). Ask at most ONE question per turn. Never ask something the conversation already answered. Do not ask when you can answer well already.",
+    `OPTIONS: 2 to 4 options, each 5 words or fewer, mutually exclusive, written as the staff member would say them. You may include "Something else".`,
+    `LIMITS: After ${MAX_ASKS} questions in a row you MUST answer with the best SOP. For an emergency (fire, medical, violence, gas, flood, someone hurt) never ask: answer immediately with the emergency SOP. A clear question gets an answer right away.`,
+    "FOLLOW-UPS: After an answer, a follow-up (for example \"what if they say no?\") is answered from the same SOP unless the staff member clearly changed topic; if the topic is clearly new, ignore the earlier turns and treat it as a fresh question.",
+    "ANSWER TEXT: Address what the staff member actually described, for example \"Since the lock flashes red, the key needs re-encoding: ...\". focus_steps lists the step numbers of the SOP most relevant to this conversation (leave it out if all apply).",
+    'TIP: In an answer you may add "tip": ONE short line of practical operator advice (how to phrase something to an upset guest, what to note in the log). It adds to the SOP and never contradicts or replaces it, and contains no prices, policies, phone numbers or procedures that are not in the SOP. Leave it out when there is nothing useful.',
+    expert
+      ? 'NO SOP FITS: Use "advise": 2 to 4 short sentences of general best practice from your experience. Never state property-specific facts (fees, hours, phone numbers, room numbers, names) that are not in the SOPs. Set "confirm": true whenever money, refunds or comps, safety, security, legal or ID, or policy is involved. Never use advise for an emergency.'
+      : "NO SOP FITS: reply with the none action. Never answer from your own knowledge.",
+  ].filter(Boolean).join("\n");
+}
+
+function sopBlock(s) {
+  return [
+    `SOP ${s.id}: ${s.title} (${s.category})`,
+    ...s.steps.map((t, i) => `  ${i + 1}. ${t}`),
+    s.script ? `  Say to the guest: ${s.script}` : "",
+    s.flag ? `  Call a manager if: ${s.flag}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+// turns: [{role:"staff",text} | {role:"assistant",kind:"ask",question,options} | {role:"assistant",kind:"answer",sop_id,answer} | {role:"assistant",kind:"advise"|"none"}]
+// candidates / lastSop: SOPs already resolved with tokens.forModel. Returns the parsed (uncoerced) JSON object.
+async function converse(cfg, { hotelName, system, turns, candidates, catalog, lastSop, expert, asks }) {
+  const sys = converseSystem({ hotelName, system, expert: expert !== false });
+  const convo = turns.slice(-16).map((t) => {
+    if (t.role === "staff") return `STAFF: ${t.text}`;
+    if (t.kind === "ask") return `ASSISTANT asked: ${t.question} [options: ${(t.options || []).join(" | ")}]`;
+    if (t.kind === "answer") return `ASSISTANT answered from ${t.sop_id}: ${t.answer || "(showed the SOP)"}`;
+    if (t.kind === "advise") return "ASSISTANT gave general guidance (no SOP fit)";
+    return "ASSISTANT: no SOP fit";
+  }).join("\n");
+  const shown = lastSop ? `\nSOP shown last turn (the conversation is probably still about it):\n${sopBlock(lastSop)}\n` : "";
+  const cand = candidates.filter((c) => !lastSop || c.id !== lastSop.id);
+  const user = [
+    `Conversation so far (the last STAFF line is the newest message). Questions already asked since the last answer: ${asks || 0} of ${MAX_ASKS}.`,
+    convo, shown,
+    "Shortlist of SOPs (full text):", cand.map(sopBlock).join("\n\n") || "(none matched by keyword)",
+    "\nAll SOP titles:", catalog.map((s) => `${s.id} ${s.title}`).join("\n"),
+  ].join("\n");
+  const text = await complete(cfg, sys, user, { maxTokens: 700 });
+  const out = looseParse(text);
+  if (!out) throw new Error("The AI reply wasn't understood");
+  return out;
+}
+
+module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, looseParse, isEmergency, needsConfirm, MAX_ASKS };
