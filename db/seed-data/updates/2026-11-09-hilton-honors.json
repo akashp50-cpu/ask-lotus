@@ -53,7 +53,7 @@
       "steps": [
         { "t": "Tiers, lowest to highest: Member, Silver, Gold, Diamond, Diamond Reserve. Check the tier on the reservation." },
         { "t": "Silver: bonus points; two bottles of water at check-in where offered." },
-        { "t": "Gold: Silver benefits plus space-available upgrades and more bonus points. [CHECK: Gold food and beverage credit at Hampton]" },
+        { "t": "Gold: Silver benefits plus space-available upgrades and more bonus points. [CHECK: whether this hotel's brand gives Gold a food and beverage credit]", "hampton": "Gold: Silver benefits plus space-available upgrades and more bonus points. There's no food and beverage credit at Hampton; breakfast is free for every guest." },
         { "t": "Diamond: Gold benefits plus more bonus points, premium Wi-Fi and a 48-hour room guarantee (booked through Hilton). Diamond members can check in without a physical ID (property rule)." },
         { "t": "Diamond Reserve: Diamond benefits plus a guaranteed 4 PM late checkout and the highest upgrade priority. See HH-11 and HH-12." },
         { "t": "Late checkout for every other tier follows CO-04: full night after {Late check-out cutoff} unless a manager waives it." },
