@@ -1,0 +1,91 @@
+{
+  "id": "2026-11-09-hilton-honors",
+  "note": "Hilton Honors 2026 tiers incl. Diamond Reserve; Diamond Reserve 4 PM checkout confirm flow; log book labeling standard. Requested by Akash 2026-11-09.",
+  "images": {
+    "pep-guest-line": "img/pep-guest-line.jpg",
+    "pep-departure-time": "img/pep-departure-time.jpg",
+    "quore-late-checkout": "img/quore-late-checkout-example.jpg"
+  },
+  "sops": [
+    {
+      "id": "HH-11",
+      "cat": "Hilton Honors and brand standards",
+      "title": "Diamond Reserve: confirm the 4 PM late checkout",
+      "applies": "hilton",
+      "requires": null,
+      "kw": "diamond reserve, late checkout, 4pm checkout, 4 pm, guaranteed late checkout, departure time, diamond reserve checkout",
+      "steps": [
+        { "t": "Diamond Reserve members get a guaranteed 4 PM late checkout. PEP adds 4 PM to their reservation automatically." },
+        { "t": "Don't assume they need 4 PM. At check-in, or the evening before departure, ask the guest what time they actually plan to check out." },
+        { "t": "In PEP, open the reservation > Stay tab > Departure Time and set the time the guest gave you (4 PM at the latest). Save.", "img": "pep-departure-time" },
+        { "t": "Post it in the housekeeping WhatsApp chat so they can plan the room: room number, guest name and the confirmed checkout time.", "hampton": "Post it in the Hampton HK WhatsApp chat so housekeeping can plan the room: room number, guest name and the confirmed checkout time." },
+        { "t": "Copy the guest line from the top of the reservation in PEP: confirmation number / LAST, FIRST / Room - number.", "img": "pep-guest-line" },
+        { "t": "Log it in {Log book app} > Add Log Book. Headline: paste the guest line, then add \"- Housekeeping- Late Checkout\". Entry: \"Confirmed with the Diamond Reserve Member that they will be checking out by [time]. Adjusted on PEP and communicated on WhatsApp.\" Date: today. Property: this hotel. Post.", "hampton": "Log it in Quore > Add Log Book. Headline: paste the guest line, then add \"- Housekeeping- Late Checkout\". Entry: \"Confirmed with the Diamond Reserve Member that they will be checking out by [time]. Adjusted on PEP and communicated on WhatsApp.\" Date: today. Property: Hampton Inn Overland Park. Post.", "img": "quore-late-checkout" }
+      ],
+      "script": "\"As a Diamond Reserve member, your checkout is guaranteed until 4 PM. What time would you like to check out?\"",
+      "flag": "The guest wants to stay past 4 PM, or the 4 PM checkout is missing from a Diamond Reserve reservation. Call {AGM}."
+    },
+    {
+      "id": "HH-12",
+      "cat": "Hilton Honors and brand standards",
+      "title": "Diamond Reserve: other benefits",
+      "applies": "hilton",
+      "requires": null,
+      "kw": "diamond reserve, diamond reserve benefits, confirmed upgrade, confirmable upgrade reward, cur, top tier, highest tier",
+      "steps": [
+        { "t": "Diamond Reserve is Hilton Honors' top tier, above Diamond. It includes every Diamond benefit." },
+        { "t": "Late checkout: guaranteed until 4 PM. Follow HH-11 to confirm the real time." },
+        { "t": "Upgrades: Diamond Reserve gets the highest upgrade priority. Offer the best room available for the whole stay before any other guest (HH-06)." },
+        { "t": "Confirmed Upgrade Rewards: if the reservation shows a confirmed upgrade, it's already guaranteed. Honor it; don't downgrade the room." },
+        { "t": "Bonus points (120%) post automatically after the stay. Nothing to do at the desk." },
+        { "t": "Hilton's Diamond Reserve support team may call the hotel with a request for the guest. Treat it like a request from the guest and log it." }
+      ],
+      "script": "\"Welcome back, and thank you for being a Diamond Reserve member.\"",
+      "flag": "You can't honor a confirmed upgrade or the guest says a benefit is missing. Call {AGM}."
+    },
+    {
+      "id": "HH-03",
+      "cat": "Hilton Honors and brand standards",
+      "title": "Honors tier benefits",
+      "applies": "hilton",
+      "requires": null,
+      "kw": "tier benefits, gold benefits, diamond benefits, silver benefits, diamond reserve benefits, what do i get, honors status",
+      "steps": [
+        { "t": "Tiers, lowest to highest: Member, Silver, Gold, Diamond, Diamond Reserve. Check the tier on the reservation." },
+        { "t": "Silver: bonus points; two bottles of water at check-in where offered." },
+        { "t": "Gold: Silver benefits plus space-available upgrades and more bonus points. [CHECK: Gold food and beverage credit at Hampton]" },
+        { "t": "Diamond: Gold benefits plus more bonus points, premium Wi-Fi and a 48-hour room guarantee (booked through Hilton). Diamond members can check in without a physical ID (property rule)." },
+        { "t": "Diamond Reserve: Diamond benefits plus a guaranteed 4 PM late checkout and the highest upgrade priority. See HH-11 and HH-12." },
+        { "t": "Late checkout for every other tier follows CO-04: full night after {Late check-out cutoff} unless a manager waives it." },
+        { "t": "For anything else, the guest can check their benefits in the Hilton Honors app." }
+      ],
+      "script": "",
+      "flag": ""
+    },
+    {
+      "id": "SH-12",
+      "cat": "Shift routines and handoff",
+      "title": "How to label a log book entry",
+      "applies": "all",
+      "requires": null,
+      "kw": "log book, quore, log entry, headline, label, how to log, log book format, add log book",
+      "steps": [
+        { "t": "Open {Log book app} > Add Log Book.", "hampton": "Open Quore > Add Log Book." },
+        { "t": "Headline: copy the guest line from the top of the reservation in PEP (confirmation number / LAST, FIRST / Room - number), paste it, then add \"- Department- Topic\". Example: \"96879812 / ACKERLEY, LORI / Room - 517- Housekeeping- Late Checkout\".", "hk": "Headline: copy the guest line from the top of the reservation in HotelKey (confirmation number / LAST, FIRST / Room - number), paste it, then add \"- Department- Topic\".", "img": "pep-guest-line" },
+        { "t": "Entry: what was confirmed with the guest, what you changed in PEP, and who you told (for example \"communicated on WhatsApp\").", "hk": "Entry: what was confirmed with the guest, what you changed in HotelKey, and who you told (for example \"communicated on WhatsApp\")." },
+        { "t": "Date: today. Property: this hotel. Post.", "hampton": "Date: today. Property: Hampton Inn Overland Park. Post.", "img": "quore-late-checkout" }
+      ],
+      "script": "",
+      "flag": ""
+    },
+    {
+      "id": "CO-04",
+      "cat": "Departures and check-out",
+      "title": "Late checkout request",
+      "applies": "all",
+      "requires": null,
+      "kw": "late check out, late checkout, stay later, extend checkout, leave later",
+      "patch": { "append_step": { "t": "Diamond Reserve members already have a guaranteed 4 PM checkout: follow HH-11 instead.", "hk": "Skip this step at this hotel." } }
+    }
+  ]
+}
