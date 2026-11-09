@@ -18,7 +18,7 @@ test("looseParse reads fenced, chatty and trailing-comma JSON", () => {
 
 test("answer: validates the SOP id, cleans focus steps, trims tip", () => {
   const r = ai.coerceTurn({ action: "answer", sop_id: "ky-01", answer: "  Re-encode the key. ", tip: "Stay calm.", focus_steps: [2, 2, 9, "x", 3] }, ctx());
-  assert.deepStrictEqual(r, { kind: "answer", sopId: "KY-01", answer: "Re-encode the key.", tip: "Stay calm.", focusSteps: [2, 3], coerced: false });
+  assert.deepStrictEqual(r, { kind: "answer", sopId: "KY-01", answer: "Re-encode the key.", tip: "Stay calm.", focusSteps: [2, 3], coerced: false, escalate: null });
   // all steps relevant -> no highlight
   assert.deepStrictEqual(ai.coerceTurn({ action: "answer", sop_id: "EM-01", answer: "x", focus_steps: [1, 2, 3] }, ctx()).focusSteps, []);
 });
@@ -52,7 +52,7 @@ test("ask with no question or fewer than two options is not shown", () => {
 });
 
 test("emergency: never asks or gives generic advice", () => {
-  assert.ok(ai.isEmergency("there is smoke in room 214") && ai.isEmergency("guest collapsed in the lobby") && !ai.isEmergency("guest lost key"));
+  assert.ok(ai.isEmergency("there is smoke in room 214") && ai.isEmergency("guest says there is a gas smell in the hallway") && ai.isEmergency("guest collapsed in the lobby") && !ai.isEmergency("guest lost key"));
   const c = ctx({ emergency: true, emergencyId: "EM-01" });
   assert.strictEqual(ai.coerceTurn({ action: "ask", question: "Q?", options: ["A", "B"] }, c).sopId, "EM-01");
   assert.strictEqual(ai.coerceTurn({ action: "advise", advice: "Call someone." }, c).sopId, "EM-01");
@@ -99,4 +99,72 @@ test("AI_MOCK_FILE: array entries are consumed in order; errors and exhaustion t
     if (prev === undefined) delete process.env.AI_MOCK_FILE; else process.env.AI_MOCK_FILE = prev;
     if (prevEnv !== undefined) process.env.NODE_ENV = prevEnv;
   }
+});
+
+// ---------- escalation (urgent call vs team chat) ----------
+const ans = (extra = {}) => ({ action: "answer", sop_id: "KY-01", answer: "Re-encode the key.", ...extra });
+
+test("escalate: a valid object is kept, cleaned and capped", () => {
+  const r = ai.coerceTurn(ans({ escalate: { level: "CHAT", chat: "Housekeeping", message: "  Room 214 needs two\n extra towels \u{1F600}. Can someone bring them?  " } }), ctx());
+  assert.deepStrictEqual(r.escalate, { level: "chat", chat: "housekeeping", message: "Room 214 needs two extra towels . Can someone bring them?", why: null, emergency: false });
+  assert.strictEqual(ai.coerceTurn(ans({ escalate: { level: "chat", chat: "front_desk", message: "x".repeat(900) } }), ctx()).escalate.message.length, 400);
+  assert.ok(!/CHECK/.test(ai.coerceTurn(ans({ escalate: { level: "chat", chat: "front_desk", message: "Rate? [CHECK: confirm] please" } }), ctx()).escalate.message));
+});
+
+test("escalate: unknown chat defaults to front_desk, empty message gets the template, urgent keeps its reason", () => {
+  const r = ai.coerceTurn(ans({ escalate: { level: "chat", chat: "maintenance", message: "" } }), ctx({ staffText: "room 305 asks about the rate" }));
+  assert.strictEqual(r.escalate.chat, "front_desk");
+  assert.strictEqual(r.escalate.message, "Room 305: asks about the rate. Can a manager confirm?");
+  const u = ai.coerceTurn(ans({ escalate: { level: "urgent", chat: "front_desk", message: "Guest upset at the desk." } }), ctx());
+  assert.strictEqual(u.escalate.level, "urgent"); assert.strictEqual(u.escalate.why, "ai"); assert.strictEqual(u.escalate.emergency, false);
+});
+
+test("escalate: malformed objects are dropped on answers, rebuilt on advice", () => {
+  for (const bad of ["urgent", 5, [], { level: "asap", chat: "front_desk", message: "m" }, { chat: "front_desk", message: "m" }, null]) {
+    assert.strictEqual(ai.coerceTurn(ans({ escalate: bad }), ctx()).escalate, null, JSON.stringify(bad));
+  }
+  assert.strictEqual(ai.coerceTurn(ans(), ctx()).escalate, null); // none sent, none required
+  // advice always carries one: a bad or missing object becomes a chat template
+  const a = ai.coerceTurn({ action: "advise", advice: "Offer a quiet seat.", escalate: { level: "bogus" } }, ctx({ staffText: "guest wants a chair" }));
+  assert.deepStrictEqual([a.escalate.level, a.escalate.chat, a.escalate.message], ["chat", "front_desk", "[Room #]: guest wants a chair. Can a manager confirm?"]);
+  assert.strictEqual(ai.coerceTurn({ action: "advise", advice: "Offer a quiet seat." }, ctx()).escalate.level, "chat");
+});
+
+test("escalate: emergencies are always urgent with the 911 flag, never chat", () => {
+  const c = ctx({ emergency: true, emergencyId: "EM-01", staffText: "smoke in room 305" });
+  const r = ai.coerceTurn(ans({ sop_id: "EM-01", escalate: { level: "chat", chat: "housekeeping", message: "Smoke in 305" } }), c);
+  assert.strictEqual(r.escalate.level, "urgent"); assert.strictEqual(r.escalate.emergency, true); assert.strictEqual(r.escalate.why, "emergency");
+  // an emergency answer the model sent no escalate for still gets one; a forced answer too
+  assert.strictEqual(ai.coerceTurn(ans({ sop_id: "EM-01" }), c).escalate.level, "urgent");
+  assert.strictEqual(ai.coerceTurn({ action: "ask", question: "Q?", options: ["A", "B"] }, c).escalate.emergency, true);
+});
+
+test("escalate: money or safety with a guest present right now is forced urgent; without a guest it stays chat", () => {
+  const chat = { level: "chat", chat: "front_desk", message: "Guest wants a refund." };
+  const now = ai.coerceTurn({ action: "advise", advice: "Listen first.", escalate: chat }, ctx({ staffText: "guest at the desk wants a refund" }));
+  assert.strictEqual(now.escalate.level, "urgent"); assert.strictEqual(now.escalate.why, "guest_waiting");
+  const later = ai.coerceTurn({ action: "advise", advice: "Listen first.", escalate: chat }, ctx({ staffText: "guest called yesterday about a refund" }));
+  assert.strictEqual(later.escalate.level, "chat");
+  const plain = ai.coerceTurn({ action: "advise", advice: "Offer a seat.", escalate: chat }, ctx({ staffText: "guest is waiting for a chair" }));
+  assert.strictEqual(plain.escalate.level, "chat"); // waiting, but no money or safety term
+  assert.ok(ai.guestPresent("guest is on the phone right now") && !ai.guestPresent("guest called yesterday"));
+});
+
+test("fallback escalate: generic chat instruction with a template; housekeeping topics; emergency is urgent", () => {
+  const f = ai.fallbackEscalate({ staffText: "can the guest keep the room rate" });
+  assert.deepStrictEqual([f.level, f.chat, f.generic], ["chat", "front_desk", true]);
+  assert.strictEqual(f.message, "[Room #]: can the guest keep the room rate. Can a manager confirm?");
+  for (const t of ["need extra towels in 214", "room is dirty", "guest left a phone behind, lost and found", "out of shampoo and soap", "which linens go on a rollaway", "AC maintenance in the room"]) assert.strictEqual(ai.fallbackEscalate({ staffText: t }).chat, "housekeeping", t);
+  for (const t of ["guest wants late checkout", "PEP is slow", "how do I split a payment"]) assert.strictEqual(ai.fallbackEscalate({ staffText: t }).chat, "front_desk", t);
+  assert.strictEqual(ai.fallbackEscalate({ staffText: "x", topicText: "Housekeeping supplies" }).chat, "housekeeping"); // matched SOP's topic
+  const e = ai.fallbackEscalate({ staffText: "smoke on the third floor" });
+  assert.deepStrictEqual([e.level, e.emergency], ["urgent", true]);
+  assert.strictEqual(ai.fallbackEscalate({ staffText: "guest at the desk disputes a charge" }).level, "urgent");
+  assert.strictEqual(ai.templateMessage("room 214 key is not working"), "Room 214: key is not working. Can a manager confirm?");
+});
+
+test("system prompt carries the escalate rules", () => {
+  const p = ai.converseSystem({ hotelName: "H", system: "PEP", expert: true });
+  for (const needle of ['"escalate"', "urgent", "housekeeping", "front_desk", "EVERY advise", "never invent", "no emojis", "[room #]", "never \"chat\""]) assert.ok(p.toLowerCase().includes(needle.toLowerCase()), needle);
+  assert.ok(ai.converseSystem({ expert: false }).includes("ESCALATE"));
 });

@@ -159,18 +159,83 @@ async function testConnection(cfg) {
 
 // ---------- conversational turn ----------
 const MAX_ASKS = 3;
-const EMERGENCY_RE = /\b(fire|smoke|smoking|burning|medical|ambulance|911|unconscious|passed out|collapsed|bleeding|blood|injur\w*|hurt|heart attack|seizure|stroke|overdos\w*|not breathing|can'?t breathe|choking|drown\w*|gun|weapon|knife|shots?|shooting|stabb\w*|assault\w*|attack\w*|violen\w*|threaten\w*|gas leak|smell gas|smells? like gas|carbon monoxide|flood\w*|water pouring|burst pipe|suicid\w*)\b/i;
+const EMERGENCY_RE = /\b(fire|smoke|smoking|burning|medical|ambulance|911|unconscious|passed out|collapsed|bleeding|blood|injur\w*|hurt|heart attack|seizure|stroke|overdos\w*|not breathing|can'?t breathe|choking|drown\w*|gun|weapon|knife|shots?|shooting|stabb\w*|assault\w*|attack\w*|violen\w*|threaten\w*|gas leak|gas smell|smell of gas|smell gas|smells? like gas|carbon monoxide|flood\w*|water pouring|burst pipe|suicid\w*)\b/i;
 const isEmergency = (text) => EMERGENCY_RE.test(String(text || ""));
 // Money, safety, security, legal/ID or policy: expert advice must be confirmed with a manager.
 const CONFIRM_RE = /\b(refund\w*|comp|comps|comped|compensat\w*|discount\w*|rebate|waive\w*|charge\w*|fee|fees|price|rate|rates|money|cash|payment|pay|paid|deposit|credit card|chargeback|dispute\w*|lawsuit|legal|lawyer|police|safety|unsafe|security|theft|stolen|id|identification|passport|license|policy|policies|injur\w*|medical|fire|weapon|threat\w*|harass\w*|discriminat\w*|bed ?bugs?|insurance|liabilit\w*)\b/i;
 const needsConfirm = (text) => CONFIRM_RE.test(String(text || ""));
+// Narrower list for forcing "urgent" when a guest is present: decisions or risks a manager must own right now.
+// (Plain rate, payment or policy questions with a guest at the desk stay "chat" unless the model says otherwise.)
+const URGENT_RE = /\b(refund\w*|comp|comps|comped|compensat\w*|discount\w*|waive\w*|chargeback|dispute\w*|lawsuit|legal|lawyer|police|unsafe|theft|stolen|weapon|threat\w*|harass\w*|discriminat\w*|injur\w*|bed ?bugs?|no (photo )?id|fake id)\b/i;
+const needsUrgent = (text) => URGENT_RE.test(String(text || ""));
 
 const clip = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
+
+// ---------- escalation: who the agent should ask, and how urgently ----------
+// A guest is in front of the agent (or on the phone) right now.
+const PRESENT_RE = /\b(at the (front )?desk|at the counter|in the lobby|standing here|standing there|waiting|right now|on the phone|on the line|on hold|in front of me|here now|checking in now|checking out now)\b/i;
+const guestPresent = (text) => PRESENT_RE.test(String(text || ""));
+// Topics the Housekeeping chat answers. Everything else goes to the Front Desk chat.
+const HOUSEKEEPING_RE = /\b(housekeep\w*|clean\w*|dirty|towels?|linens?|sheets?|pillows?|blankets?|bedding|duvet|toiletr\w*|shampoo|conditioner|soap|amenit\w*|supplies|restock\w*|vacuum\w*|trash|garbage|laundry|lost and found|lost & found|left behind|room status|vacant clean|inspected|turn ?down|stain\w*|mattress|crib|rollaway|roll away|ironing board|hair ?dryer|coffee maker|fridge|refrigerator|microwave|maintenance|out of order|ooo|do not disturb|dnd)\b/i;
+const isHousekeepingTopic = (text) => HOUSEKEEPING_RE.test(String(text || ""));
+const CHATS = new Set(["front_desk", "housekeeping"]);
+// Strips emoji and [CHECK] notes, collapses whitespace, caps length. Staff must never see [CHECK] text.
+const cleanMsg = (v, n = 400) => clip(String(typeof v === "string" ? v : "").replace(/\[CHECK:?[^\]]*\]/gi, "").replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, ""), n);
+
+// "[Room #]: <what they asked>. Can a manager confirm?" with the room number when the staff text names one.
+function templateMessage(staffText) {
+  const room = String(staffText || "").match(/\broom\s*#?\s*(\d{2,4})\b/i);
+  const body = room ? String(staffText).replace(room[0], "").replace(/^[\s,:.-]+/, "") : String(staffText || "");
+  const text = clip(body.replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, ""), 220).replace(/[.?!\s]+$/, "");
+  return `${room ? "Room " + room[1] : "[Room #]"}: ${text || "[question]"}. Can a manager confirm?`;
+}
+
+// The level the server insists on whatever the model says: emergencies are always urgent; money or safety terms
+// with a guest present right now are urgent. Returns a reason code or null.
+function urgentReason(text, emergency) {
+  if (emergency || isEmergency(text)) return "emergency";
+  if (needsUrgent(text) && guestPresent(text)) return "guest_waiting";
+  return null;
+}
+
+// escalate: the model's object (or anything). Returns { level, chat, message, why, emergency } or null when malformed.
+// ctx: { staffText, emergency, answer, forceAnyway } - forceAnyway builds one even when the model sent none (advice, emergencies).
+function coerceEscalate(raw, ctx = {}) {
+  const staff = String(ctx.staffText || "");
+  const why = urgentReason(staff, ctx.emergency) || (ctx.answer && needsUrgent(ctx.answer) && guestPresent(staff) ? "guest_waiting" : null);
+  let o = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  if (o) {
+    const level = String(o.level || "").toLowerCase();
+    if (level !== "urgent" && level !== "chat") o = null; // malformed: drop
+    else o = { level, chat: String(o.chat || "").toLowerCase().replace(/[\s-]+/g, "_"), message: cleanMsg(o.message) };
+  }
+  if (!o && !ctx.forceAnyway) return null; // the model sent none and none is required
+  if (!o) o = { level: why ? "urgent" : "chat", chat: "", message: "" };
+  if (!CHATS.has(o.chat)) o.chat = "front_desk";
+  if (!o.message) o.message = templateMessage(staff);
+  if (why) o.level = "urgent"; // the server forces urgent; it never lowers a level
+  return { level: o.level, chat: o.chat, message: o.message, why: o.level === "urgent" ? why || "ai" : null, emergency: why === "emergency" };
+}
+
+// No model message is available (keyword path, not-covered card): a generic instruction and a template message.
+function fallbackEscalate({ staffText, topicText }) {
+  const hk = isHousekeepingTopic(topicText != null ? topicText : staffText) || isHousekeepingTopic(staffText);
+  const why = urgentReason(staffText, false);
+  return { level: why ? "urgent" : "chat", chat: hk ? "housekeeping" : "front_desk", message: templateMessage(staffText), why, emergency: why === "emergency", generic: true };
+}
 
 // Turns the model's parsed JSON into one safe result, applying the rules the server enforces whatever the model says.
 // ctx: { valid:Set<sopId>, stepCount:{id:n}, asks:int (asks since the last answer), expert:bool, emergency:bool,
 //        emergencyId:string|null, fallbackIds:[ids best first], staffText:string }
 function coerceTurn(raw, ctx) {
+  const r = coerceTurnBase(raw, ctx);
+  // Answers and advice carry the model's escalate object (validated). Advice always has one; an emergency answer always does.
+  if (r.kind === "answer") r.escalate = coerceEscalate(raw && raw.escalate, { staffText: ctx.staffText, emergency: ctx.emergency, answer: r.answer, forceAnyway: !!ctx.emergency });
+  else if (r.kind === "advise") r.escalate = coerceEscalate(raw && raw.escalate, { staffText: ctx.staffText, answer: r.advice, forceAnyway: true });
+  return r;
+}
+
+function coerceTurnBase(raw, ctx) {
   if (!raw || typeof raw !== "object") throw new Error("The AI reply wasn't understood");
   const valid = (id) => (typeof id === "string" && ctx.valid.has(id.trim().toUpperCase()) ? id.trim().toUpperCase() : null);
   const action = String(raw.action || "").toLowerCase();
@@ -216,6 +281,15 @@ function looseParse(text) {
   return null;
 }
 
+// Added to the system prompt: when and how to route the agent to a manager (urgent call) or the team's WhatsApp chats.
+const ESCALATE_RULES = [
+  'ESCALATE: In an answer or advise reply you may add "escalate": {"level":"urgent" or "chat","chat":"front_desk" or "housekeeping","message":"the message to post"}.',
+  'Include escalate when the SOP (steps or the "Call a manager if" line) or your own answer tells the agent to involve, ask or call a manager or someone else, when an "ask a manager" / "not set" gap blocks the answer, and on EVERY advise reply. Otherwise leave it out.',
+  'level "urgent" = a guest is waiting right now and cannot proceed, a money, refund or comp decision is happening now, a safety or security risk, someone is upset and escalating, or a system is down that stops check-in or check-out. The agent will phone a manager. Any other case is level "chat": a question the team can answer in their group chat in a few minutes. Emergencies (fire, medical, violence, gas, flood) are never "chat".',
+  'chat picks the group: "housekeeping" for rooms, cleaning, linens, towels, amenity stock, supplies, maintenance handoffs for a room, lost and found and room status; "front_desk" for everything else (reservations, rates, payments, PEP or HotelKey, policies, guest issues, shifts).',
+  'message is ready to paste in WhatsApp, in the staff member\'s own voice: 1 to 3 short sentences, no emojis, no greeting. Include the room number and guest name only if the conversation gave them (otherwise write "[room #]"; never invent one), what the guest wants, what was already tried, and one clear question. Do not name the chat in the message.',
+].join(" ");
+
 function converseSystem({ hotelName, system, expert }) {
   return [
     `You are the voice of Ask Lotus at ${hotelName || "this hotel"}: a seasoned master hotel operator with 20+ years running select-service and full-service hotels, from the front desk to general manager. You know PMS work, guest recovery, safety and revenue basics. You are coaching a front desk agent in the middle of a shift.`,
@@ -223,10 +297,10 @@ function converseSystem({ hotelName, system, expert }) {
     "VOICE: Confident and direct. Lead with the action. No hedging (no \"I think\", \"you may want to\", \"maybe\", \"perhaps\"). Plain words a front desk agent can follow mid-shift. 1 to 3 short sentences.",
     "AUTHORITY: The hotel's SOPs are the authority. Answer from them and never contradict them. Use the exact names, phone numbers, amounts and times in the SOP. Never invent a procedure, price, fee, policy, time, room number or phone number. Where the SOP says \"ask a manager\", tell them to ask a manager.",
     "You see a conversation between a staff member and the assistant, a shortlist of SOPs with full text, the SOP shown last turn (if any), and a list of all SOP titles. Reply with ONE JSON object and nothing else, in one of these shapes:",
-    '{"action":"answer","sop_id":"XX-00","answer":"1-3 plain sentences answering THIS conversation from the SOP","tip":"optional","focus_steps":[step numbers, optional]}',
+    '{"action":"answer","sop_id":"XX-00","answer":"1-3 plain sentences answering THIS conversation from the SOP","tip":"optional","focus_steps":[step numbers, optional],"escalate":{optional, see ESCALATE}}',
     '{"action":"ask","question":"one short question","options":["2-4 short answers"],"why":"clarify" or "troubleshoot","candidates":["sop ids you are considering"]}',
     expert
-      ? '{"action":"advise","advice":"2-4 short sentences of practical operator guidance","confirm":true or false}'
+      ? '{"action":"advise","advice":"2-4 short sentences of practical operator guidance","confirm":true or false,"escalate":{see ESCALATE}}'
       : '{"action":"none"}',
     expert ? '{"action":"none"} is only for a message that is not a hotel question at all.' : "",
     "WHEN TO ASK: If the question is vague, or it describes a problem and the SOP has branches that change what the agent should do (still staying or checked out, card or cash, lock flashes red or shows nothing, which of two SOPs applies), ask ONE question back, like a manager would, before answering. Questions must come from the SOP text provided (a choice between candidate SOPs, or which branch of an SOP applies). Ask at most ONE question per turn. Never ask something the conversation already answered. Do not ask when you can answer well already.",
@@ -235,6 +309,7 @@ function converseSystem({ hotelName, system, expert }) {
     "FOLLOW-UPS: After an answer, a follow-up (for example \"what if they say no?\") is answered from the same SOP unless the staff member clearly changed topic; if the topic is clearly new, ignore the earlier turns and treat it as a fresh question.",
     "ANSWER TEXT: Address what the staff member actually described, for example \"Since the lock flashes red, the key needs re-encoding: ...\". focus_steps lists the step numbers of the SOP most relevant to this conversation (leave it out if all apply).",
     'TIP: In an answer you may add "tip": ONE short line of practical operator advice (how to phrase something to an upset guest, what to note in the log). It adds to the SOP and never contradicts or replaces it, and contains no prices, policies, phone numbers or procedures that are not in the SOP. Leave it out when there is nothing useful.',
+    ESCALATE_RULES,
     expert
       ? 'NO SOP FITS: Use "advise": 2 to 4 short sentences of general best practice from your experience. Never state property-specific facts (fees, hours, phone numbers, room numbers, names) that are not in the SOPs. Set "confirm": true whenever money, refunds or comps, safety, security, legal or ID, or policy is involved. Never use advise for an emergency.'
       : "NO SOP FITS: reply with the none action. Never answer from your own knowledge.",
@@ -269,10 +344,10 @@ async function converse(cfg, { hotelName, system, turns, candidates, catalog, la
     "Shortlist of SOPs (full text):", cand.map(sopBlock).join("\n\n") || "(none matched by keyword)",
     "\nAll SOP titles:", catalog.map((s) => `${s.id} ${s.title}`).join("\n"),
   ].join("\n");
-  const text = await complete(cfg, sys, user, { maxTokens: 700 });
+  const text = await complete(cfg, sys, user, { maxTokens: 900 });
   const out = looseParse(text);
   if (!out) throw new Error("The AI reply wasn't understood");
   return out;
 }
 
-module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, looseParse, isEmergency, needsConfirm, MAX_ASKS };
+module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, coerceEscalate, fallbackEscalate, templateMessage, isHousekeepingTopic, guestPresent, looseParse, isEmergency, needsConfirm, MAX_ASKS };

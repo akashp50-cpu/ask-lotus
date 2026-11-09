@@ -145,7 +145,20 @@ function aiConfig(s) {
   }
 }
 
-const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, details FROM hotels WHERE id=$1", [id])).rows[0];
+const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, details, chat_names FROM hotels WHERE id=$1", [id])).rows[0];
+// The names staff see for the two WhatsApp chats. Default: "<short hotel name> FD" / "<short hotel name> HK" (Hampton FD, Merriam HK);
+// the short name drops "Hotel Lotus", "Inn" and brand words. A saved name wins; blank means the default.
+const SHORT_NAME = { hop: "Hampton" };
+const shortHotelName = (h) => {
+  if (SHORT_NAME[h.id]) return SHORT_NAME[h.id];
+  const n = String(h.name || "").replace(/\b(hotel lotus|hotel|lotus|inn|suites?|express|hampton|hilton|fairfield|quality|best western|vib|element|marriott|by|and|&)\b/gi, " ").replace(/\s+/g, " ").trim();
+  return n || String(h.name || h.id || "Hotel").split(" ")[0];
+};
+const chatDefaults = (h) => ({ front_desk: `${shortHotelName(h)} FD`, housekeeping: `${shortHotelName(h)} HK` });
+const chatNames = (h) => {
+  const c = (h && h.chat_names) || {}, d = chatDefaults(h);
+  return Object.fromEntries(Object.entries(d).map(([k, v]) => [k, String(c[k] || "").trim() || v]));
+};
 
 const sopOut = (r) => ({
   id: r.id,
@@ -234,6 +247,8 @@ app.get(
       hotel: req.hotel,
       info: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup, ready: h.ready },
       details: h.details || {},
+      chats: chatNames(h),
+      chatDefaults: chatDefaults(h),
       cats: cats.rows,
       sops: sops.rows.map(sopOut),
       contacts: contacts.rows,
@@ -282,13 +297,14 @@ app.post(
 
     const sop = result.kind === "answer" ? byId.get(result.sopId) : null;
     const kind = result.kind;
+    const esc = ["answer", "advise", "none"].includes(kind) ? result.escalate || null : null;
     if (kind === "none") by = "none";
     if (kind === "advise") by = "ai";
     // Log the turn. Ask turns have no SOP and are not gaps; only conversations that end without one are.
     const turnNo = turns.filter((t) => t.role === "staff").length;
     const ins = await q(
-      "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by, convo_id, turn, kind) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
-      [req.hotel, req.user.id, question, sop ? sop.id : null, kind === "ask" ? "ai" : by, convo.id, turnNo, kind]
+      "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by, convo_id, turn, kind, escalate_level, escalate_chat) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
+      [req.hotel, req.user.id, question, sop ? sop.id : null, kind === "ask" ? "ai" : by, convo.id, turnNo, kind, esc ? esc.level : null, esc ? esc.chat : null]
     );
     const bot = kind === "ask" ? { role: "assistant", kind, question: result.question, options: result.options }
       : kind === "answer" ? { role: "assistant", kind, sop_id: sop.id, answer: result.answer }
@@ -311,6 +327,7 @@ app.post(
       options: kind === "ask" ? result.options : [],
       advice: kind === "advise" ? result.advice : null,
       confirm: kind === "advise" ? !!result.confirm : false,
+      escalate: esc,
       general: null,
       aiDown: !!aiError && !sop,
     });
@@ -455,7 +472,7 @@ app.get(
   wrap(async (req, res) => {
     const { rows } = await q(
       `SELECT qn.id, qn.user_id AS uid, u.name AS user_name, qn.question AS q, qn.sop_id AS sop,
-              qn.matched_by, qn.convo_id AS convo, qn.turn, qn.kind, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when"
+              qn.matched_by, qn.convo_id AS convo, qn.turn, qn.kind, qn.escalate_level AS esc_level, qn.escalate_chat AS esc_chat, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when"
          FROM questions qn LEFT JOIN users u ON u.id = qn.user_id
         WHERE qn.hotel_id=$1 AND qn.asked_at > now() - interval '90 days'
         ORDER BY qn.asked_at DESC LIMIT 2000`,
@@ -671,6 +688,24 @@ app.put(
       return bad(res, 400, "That role doesn't exist.");
     await q(`UPDATE routes SET ${field}=$1 WHERE hotel_id=$2 AND id=$3`, [value, req.hotel, req.params.id]);
     res.json({ ok: true });
+  })
+);
+
+// The names of the hotel's two staff WhatsApp chats (Ask Lotus only tells staff which chat to use). A blank name resets to the default.
+app.put(
+  "/api/hotel/chats",
+  auth("Manager"),
+  hotel,
+  wrap(async (req, res) => {
+    const h = await hotelRow(req.hotel);
+    const defs = chatDefaults(h), out = { ...(h.chat_names || {}) };
+    for (const k of Object.keys(defs)) {
+      if (req.body[k] === undefined) continue;
+      const v = String(req.body[k] ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
+      if (v && v !== defs[k]) out[k] = v; else delete out[k];
+    }
+    await q("UPDATE hotels SET chat_names=$1 WHERE id=$2", [JSON.stringify(out), req.hotel]);
+    res.json({ chats: chatNames({ ...h, chat_names: out }), chatDefaults: defs });
   })
 );
 
@@ -1141,7 +1176,7 @@ function detailsUsedBy(m, system, byKey) {
   return [...out];
 }
 
-const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
+const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, chat_names FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
 
 app.get(
   "/api/setup",
@@ -1172,6 +1207,7 @@ app.get(
       copyFrom: st.copyFrom,
       answers: { ...st.amen, ...st.qa },
       qkeys: questionKeys(sdef),
+      chats: chatNames(h), chatDefaults: chatDefaults(h),
       selection: st.selection,
       details: h.details || {},
       cats: cats.rows,

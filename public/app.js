@@ -66,7 +66,7 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- state ---------- */
-const STATE = { me: null, hotels: [], hotel: null, cats: [], sops: [], contacts: [], routes: [], details: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null }, home: null };
+const STATE = { me: null, hotels: [], hotel: null, cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null }, home: null };
 const sop = (id) => STATE.sops.find((s) => s.id === id);
 const RANKS = { "Front Desk": 0, Manager: 1, GM: 2, Owner: 3 };
 const canManage = () => STATE.me && RANKS[STATE.me.role] >= 1;
@@ -223,7 +223,7 @@ async function selectHotel(id, target) {
 
 async function loadHotel() {
   const d = await api("/api/bootstrap");
-  Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, settings: d.settings, details: d.details || {}, info: d.info || {} });
+  Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, settings: d.settings, details: d.details || {}, chats: d.chats || {}, chatDefaults: d.chatDefaults || {}, info: d.info || {} });
   const live = hotelObj().ready;
   $("helloSub").textContent = live ? `Answers from ${hotelName(STATE.hotel)} procedures.` : `${hotelName(STATE.hotel)} isn't open to staff yet. Ask your manager.`;
   $("askInput").disabled = !live;
@@ -300,25 +300,65 @@ function sopCard(s, logId, answer, extra = {}) {
   const card = document.createElement("div"); card.className = "a";
   card.innerHTML = `<div class="hd"><div class="eyebrow">${esc(s.cat)}</div><h3>${esc(s.title)}</h3></div>
     ${answer ? `<div class="aiAns"><b>${SPARK}AI answer</b>${telize(esc(answer))}${extra.tip ? `<div class="tipLine">${TIP_IC}<span><b>Tip</b> ${telize(esc(extra.tip))}</span></div>` : ""}</div>` : ""}
+    ${escalateBlock(extra.escalate)}
     <ol class="steps">${s.steps.map((x, i) => `<li${focus.has(i + 1) ? ' class="hl"' : ""}><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
     ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
     <div class="ft">${STATE.settings.showSource ? `<span class="tag">${esc(s.id)} · v${s.ver}</span><span>Updated ${fmtD(s.updated)}</span>` : ""}
     <span class="fb"><button type="button" data-v="y" class="press">Helpful</button><button type="button" data-v="n" class="press">Not helpful</button></span></div>`;
   card.querySelectorAll(".ansImg").forEach((b) => (b.onclick = () => openLB(imgUrl(b.dataset.img))));
+  wireEscalate(card);
   card.querySelectorAll(".fb button").forEach((b) => (b.onclick = async () => {
     card.querySelectorAll(".fb button").forEach((x) => x.classList.remove("on")); b.classList.add("on");
     try { await api("/api/feedback", { hotel: false, body: { logId, fb: b.dataset.v } }); toast(b.dataset.v === "n" ? "Sent to managers to review" : "Thanks for the feedback"); } catch (e) { fail(e); }
   }));
   return card;
 }
+/* ----- escalation: who to call now, or which WhatsApp chat to ask (Ask Lotus never posts or links to WhatsApp) ----- */
+const chatName = (c) => (STATE.chats || {})[c] || (STATE.chatDefaults || {})[c] || (c === "housekeeping" ? "Housekeeping" : "Front Desk");
+// Housekeeping topics use the housekeeping call route, everything else the guest route; emergencies use the emergency route.
+function routeFor(e) {
+  const find = (id, re) => STATE.routes.find((r) => r.id === id) || STATE.routes.find((r) => re.test(r.label)) || null;
+  return e.emergency ? find("emergency", /fire|emergenc/i) : e.chat === "housekeeping" ? find("housekeeping", /housekeep/i) : find("guest", /guest/i);
+}
+const URGENT_WHY = {
+  emergency: "Emergency. Call 911 first, then the people below.",
+  guest_waiting: "A guest is waiting and this involves money or safety. Don't hold it for a chat reply.",
+  ai: "This can't wait for a chat reply. Call now.",
+};
+function callNowBlock(e) {
+  const r = routeFor(e) || STATE.routes[0];
+  const lines = [e.emergency ? `<span class="who-line"><strong>Call 911 first</strong></span>` : "", r ? `<span class="who-line">${esc(r.label)}: ${telize(esc(routeText(r)))}</span>` : ""].join("");
+  return `<div class="callNow" role="group" aria-label="Call now"><b>Call now</b><p class="why">${esc(URGENT_WHY[e.why] || URGENT_WHY.ai)}</p>${lines}</div>`;
+}
+function chatBlock(e) {
+  return `<div class="chatAsk"><b>Ask in the <span class="chatNm">${esc(chatName(e.chat))}</span> chat</b>
+    <span class="postLbl">Post this:</span>
+    <blockquote class="msgQuote" tabindex="0">${esc(e.message)}</blockquote>
+    <button type="button" class="pillbtn tint press copyMsg">Copy message</button></div>`;
+}
+const escalateBlock = (e) => (!e ? "" : e.level === "urgent" ? callNowBlock(e) : chatBlock(e));
+// Clipboard API first; if the browser refuses, select the text (and try the old copy command) so a long-press still works.
+async function copyMessage(box) {
+  const text = box.textContent;
+  try { await navigator.clipboard.writeText(text); toast("Copied"); return; } catch { /* fall back */ }
+  try {
+    const rg = document.createRange(); rg.selectNodeContents(box);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(rg);
+    toast(document.execCommand && document.execCommand("copy") ? "Copied" : "Selected. Press and hold to copy");
+  } catch { toast("Select the message and copy it"); }
+}
+function wireEscalate(card) {
+  card.querySelectorAll(".copyMsg").forEach((b) => (b.onclick = () => copyMessage(b.closest(".chatAsk").querySelector(".msgQuote"))));
+}
 const whoBlock = () => `<div class="esc"><b>Who to call</b>${STATE.routes.map((r) => `<span class="who-line">${esc(r.label)}: ${r.id === "emergency" ? "call 911 first, then " : ""}${telize(esc(routeText(r)))}</span>`).join("")}</div>`;
-function missCard(general, aiDown) {
+function missCard(general, aiDown, esc0) {
   const card = document.createElement("div"); card.className = "a miss";
   card.innerHTML = `<div class="hd"><div class="eyebrow">Not covered yet</div><h3>Check with the manager on duty</h3></div>
     ${general ? `<p class="generalAns"><b>General guidance (not an SOP):</b> ${esc(general)}</p>` : ""}
     <p>${aiDown ? "The assistant is having trouble right now. " : ""}This isn't in ${esc(hotelName(STATE.hotel))}'s procedures. Ask before you answer the guest. Your question was sent to the managers so it gets added.</p>
-    ${whoBlock()}<div style="height:14px"></div>`;
+    ${esc0 ? escalateBlock(esc0) + `<details class="whoMore"><summary>Who to call</summary>${whoBlock()}</details>` : whoBlock()}<div style="height:14px"></div>`;
+  wireEscalate(card);
   return card;
 }
 function adviceCard(r) {
@@ -326,8 +366,9 @@ function adviceCard(r) {
   card.innerHTML = `<div class="hd"><div class="eyebrow">Not in your SOPs &middot; Expert guidance</div><h3>General best practice</h3></div>
     <p class="adviceTxt">${telize(esc(r.advice))}</p>
     ${r.confirm ? `<div class="confirmBox"><b>Confirm with a manager before acting</b></div>` : ""}
-    ${r.confirm ? whoBlock() : ""}
+    ${r.escalate ? escalateBlock(r.escalate) : r.confirm ? whoBlock() : ""}
     <p class="adviceNote">This isn't ${esc(hotelName(STATE.hotel))}'s procedure. It was sent to the managers so it gets added.</p>`;
+  wireEscalate(card);
   return card;
 }
 function askCard(r, onPick) {
@@ -359,9 +400,9 @@ function renderTurn(item, live) {
   if (item.t === "q") { const q = document.createElement("div"); q.className = "q"; q.textContent = item.text; th.appendChild(q); if (live) appear(q, "bottom right"); return q; }
   const r = item.r;
   const card = r.kind === "ask" ? askCard(r, (text, btn) => { lockAsk(card, text); ask(text); })
-    : r.kind === "answer" && r.sop ? sopCard(r.sop, r.logId, r.answer, { tip: r.tip, focusSteps: r.focusSteps })
+    : r.kind === "answer" && r.sop ? sopCard(r.sop, r.logId, r.answer, { tip: r.tip, focusSteps: r.focusSteps, escalate: r.escalate })
     : r.kind === "advise" ? adviceCard(r)
-    : missCard(r.general, r.aiDown);
+    : missCard(r.general, r.aiDown, r.escalate);
   th.appendChild(card); if (live) appear(card, "bottom left");
   return card;
 }
@@ -422,6 +463,9 @@ function groupLog(rows) {
     g.sop = ans ? ans.sop : null; g.when = last.when; g.id = last.id;
     g.fb = g.rows.some((r) => r.fb === "n") ? "n" : (ans && ans.fb) || null;
     g.dismissed = g.rows.every((r) => r.dismissed);
+    const er = g.rows.filter((r) => r.esc_level);
+    g.escLevel = er.some((r) => r.esc_level === "urgent") ? "urgent" : er.length ? "chat" : null;
+    g.escChat = er.length ? er[er.length - 1].esc_chat : null;
     g.open = !g.sop && last.kind === "ask"; // still waiting on the staff member's answer: not a gap
     g.q = g.rows.map((r) => r.q).join(". ");
   }
@@ -491,6 +535,7 @@ function renderGaps() {
 }
 
 function topOf(ls) { const c = {}; ls.forEach((l) => { if (l.sop) { const s = sop(l.sop); if (s) c[s.title] = (c[s.title] || 0) + 1; } }); const t = Object.entries(c).sort((a, b) => b[1] - a[1])[0]; return t && t[0]; }
+const escBadge = (l) => (l.escLevel === "urgent" ? `<span class="escBadge urgent">Urgent</span>` : `<span class="escBadge">${l.escChat === "housekeeping" ? "HK chat" : "FD chat"}</span>`);
 function renderActivity() {
   const all = STATE.convos, log = empFilter ? all.filter((l) => l.uid === empFilter) : all;
   const fu = empFilter && STATE.users.find((u) => u.id === empFilter);
@@ -508,7 +553,7 @@ function renderActivity() {
   $("usage").innerHTML = e.length ? e.map(([k, v]) => `<div class="bar"><span class="nm">${esc(k)}</span><span class="n">${v}</span><div class="track"><div class="fill" style="width:${(v / max) * 100}%"></div></div></div>`).join("") : `<div class="empty">No answered questions yet.</div>`;
   $("feedTitle").textContent = `Recent questions (${log.length})`;
   $("feed").innerHTML = log.length ? log.slice(0, 50).map((l) => { const u = { id: l.uid || 0, name: l.user_name || "Removed user" }, s = l.sop && sop(l.sop);
-    return `<div class="cell">${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.rows[0].q)}</span>${l.rows.length > 1 ? `<span class="convoTurns">${l.rows.slice(1).map((r) => `<span class="ct">&#8627; ${esc(r.q)}</span>`).join("")}</span>` : ""}<span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : l.open ? "Waiting on an answer" : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""} · ${fmtDT(l.when)}</span></span></div>`; }).join("") : `<div class="empty">No questions yet.</div>`;
+    return `<div class="cell">${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.rows[0].q)}</span>${l.rows.length > 1 ? `<span class="convoTurns">${l.rows.slice(1).map((r) => `<span class="ct">&#8627; ${esc(r.q)}</span>`).join("")}</span>` : ""}<span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : l.open ? "Waiting on an answer" : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""}${l.escLevel ? ` · ${escBadge(l)}` : ""} · ${fmtDT(l.when)}</span></span></div>`; }).join("") : `<div class="empty">No questions yet.</div>`;
 }
 
 function renderTeam() {
@@ -534,6 +579,13 @@ function renderContacts() {
     try { await api(`/api/routes/${encodeURIComponent(r.id)}`, { method: "PUT", body: { field: s.dataset.k, value: s.value } }); r[s.dataset.k] = s.value; toast(`${r.label}: ${routeText(r)}`); }
     catch (e) { fail(e); renderContacts(); }
   }));
+  for (const [id, k] of [["chatFd", "front_desk"], ["chatHk", "housekeeping"]]) {
+    const inp = $(id); inp.value = chatName(k); inp.placeholder = (STATE.chatDefaults || {})[k] || "";
+    inp.onchange = async () => {
+      try { const r = await api("/api/hotel/chats", { method: "PUT", body: { [k]: inp.value } }); STATE.chats = r.chats; STATE.chatDefaults = r.chatDefaults; inp.value = r.chats[k]; toast(`${r.chats[k]} chat saved`); }
+      catch (e) { fail(e); inp.value = chatName(k); }
+    };
+  }
   $("contactList").innerHTML = STATE.contacts.map((c) => `<button type="button" class="cell" data-c="${c.id}"><span class="av" style="background:${color(c.id)}">${esc(initials(c.name))}</span>
     <span class="body"><span class="t">${esc(c.role)}</span><span class="m">${esc(c.name)} · ${esc(c.phone)}</span></span>${chev}</button>`).join("") || `<div class="empty">No contacts yet. Add your AGM, GM, COO, Engineer and Head Housekeeper. The call routes above use those role names.</div>`;
   $("contactList").querySelectorAll("[data-c]").forEach((b) => (b.onclick = () => openContact(+b.dataset.c)));
@@ -976,6 +1028,11 @@ function paintAbout() {
         <label class="fld"><span>Brand</span><input value="${h.brand === "hilton" ? "Hilton" : "Independent"}" readonly></label>
         <label class="fld"><span>Property system</span><input value="${h.system === "pep" ? "PEP" : "HotelKey"}" readonly></label>
       </div><p class="hint">Lotus set these when the hotel was added. Ask an Owner if something is wrong.</p>`;
+  const ch = d.chats || {}, chd = d.chatDefaults || {};
+  const chatsHtml = `<div class="sec"><span>WhatsApp chats</span></div><div class="form">
+      <label class="fld"><span>Front desk chat name</span><input id="su-chatFd" value="${esc(ch.front_desk || "")}" placeholder="${esc(chd.front_desk || "")}" maxlength="40" autocomplete="off"></label>
+      <label class="fld"><span>Housekeeping chat name</span><input id="su-chatHk" value="${esc(ch.housekeeping || "")}" placeholder="${esc(chd.housekeeping || "")}" maxlength="40" autocomplete="off"></label>
+    </div><p class="hint">When staff need a manager's answer and it isn't urgent, Ask Lotus tells them which chat to ask in and gives them a message to copy. Use the chat names your team sees in WhatsApp.</p>`;
   const amen = AMEN_LIST.map((k) => {
     const [name, q] = AMEN_Q[k], yes = !!SU.ans[k];
     const ms = sops.filter((m) => m.requires === k && suFits(m));
@@ -987,6 +1044,7 @@ function paintAbout() {
   }).join("");
   $("suBody").innerHTML = `${stepBar()}
     <div class="sec"><span>This hotel</span></div>${ident}
+    ${chatsHtml}
     <div class="sec"><span>What does ${esc(h.name)} have?</span></div>
     <div class="group">${amen}</div>
     ${policiesHtml()}
@@ -995,6 +1053,10 @@ function paintAbout() {
     ${generalSections(defs).map(([t, l]) => secHtml(t, l)).join("")}
     <div class="stickybar"><div class="count" aria-live="polite"><b>${on}</b> of ${sops.length} SOPs will be on</div><button type="button" class="bigbtn press" id="suNext">${SU.busy ? "Saving…" : "Review SOPs"}</button></div>`;
   bindStepBar(); bindSecs($("suBody")); bindFields($("suBody"));
+  for (const [id, k] of [["su-chatFd", "front_desk"], ["su-chatHk", "housekeeping"]]) {
+    const inp = $(id); if (!inp) continue;
+    inp.onchange = () => suRun(() => api("/api/hotel/chats", { method: "PUT", body: { [k]: inp.value } })).then((r) => { d.chats = r.chats; d.chatDefaults = r.chatDefaults; inp.value = r.chats[k]; toast("Chat name saved"); }).catch(fail);
+  }
   $("suBody").querySelectorAll("[data-yn]").forEach((b) => (b.onclick = () => setAnswer(b.closest("[data-amen]").dataset.amen, b.dataset.yn === "yes")));
   if (owner) {
     const save = async () => {

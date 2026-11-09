@@ -13,10 +13,23 @@ async function runTurn({ cfg, hotel, sops, contacts, convo, question, expert, fa
     const k = best(text, sops);
     return k ? { kind: "answer", sopId: k.id, answer: null, tip: null, focusSteps: [] } : null;
   };
+  const addFallbackEscalate = (result, by) => {
+    // No model-written message (keyword path, AI down, not covered): a generic "ask in the chat" instruction. A keyword answer
+    // only gets one when the SOP's own steps send the agent to a manager.
+    if (!result.escalate) {
+      const sop = result.kind === "answer" ? byId.get(result.sopId) : null;
+      const needsMgr = sop && /\bmanager\b|\bsupervisor\b|\b(?:AGM|GM)\b|\[FILL/i.test(forModel(sop, contacts, hotel.details).steps.join(" "));
+      if (result.kind === "none" || (result.kind === "answer" && by === "keyword" && (needsMgr || ai.isEmergency(allStaff)))) {
+        result.escalate = ai.fallbackEscalate({ staffText: allStaff, topicText: sop ? `${sop.title} ${sop.category} ${allStaff}` : allStaff });
+      }
+    }
+  };
+
   let result = { kind: "none" }, by = "none", aiError = null;
   if (!cfg) {
     const k = keywordResult(question);
     if (k) { result = k; by = "keyword"; }
+    addFallbackEscalate(result, by);
     return { result, by, aiError, turns };
   }
   try {
@@ -57,6 +70,7 @@ async function runTurn({ cfg, hotel, sops, contacts, convo, question, expert, fa
       if (k) { result = k; by = "keyword"; }
     }
   }
+  addFallbackEscalate(result, by);
   return { result, by, aiError, turns };
 }
 

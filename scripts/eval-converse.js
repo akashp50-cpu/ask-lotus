@@ -32,6 +32,11 @@ const S = [
   { name: "uncovered safety: advice with confirm", first: "a guest says someone has been taking photos of the parked cars", ask: null, replies: ["Something else"], expect: { advise: true, confirm: true } },
   { name: "scam call (hotel-only SOP)", first: "FedEx is calling asking me to send money for bitcoin", ask: false, expect: { ids: ["CI-24"] } },
   { name: "not a hotel question", first: "what's the capital of France", ask: null, expect: { notSop: true } },
+  // Escalation: urgent (phone a manager) vs the team's WhatsApp chats. expect.esc: { level, chat?, emergency? }.
+  { name: "escalate: non-urgent room supply -> housekeeping chat", first: "Guest in 412 wants a rollaway bed and two extra towels tomorrow morning, do we have any left?", ask: null, replies: ["Something else"], expect: { any: true, esc: { level: "chat", chat: "housekeeping" } } },
+  { name: "escalate: refund with guest at desk -> urgent", first: "Guest at the desk is demanding a refund for last night right now", ask: null, replies: ["Something else"], expect: { any: true, esc: { level: "urgent" } } },
+  { name: "escalate: rate question with a gap -> front desk chat", first: "A guest emailed asking what our corporate rate is for next month. What do I tell them?", ask: null, replies: ["Something else"], expect: { any: true, esc: { level: "chat", chat: "front_desk" } } },
+  { name: "escalate: emergency -> urgent with 911", first: "guest in 220 says there is a gas smell in the hallway", ask: false, expect: { emergency: true, ids: ["EM-01", "EM-02", "EM-03", "EM-04", "EM-05", "EM-06", "EM-07", "EM-08"], esc: { level: "urgent", emergency: true } } },
   { name: "ask-limit holds with unhelpful replies", first: "guest problem", ask: true, replies: ["Something else", "Something else", "Something else", "Something else", "Something else"], expect: { any: true, maxAsks: 3 } },
 ];
 
@@ -78,10 +83,12 @@ async function main() {
         if (k === "answer") {
           bot = { role: "assistant", kind: k, sop_id: result.sopId, answer: result.answer };
           log.push(`  ANSWER ${result.sopId}${result.coerced ? " (forced)" : ""}: ${result.answer || "(SOP only)"}${result.tip ? `\n    TIP: ${result.tip}` : ""}${result.focusSteps.length ? `\n    focus steps: ${result.focusSteps}` : ""}`);
+          if (result.escalate) log.push(`    ESCALATE ${result.escalate.level}/${result.escalate.chat}${result.escalate.emergency ? " (911)" : ""}: ${result.escalate.message}`);
           finals.push(result);
         } else if (k === "advise") {
           bot = { role: "assistant", kind: k };
           log.push(`  ADVICE${result.confirm ? " [confirm with a manager]" : ""}: ${result.advice}`);
+          if (result.escalate) log.push(`    ESCALATE ${result.escalate.level}/${result.escalate.chat}${result.escalate.emergency ? " (911)" : ""}: ${result.escalate.message}`);
           finals.push(result);
         } else { bot = { role: "assistant", kind: k }; log.push("  NONE (not covered card)"); finals.push(result); }
         if (followIdx < (sc.after || []).length) next = sc.after[followIdx++];
@@ -92,6 +99,7 @@ async function main() {
       msg = next;
       log.push(`    (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     }
+    const convoText = convo.turns.filter((t) => t.role === "staff").map((t) => t.text).join(" ");
     const fin = finals[sc.after && sc.after.length && sc.expect.followSame ? 0 : finals.length - 1] || {};
     const last = finals[finals.length - 1] || {};
     const chk = (cond, label) => checks.push([!!cond, label]);
@@ -108,7 +116,23 @@ async function main() {
     if (e.advise) chk(finals.some((f) => f.kind === "advise"), "labeled expert advice (no SOP fit)");
     if (e.confirm) chk(finals.some((f) => f.kind === "advise" && f.confirm), "advice requires confirming with a manager");
     if (e.notSop) chk(finals.every((f) => f.kind !== "answer"), "no SOP forced onto an unrelated question");
+    if (e.esc) {
+      const fe = finals.map((f) => f.escalate).filter(Boolean).pop();
+      chk(fe, "an escalate was returned");
+      if (fe) {
+        chk(fe.level === e.esc.level, `escalate level is ${e.esc.level} (got ${fe.level})`);
+        if (e.esc.chat) chk(fe.chat === e.esc.chat, `escalate chat is ${e.esc.chat} (got ${fe.chat})`);
+        if (e.esc.emergency) chk(fe.emergency === true, "escalate flags the emergency (911 first)");
+      }
+    }
     for (const f of finals) {
+      if (f.escalate) {
+        const m = f.escalate.message, said = convoText;
+        chk(m && m.split(/(?<=[.?!])\s+/).length <= 3, "escalate message is 1 to 3 sentences");
+        chk(!/\p{Extended_Pictographic}/u.test(m), "escalate message has no emoji");
+        const badNums = (m.match(/\b\d{2,4}\b/g) || []).filter((n) => !said.includes(n));
+        chk(!badNums.length, `escalate message invents no room numbers${badNums.length ? " (" + badNums.join(", ") + ")" : ""}`);
+      }
       if (f.kind === "answer") {
         chk(!f.tip || f.tip.split(/[.!?]\s/).length <= 2, "tip is a single short line");
         const src = (sopText[f.sopId] || "").toLowerCase().replace(/\s+/g, "");

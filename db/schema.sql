@@ -13,6 +13,8 @@ ALTER TABLE hotels ADD COLUMN IF NOT EXISTS system  TEXT  NOT NULL DEFAULT 'hote
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS setup   TEXT  NOT NULL DEFAULT 'new';          -- 'new' | 'setup' | 'live'
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}';           -- setup answers {breakfast,pool,pets,laundry,market}
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}';           -- hotel details, key -> value
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS chat_names JSONB NOT NULL DEFAULT '{}';        -- staff WhatsApp chat names {front_desk, housekeeping}; blank = default ("<short name> FD" / "<short name> HK")
+UPDATE hotels SET chat_names = '{"front_desk":"Hampton FD","housekeeping":"Hampton HK"}'::jsonb WHERE id = 'hop' AND chat_names = '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS users (
   id              SERIAL PRIMARY KEY,
@@ -280,6 +282,8 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE INDEX IF NOT EXISTS conversations_user ON conversations (user_id, updated_at DESC);
 ALTER TABLE questions ADD COLUMN IF NOT EXISTS convo_id TEXT;
 ALTER TABLE questions ADD COLUMN IF NOT EXISTS turn     INTEGER;
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS escalate_level TEXT;   -- 'urgent' | 'chat' (null when the answer sent staff nowhere)
+ALTER TABLE questions ADD COLUMN IF NOT EXISTS escalate_chat  TEXT;   -- 'front_desk' | 'housekeeping'
 ALTER TABLE questions ADD COLUMN IF NOT EXISTS kind     TEXT;   -- 'answer' | 'ask' | 'advise' | 'none' (null on older rows)
 CREATE INDEX IF NOT EXISTS questions_convo ON questions (convo_id);
 -- "Expert guidance when no SOP fits" (replaces source_only for the AI path; on for everyone until an Owner turns it off).
