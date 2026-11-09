@@ -3,13 +3,15 @@
 // Staff always see the SOP text exactly as managers wrote it.
 
 const PROVIDERS = {
-  anthropic: { name: "Anthropic", defaultModel: "claude-sonnet-5-5" },
+  anthropic: { name: "Anthropic", defaultModel: "claude-haiku-5-5", defaultWritingModel: "claude-sonnet-5-5" },
   openai: { name: "OpenAI", defaultModel: "" },
   google: { name: "Google", defaultModel: "" },
   azure: { name: "Microsoft Azure OpenAI", defaultModel: "", needsUrl: true },
   custom: { name: "Other (OpenAI-compatible)", defaultModel: "", needsUrl: true },
 };
 
+// What a blank model has always meant for Anthropic. Kept apart from the suggested default so saved setups behave the same.
+const LEGACY_ANTHROPIC_MODEL = "claude-sonnet-5-5";
 const TIMEOUT_MS = 15000;
 const fs = require("fs");
 
@@ -77,7 +79,7 @@ function buildRequest(cfg, system, user, opts = {}) {
     return {
       url: "https://api.anthropic.com/v1/messages",
       headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: { model: model || PROVIDERS.anthropic.defaultModel, max_tokens: maxTokens, system, messages: [{ role: "user", content: imgs.length ? contentParts.anthropic(user, imgs) : user }] },
+      body: { model: model || LEGACY_ANTHROPIC_MODEL, max_tokens: maxTokens, system, messages: [{ role: "user", content: imgs.length ? contentParts.anthropic(user, imgs) : user }] },
       read: (j) => (j.content || []).map((c) => c.text || "").join(""),
     };
   }

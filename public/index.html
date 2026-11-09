@@ -151,7 +151,9 @@
         <div class="group" id="provList" role="radiogroup" aria-label="AI provider"></div>
         <div class="sec"><span>Model and key</span></div>
         <div class="form">
-          <label class="fld"><span>Model</span><input id="st-model" autocomplete="off" list="modelList" placeholder="Model name"><datalist id="modelList"></datalist></label>
+          <label class="fld"><span>Chat model</span><input id="st-model" autocomplete="off" list="modelList" placeholder="Model name"><datalist id="modelList"></datalist></label>
+          <label class="fld"><span>Writing model (SOPs and imports)</span><input id="st-model-w" autocomplete="off" list="modelList" placeholder="Same as chat model"></label>
+          <p class="hint">Chat answers use the chat model. Writing SOPs with AI and imports use the writing model. Leave blank to use the chat model.</p>
           <label class="fld" id="baseUrlFld" hidden><span id="st-urlLabel">Base URL</span><input id="st-url" autocomplete="off" placeholder="https://"></label>
           <label class="fld"><span>API key</span><input id="st-key" type="password" autocomplete="off" placeholder="Paste a new key to replace the saved one"></label>
         </div>

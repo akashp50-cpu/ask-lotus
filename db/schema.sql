@@ -288,6 +288,8 @@ ALTER TABLE questions ADD COLUMN IF NOT EXISTS kind     TEXT;   -- 'answer' | 'a
 CREATE INDEX IF NOT EXISTS questions_convo ON questions (convo_id);
 -- "Expert guidance when no SOP fits" (replaces source_only for the AI path; on for everyone until an Owner turns it off).
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS expert_advice BOOLEAN NOT NULL DEFAULT TRUE;
+-- Model for writing SOPs with AI and for document import. NULL = use the chat model (settings.model).
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS model_writing TEXT;
 
 -- "New SOP with AI": a manager briefs the AI in a chat; the server keeps the thread and the current draft until it is opened in the editor.
 -- hotel_id NULL = a master library draft (Owner). sop_id set = editing an existing SOP.

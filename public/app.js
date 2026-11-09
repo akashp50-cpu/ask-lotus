@@ -606,10 +606,15 @@ function renderSettings() {
     ? `<span class="light"></span><span class="body" style="flex:1"><b style="font-weight:600">Connected to ${esc((provs.find((x) => x.id === st.provider) || {}).name || st.provider)}</b><span style="display:block;font-size:.8rem;color:var(--label2)">Key ending ${esc(st.last4)} · added ${st.addedAt ? fmtD(st.addedAt) : ""} by ${esc(st.addedBy || "")}</span></span>`
     : `<span class="light off"></span><span class="body" style="flex:1"><b style="font-weight:600">No AI connected</b><span style="display:block;font-size:.8rem;color:var(--label2)">Answers use keyword matching. Pick a provider, paste its key and save to turn on AI matching.</span></span>`;
   $("provList").innerHTML = provs.map((x) => `<button type="button" class="radio" role="radio" data-p="${x.id}" aria-checked="${x.id === draftProvider}"><span class="body" style="flex:1"><span class="t" style="display:block;font-weight:500">${esc(x.name)}</span><span style="font-size:.8rem;color:var(--label2)">${esc(SUBS[x.id] || "")}</span></span>${checkSvg}</button>`).join("");
-  $("provList").querySelectorAll("[data-p]").forEach((b) => (b.onclick = () => { draftProvider = b.dataset.p; $("st-model").value = ""; $("st-url").value = ""; renderSettings(); }));
+  $("provList").querySelectorAll("[data-p]").forEach((b) => (b.onclick = () => { draftProvider = b.dataset.p; $("st-model").value = ""; $("st-model-w").value = ""; $("st-url").value = ""; renderSettings(); }));
   $("modelList").innerHTML = (MODEL_HINTS[draftProvider] || []).map((m) => `<option value="${m}">`).join("");
   if (same && !$("st-model").value) $("st-model").value = st.model || "";
-  $("st-model").placeholder = p.defaultModel ? `Default: ${p.defaultModel}` : draftProvider === "azure" ? "Optional for Azure" : "Model name";
+  if (same && !$("st-model-w").value) $("st-model-w").value = st.modelWriting || "";
+  // A newly picked provider starts with the recommended models filled in (a blank model can fall back to a pricier one).
+  if (!same && !$("st-model").value && p.defaultModel) $("st-model").value = p.defaultModel;
+  if (!same && !$("st-model-w").value && p.defaultWritingModel) $("st-model-w").value = p.defaultWritingModel;
+  $("st-model").placeholder = p.defaultModel ? `Suggested: ${p.defaultModel}` : draftProvider === "azure" ? "Optional for Azure" : "Model name";
+  $("st-model-w").placeholder = p.defaultWritingModel ? `Suggested: ${p.defaultWritingModel}` : "Same as chat model";
   $("baseUrlFld").hidden = !p.needsUrl;
   $("st-urlLabel").textContent = draftProvider === "azure" ? "Chat completions URL" : "Base URL";
   if (same && !$("st-url").value) $("st-url").value = st.baseUrl || "";
@@ -622,7 +627,7 @@ $("saveAi").onclick = async () => {
   const st = STATE.settings, key = $("st-key").value.trim();
   if (draftProvider !== st.provider && !key) { toast("Paste the API key for this provider"); $("st-key").focus(); return; }
   try {
-    STATE.settings = await api("/api/settings", { hotel: false, method: "PUT", body: { provider: draftProvider, model: $("st-model").value, baseUrl: $("st-url").value, apiKey: key || undefined } });
+    STATE.settings = await api("/api/settings", { hotel: false, method: "PUT", body: { provider: draftProvider, model: $("st-model").value, modelWriting: $("st-model-w").value, baseUrl: $("st-url").value, apiKey: key || undefined } });
     $("st-key").value = ""; toast("AI settings saved"); renderSettings(); $("aiPill").hidden = !STATE.settings.aiOn;
   } catch (e) { fail(e); }
 };
@@ -635,7 +640,8 @@ document.querySelectorAll("[data-set]").forEach((sw) => (sw.onclick = async () =
 }));
 $("testConn").onclick = async () => {
   const b = $("testConn"); b.disabled = true; b.innerHTML = `<span class="spin"></span> Testing`;
-  try { const r = await api("/api/settings/test", { hotel: false, body: {} }); toast(`Connected. The provider answered in ${(r.ms / 1000).toFixed(1)}s`); }
+  try { const r = await api("/api/settings/test", { hotel: false, body: {} }); const rs = r.results || [];
+    toast(rs.length > 1 ? rs.map((x) => `${x.label} answered in ${(x.ms / 1000).toFixed(1)}s`).join(" · ") : `Connected. The provider answered in ${(r.ms / 1000).toFixed(1)}s`); }
   catch (e) { fail(e); }
   b.disabled = false; b.textContent = "Test Connection";
 };

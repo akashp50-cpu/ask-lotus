@@ -10,7 +10,8 @@ const { pool, q, tx } = require("./db");
 const { best, rank } = require("./match");
 const ai = require("./ai");
 const { runTurn } = require("./turn");
-const { encrypt, decrypt } = require("./crypto");
+const { encrypt } = require("./crypto");
+const { aiConfig, settingsFields } = require("./aiconfig");
 const { tokKey, forModel } = require("./tokens");
 const { ROUTES } = require("./defaults");
 const imp = require("./importer");
@@ -122,6 +123,7 @@ function publicSettings(s, full) {
     ...base,
     provider: s.provider,
     model: s.model,
+    modelWriting: s.model_writing || "",
     baseUrl: s.base_url,
     connected: !!s.key_enc,
     last4: s.key_last4,
@@ -132,17 +134,6 @@ function publicSettings(s, full) {
     fallback: s.fallback,
     providers: Object.entries(ai.PROVIDERS).map(([id, p]) => ({ id, ...p })),
   };
-}
-
-function aiConfig(s) {
-  if (!s.key_enc || s.provider === "none") return null;
-  try {
-    return { provider: s.provider, model: s.model, baseUrl: s.base_url, apiKey: decrypt(s.key_enc) };
-  } catch (e) {
-    // e.g. APP_SECRET changed since the key was saved: fall back to keyword matching
-    console.error("Saved AI key can't be decrypted; re-enter it in Settings.", e.message);
-    return null;
-  }
 }
 
 const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, details, chat_names FROM hotels WHERE id=$1", [id])).rows[0];
@@ -839,7 +830,7 @@ app.post(
     const message = String(req.body.message || "").trim().slice(0, 3000);
     const imageIds = [...new Set((Array.isArray(req.body.imageIds) ? req.body.imageIds : []).map(String))].slice(0, MAX_AUTHOR_IMAGES);
     if (!message && !imageIds.length) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
-    const cfg = aiConfig(await settingsRow());
+    const cfg = aiConfig(await settingsRow(), "writing");
     if (!cfg) return bad(res, 400, "AI isn't switched on. Use Write it myself.");
     const hotelKey = target === "master" ? null : req.hotel;
 
@@ -1702,30 +1693,27 @@ app.put(
   wrap(async (req, res) => {
     const b = req.body;
     const s = await settingsRow();
-    const provider = b.provider && (b.provider === "none" || ai.PROVIDERS[b.provider]) ? b.provider : s.provider;
-    const switching = provider !== s.provider;
     const fields = {
-      provider,
-      model: b.model !== undefined ? String(b.model).trim().slice(0, 100) : switching ? "" : s.model,
-      base_url: b.baseUrl !== undefined ? String(b.baseUrl).trim().slice(0, 300) : switching ? "" : s.base_url,
+      ...settingsFields(b, s, ai.PROVIDERS),
       source_only: b.sourceOnly !== undefined ? !!b.sourceOnly : s.source_only,
       show_source: b.showSource !== undefined ? !!b.showSource : s.show_source,
       fallback: b.fallback !== undefined ? !!b.fallback : s.fallback,
     };
+    const switching = fields.switching;
     if (fields.base_url && !/^https:\/\//.test(fields.base_url)) return bad(res, 400, "The URL must start with https://");
     let keySql = "";
-    const params = [fields.provider, fields.model, fields.base_url, fields.source_only, fields.show_source, fields.fallback];
+    const params = [fields.provider, fields.model, fields.base_url, fields.source_only, fields.show_source, fields.fallback, fields.model_writing];
     if (b.apiKey) {
       const k = String(b.apiKey).trim();
       if (k.length < 12) return bad(res, 400, "That key looks too short.");
       params.push(encrypt(k), k.slice(-4), req.user.name);
-      keySql = ", key_enc=$7, key_last4=$8, key_added_by=$9, key_added_at=now()";
+      keySql = ", key_enc=$8, key_last4=$9, key_added_by=$10, key_added_at=now()";
     } else if (switching || b.removeKey) {
       keySql = ", key_enc=NULL, key_last4=NULL, key_added_by=NULL, key_added_at=NULL";
     }
     if (b.expertAdvice !== undefined) await q("UPDATE settings SET expert_advice=$1 WHERE id=1", [!!b.expertAdvice]);
     await q(
-      `UPDATE settings SET provider=$1, model=$2, base_url=$3, source_only=$4, show_source=$5, fallback=$6${keySql} WHERE id=1`,
+      `UPDATE settings SET provider=$1, model=$2, base_url=$3, source_only=$4, show_source=$5, fallback=$6, model_writing=NULLIF($7,'')${keySql} WHERE id=1`,
       params
     );
     res.json(publicSettings(await settingsRow(), true));
@@ -1736,14 +1724,23 @@ app.post(
   "/api/settings/test",
   auth("Owner"),
   wrap(async (req, res) => {
-    const cfg = aiConfig(await settingsRow());
-    if (!cfg) return bad(res, 400, "Save a provider and API key first.");
-    try {
-      const r = await ai.testConnection(cfg);
-      res.json({ ok: true, ms: r.ms });
-    } catch (e) {
-      res.status(502).json({ error: `The provider didn't accept the request: ${e.message.slice(0, 200)}` });
+    const row = await settingsRow();
+    const chat = aiConfig(row);
+    if (!chat) return bad(res, 400, "Save a provider and API key first.");
+    const writing = aiConfig(row, "writing");
+    const runs = [["Chat model", chat]];
+    if (writing.model && writing.model !== chat.model) runs.push(["Writing model", writing]);
+    const done = [];
+    for (const [label, cfg] of runs) {
+      try {
+        const r = await ai.testConnection(cfg);
+        done.push({ label, model: cfg.model, ms: r.ms });
+      } catch (e) {
+        const which = cfg.model ? `${label} (${cfg.model})` : label;
+        return res.status(502).json({ error: `${which} didn't answer: ${e.message.slice(0, 200)}`, results: done });
+      }
     }
+    res.json({ ok: true, ms: done[0].ms, results: done });
   })
 );
 
@@ -1927,7 +1924,7 @@ app.post(
   importTarget,
   wrap(async (req, res) => {
     try {
-      const cfg = aiConfig(await settingsRow()) || (ai.mockEnabled() ? { provider: "mock" } : null);
+      const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
       if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings. You can still import with the spreadsheet template.", noAi: true });
       const files = loadFiles(req.body.files);
       const { text, truncated, empty } = await imp.extractAll(files);
