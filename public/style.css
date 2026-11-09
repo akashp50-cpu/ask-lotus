@@ -764,3 +764,9 @@ body.wzon #setup:not([hidden]) ~ * .toast,body.wzon .toast{bottom:calc(96px + en
 .noReply{display:block;margin-top:10px;font-size:.9rem;color:var(--label2)}
 .chatAsk .tel{background:var(--surface)}
 .flagHint{display:block;margin-top:8px;font-size:.82rem;color:var(--label2)}
+
+/* Appearance switch in the account menu */
+.menu .themeRow{cursor:default}
+.themeSeg{display:inline-flex;background:var(--fill);border-radius:9px;padding:2px;gap:2px}
+.themePill{font-size:.78rem;font-weight:600;padding:5px 9px;border-radius:7px;color:var(--label2);min-height:28px}
+.themePill[aria-pressed="true"]{background:var(--surface);color:var(--label);box-shadow:0 1px 3px rgba(0,0,0,.12)}

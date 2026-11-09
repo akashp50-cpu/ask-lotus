@@ -668,6 +668,21 @@ $("testConn").onclick = async () => {
   b.disabled = false; b.textContent = "Test Connection";
 };
 
+/* ---------- appearance (light / dark) ---------- */
+const THEMES = [["auto", "Automatic", "Match this phone or computer"], ["light", "Light", ""], ["dark", "Dark", ""]];
+function renderTheme() {
+  const cur = window.getTheme ? window.getTheme() : "auto";
+  document.querySelectorAll(".themeList").forEach((g) => {
+    g.innerHTML = THEMES.map(([k, l, d]) => `<button type="button" class="radio" role="radio" data-theme-pick="${k}" aria-checked="${k === cur}"><span class="body" style="flex:1"><span class="rt">${l}</span>${d ? `<span class="rs">${d}</span>` : ""}</span>${checkSvg}</button>`).join("");
+  });
+  document.querySelectorAll(".themeSeg").forEach((g) => {
+    g.innerHTML = THEMES.map(([k, l]) => `<button type="button" class="themePill press" data-theme-pick="${k}" aria-pressed="${k === cur}">${k === "auto" ? "Auto" : l}</button>`).join("");
+  });
+  document.querySelectorAll("[data-theme-pick]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); window.setTheme && window.setTheme(b.dataset.themePick); }));
+}
+document.addEventListener("themechange", renderTheme);
+renderTheme();
+
 /* ---------- bottom sheet ---------- */
 const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 600;
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });

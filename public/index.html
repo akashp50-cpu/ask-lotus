@@ -9,6 +9,7 @@
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/style.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 
@@ -72,6 +73,7 @@
 <div class="menu" id="propMenu" role="menu" hidden></div>
 <div class="menu" id="acctMenu" role="menu" hidden>
   <div class="who" id="acctWho"></div>
+  <div class="mi themeRow" role="group" aria-label="Appearance"><span>Appearance</span><span class="themeSeg"></span></div>
   <button class="mi" id="changePw" role="menuitem">Change Password</button>
   <button class="mi red" id="signOut" role="menuitem">Sign Out</button>
 </div>
@@ -146,6 +148,9 @@
       </div>
 
       <div id="tab-settings" class="tabp" hidden>
+        <div class="sec"><span>Appearance</span></div>
+        <div class="group themeList" role="radiogroup" aria-label="Appearance"></div>
+        <div class="foot">Applies to this device. Automatic follows your phone or computer.</div>
         <div class="sec"><span>AI connection</span></div>
         <div class="group"><div class="conn" id="connRow"></div></div>
         <div class="sec"><span>Provider</span></div>

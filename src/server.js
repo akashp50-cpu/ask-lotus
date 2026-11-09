@@ -2438,6 +2438,7 @@ const INDEX = require("fs")
   .readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8")
   .replace('href="/style.css"', `href="/style.css?v=${BUILD}"`)
   .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`)
+  .replace('src="/theme.js"', `src="/theme.js?v=${BUILD}"`)
   .replace('src="/setup.js"', `src="/setup.js?v=${BUILD}"`)
   .replace('src="/vendor/qrcode.js"', `src="/vendor/qrcode.js?v=${BUILD}"`);
 const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);
