@@ -488,3 +488,47 @@ button.cell:not([disabled]):active{background:var(--fill)}
 .whoMore .esc{margin:6px 0 0}
 .escBadge{display:inline-block;padding:0 7px;border-radius:999px;font-size:.72rem;font-weight:600;background:var(--tint-soft);color:var(--tint);line-height:1.6}
 .escBadge.urgent{background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)}
+
+/* New SOP / Edit SOP with AI */
+#authorEd{height:min(780px,calc(100dvh - 64px))}
+.sec button[hidden]{display:none}
+.auBody{display:flex;flex-direction:column;gap:10px;padding-top:6px}
+.auMsg{max-width:88%;padding:9px 13px;border-radius:18px;font-size:.97rem;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}
+.auMsg.me{align-self:flex-end;background:var(--tint);color:var(--tint-ink);border-bottom-right-radius:6px}
+.auMsg.bot{align-self:flex-start;background:var(--surface);box-shadow:var(--shadow);border-bottom-left-radius:6px}
+.auMsg.err{align-self:center;background:var(--orange-soft);color:var(--orange);font-size:.86rem}
+.auThumbs{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.auThumbs img{width:64px;height:64px;object-fit:cover;border-radius:10px;border:.5px solid var(--sep);cursor:zoom-in}
+.auChips{display:flex;flex-wrap:wrap;gap:6px;align-self:flex-start;max-width:92%}
+.auChips .chip{font-size:.86rem;padding:7px 12px}
+.auChips .chip[disabled]{opacity:.45}
+.auTyping{align-self:flex-start;color:var(--label2);font-size:.88rem;display:flex;gap:8px;align-items:center;padding:4px 6px}
+.auCard{background:var(--surface);border-radius:14px;box-shadow:var(--shadow);padding:12px 14px;margin-top:2px}
+.auCard h3{margin:0;font-size:1rem;letter-spacing:-.015em}
+.auCard .auMeta{font-size:.78rem;color:var(--label2);margin:2px 0 8px}
+.auCard ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;counter-reset:s}
+.auCard li{display:grid;grid-template-columns:22px 1fr;gap:8px;font-size:.92rem;line-height:1.38;counter-increment:s}
+.auCard li::before{content:counter(s);width:22px;height:22px;border-radius:50%;background:var(--fill);font-size:.72rem;font-weight:700;display:grid;place-items:center;margin-top:1px}
+.auCard li img{display:block;margin-top:6px;max-width:150px;border-radius:8px;border:.5px solid var(--sep);cursor:zoom-in}
+.auCard .auLine{font-size:.88rem;margin-top:10px;line-height:1.38}
+.auCard .auLine b{display:block;font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;color:var(--tint)}
+.auCard .auNote{font-size:.8rem;color:var(--label2);margin-top:10px}
+.auCard .auMiss{font-size:.8rem;margin-top:8px;padding:8px 10px;border-radius:10px;background:var(--orange-soft);color:var(--orange)}
+.auCard .fill{background:var(--orange-soft);color:var(--orange);border-radius:5px;padding:0 4px;font-weight:600}
+.auCard .auActs{display:flex;gap:8px;margin-top:12px}
+.auCard .auActs button{flex:1;padding:10px;border-radius:12px;font-weight:600;font-size:.95rem;background:var(--fill);color:var(--tint)}
+.auCard .auActs button.pri{background:var(--tint);color:var(--tint-ink)}
+.auCard.collapsed ol,.auCard.collapsed .auLine,.auCard.collapsed .auNote,.auCard.collapsed .auMiss{display:none}
+.auCard .auHead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.auCard .auHead button{font-size:.82rem;color:var(--tint);font-weight:600}
+.auComposer{border-top:.5px solid var(--sep);padding:8px max(16px,env(safe-area-inset-right,0px)) calc(8px + env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px));background:var(--bg)}
+.auRow{display:flex;align-items:flex-end;gap:8px}
+.auRow textarea{flex:1;min-width:0;background:var(--surface);border:.5px solid var(--sep);border-radius:18px;padding:9px 14px;outline:none;resize:none;font:inherit;max-height:120px;line-height:1.35}
+.auRow textarea:focus{border-color:var(--tint)}
+.auAtt{display:flex;gap:8px;flex-wrap:wrap}
+.auAtt:not(:empty){margin-bottom:8px}
+.auAtt .th{position:relative;width:56px;height:56px}
+.auAtt .th img{width:56px;height:56px;object-fit:cover;border-radius:10px;border:.5px solid var(--sep);opacity:1}
+.auAtt .th.up img{opacity:.4}
+.auAtt .th button{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;font-size:.8rem;line-height:1;display:grid;place-items:center;min-width:0}
+.linkbtn{display:block;margin:6px auto 0;font-size:.85rem;color:var(--tint);font-weight:500}

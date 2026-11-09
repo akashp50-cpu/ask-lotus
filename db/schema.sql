@@ -288,3 +288,16 @@ ALTER TABLE questions ADD COLUMN IF NOT EXISTS kind     TEXT;   -- 'answer' | 'a
 CREATE INDEX IF NOT EXISTS questions_convo ON questions (convo_id);
 -- "Expert guidance when no SOP fits" (replaces source_only for the AI path; on for everyone until an Owner turns it off).
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS expert_advice BOOLEAN NOT NULL DEFAULT TRUE;
+
+-- "New SOP with AI": a manager briefs the AI in a chat; the server keeps the thread and the current draft until it is opened in the editor.
+-- hotel_id NULL = a master library draft (Owner). sop_id set = editing an existing SOP.
+CREATE TABLE IF NOT EXISTS sop_drafts (
+  id          TEXT PRIMARY KEY,
+  hotel_id    TEXT REFERENCES hotels(id) ON DELETE CASCADE,
+  user_id     INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  sop_id      TEXT,
+  turns       JSONB NOT NULL DEFAULT '[]',
+  draft       JSONB NOT NULL DEFAULT '{}',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sop_drafts_user ON sop_drafts (user_id, updated_at DESC);

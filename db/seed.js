@@ -5,6 +5,7 @@ const path = require("path");
 const bcrypt = require("bcryptjs");
 const { pool, tx } = require("../src/db");
 const hampton = require("./seed-data/hampton-sops.json");
+const { applyUpdates } = require("./updates");
 
 const MASTER_PATH = process.env.MASTER_JSON || path.join(__dirname, "seed-data", "master-sops.json");
 
@@ -314,6 +315,9 @@ function normalizeMaster(j) {
       console.log("ADMIN_USERNAME (or ADMIN_EMAIL) / ADMIN_PASSWORD not set; no Owner account created.");
     }
   });
+  // Content updates (db/seed-data/updates/*.json): each applied once, in filename order, recorded in master_meta.
+  const upd = await applyUpdates({ tx });
+  if (upd.applied.length) console.log(`Applied content updates: ${upd.applied.join(", ")}.`);
   await pool.end();
 })().catch((e) => {
   console.error(e);

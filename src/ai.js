@@ -53,29 +53,42 @@ async function post(url, headers, body, timeoutMs = TIMEOUT_MS) {
   }
 }
 
-// Send one system + user message, get text back. opts: { maxTokens (default 400), timeoutMs (default 15s) }.
-async function complete(cfg, system, user, opts = {}) {
-  if (mockEnabled()) return mockNext();
+// Photos can ride along with the user message: opts.images = [{ id, mime, b64, caption }], at most MAX_IMAGES per call.
+// Each photo is introduced with a text line naming its id (and the manager's caption), so the model can refer to it.
+const MAX_IMAGES = 6;
+const IMG_MIME = /^image\/(jpeg|png|webp|gif)$/;
+const photoLabel = (im) => `Photo ${im.id}${im.caption ? ` (caption: ${String(im.caption).slice(0, 200)})` : ""}:`;
+function cleanImages(list) {
+  return (Array.isArray(list) ? list : []).filter((im) => im && im.id && im.b64 && IMG_MIME.test(im.mime || "")).slice(0, MAX_IMAGES);
+}
+// The user message as provider-specific content parts. No images: the plain string (or a single text part for Gemini).
+const contentParts = {
+  anthropic: (user, imgs) => [{ type: "text", text: user }, ...imgs.flatMap((im) => [{ type: "text", text: photoLabel(im) }, { type: "image", source: { type: "base64", media_type: im.mime, data: im.b64 } }])],
+  openai: (user, imgs) => [{ type: "text", text: user }, ...imgs.flatMap((im) => [{ type: "text", text: photoLabel(im) }, { type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } }])],
+  google: (user, imgs) => [{ text: user }, ...imgs.flatMap((im) => [{ text: photoLabel(im) }, { inline_data: { mime_type: im.mime, data: im.b64 } }])],
+};
+
+// Builds the provider request without sending it (so it can be unit-tested). read(json) pulls the text out of the reply.
+function buildRequest(cfg, system, user, opts = {}) {
   const { provider, model, baseUrl, apiKey } = cfg;
-  const maxTokens = opts.maxTokens || 400, timeoutMs = opts.timeoutMs || TIMEOUT_MS;
+  const maxTokens = opts.maxTokens || 400;
+  const imgs = cleanImages(opts.images);
   if (provider === "anthropic") {
-    const j = await post(
-      "https://api.anthropic.com/v1/messages",
-      { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      { model: model || PROVIDERS.anthropic.defaultModel, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] },
-      timeoutMs
-    );
-    return (j.content || []).map((c) => c.text || "").join("");
+    return {
+      url: "https://api.anthropic.com/v1/messages",
+      headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: { model: model || PROVIDERS.anthropic.defaultModel, max_tokens: maxTokens, system, messages: [{ role: "user", content: imgs.length ? contentParts.anthropic(user, imgs) : user }] },
+      read: (j) => (j.content || []).map((c) => c.text || "").join(""),
+    };
   }
   if (provider === "google") {
     if (!model) throw new Error("Enter a Gemini model name in Settings");
-    const j = await post(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      { "x-goog-api-key": apiKey },
-      { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: [{ text: user }] }], ...(opts.maxTokens ? { generationConfig: { maxOutputTokens: maxTokens } } : {}) },
-      timeoutMs
-    );
-    return j.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "";
+    return {
+      url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      headers: { "x-goog-api-key": apiKey },
+      body: { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: "user", parts: imgs.length ? contentParts.google(user, imgs) : [{ text: user }] }], ...(opts.maxTokens ? { generationConfig: { maxOutputTokens: maxTokens } } : {}) },
+      read: (j) => j.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") || "",
+    };
   }
   // OpenAI, Azure OpenAI and OpenAI-compatible endpoints share the chat completions shape.
   let url = "https://api.openai.com/v1/chat/completions";
@@ -89,10 +102,17 @@ async function complete(cfg, system, user, opts = {}) {
     url = baseUrl.replace(/\/+$/, "") + "/chat/completions";
   }
   if (provider !== "azure" && !model) throw new Error("Enter a model name in Settings");
-  const body = { messages: [{ role: "system", content: system }, { role: "user", content: user }], max_tokens: maxTokens };
+  const body = { messages: [{ role: "system", content: system }, { role: "user", content: imgs.length ? contentParts.openai(user, imgs) : user }], max_tokens: maxTokens };
   if (model) body.model = model;
-  const j = await post(url, headers, body, timeoutMs);
-  return j.choices?.[0]?.message?.content || "";
+  return { url, headers, body, read: (j) => j.choices?.[0]?.message?.content || "" };
+}
+
+// Send one system + user message (optionally with photos), get text back. opts: { maxTokens (default 400), timeoutMs (default 15s), images }.
+async function complete(cfg, system, user, opts = {}) {
+  if (mockEnabled()) return mockNext();
+  const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
+  const req = buildRequest(cfg, system, user, opts);
+  return req.read(await post(req.url, req.headers, req.body, timeoutMs));
 }
 
 function parseJSON(text) {
@@ -350,4 +370,107 @@ async function converse(cfg, { hotelName, system, turns, candidates, catalog, la
   return out;
 }
 
-module.exports = { PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, coerceEscalate, fallbackEscalate, templateMessage, isHousekeepingTopic, guestPresent, looseParse, isEmergency, needsConfirm, MAX_ASKS };
+// ---------- SOP authoring (manager briefs the AI; it asks, then drafts) ----------
+const AUTHOR_MAX_ASKS = 3;
+const AUTHOR_TIMEOUT_MS = 45000, AUTHOR_MAX_TOKENS = 1500;
+
+function authorSystem({ hotelName, system, categories, detailKeys, roles, editing, asks }) {
+  return [
+    `You are a seasoned hotel operator (20+ years, front desk to general manager) writing the standard operating procedures (SOPs) that front desk agents follow in the middle of a shift${hotelName ? ` at ${hotelName}` : ""}. A manager is briefing you like an assistant: they describe a procedure in their own words and may attach screenshots or photos. You turn it into a clean SOP.`,
+    system ? `Front desk system: ${system}. Use that name in the steps, never "the PMS" or "the system".` : "",
+    "Reply with ONE JSON object and nothing else, in one of these shapes:",
+    '{"action":"ask","question":"one or two short questions in one string","options":["optional, 2-4 short answers"]}',
+    '{"action":"draft","sop":{"title":"...","category":"one name from the category list","steps":[{"t":"step text","img":"photo id or null"}],"script":"what to say to the guest, or empty","flag":"when to call a manager, or empty","kw":"comma separated phrases staff might type"},"notes":"one line on what you did or assumed","missing":["things still unknown"]}',
+    `WHEN TO ASK: If the manager's message and photos are enough for a usable SOP, DRAFT IMMEDIATELY. Ask only about genuinely missing critical information: something that changes what the agent does and cannot be inferred (who to call, which screen or button, a time limit or fee that must be stated, which branch applies). One or two short questions per turn, written in the one "question" string. Add "options" only when the answer is a short choice (2 to 4 options, 5 words or fewer each). Never ask about wording or format, never ask for confirmation, never ask what was already said. Questions asked in a row so far: ${asks || 0} of ${AUTHOR_MAX_ASKS}. ${asks >= AUTHOR_MAX_ASKS ? "You MUST draft now: use [FILL: ...] for what is unknown and list it in missing." : `After ${AUTHOR_MAX_ASKS} questions in a row you MUST draft.`} If the manager says they don't know, draft with a [FILL: ...] marker.`,
+    "STEPS: Short imperative steps, one action per step, plain words a new hire can follow, starting with the verb. Name the exact screen path with > (for example Reservation > Stay tab > Departure Time) only when the manager gave it. No numbering inside the text, no markdown, no emojis.",
+    "KEEP THEIR WORDING: Labels, quoted text, field names, templates and formats the manager gave (for example a log book headline format) must be kept character for character, in quotes where they gave quotes. Do not paraphrase them.",
+    `TOKENS: Hotel details that already exist can be written as {Detail name} instead of the literal value, whenever a step needs that fact. Use only these detail names, spelled exactly: ${detailKeys.length ? detailKeys.join("; ") : "(none)"}. Contacts are written as {Role}, for example "Call {AGM}". Use only these roles: ${roles.length ? roles.join(", ") : "(none)"}. Never write a person's name or phone number.`,
+    "NEVER INVENT prices, fees, phone numbers, times, room numbers, policies or names. If a fact is needed, the manager did not give it and no token covers it, write [FILL: what is needed] in that spot and add it to missing. Never write [CHECK] markers.",
+    "PHOTOS: Each attached photo is introduced to you with its id (and the manager's caption if any). Look at what it shows (a screen, a button, a form) and attach it to the ONE step it illustrates with that step's \"img\". A photo goes on one step only. Steps without a photo get null. Use only ids you were given. Do not describe a photo in the step text unless the step needs it. If a photo fits no step, leave it out and say so in notes.",
+    `FIELDS: title is short and names the situation or task. category is exactly one of: ${categories.join(" | ")}. script is what the agent says to the guest, in quotes, one or two sentences, or an empty string. flag says when to call a manager and who, using a {Role} token (for example "The guest wants a refund. Call {AGM}."), or an empty string. kw is 6 to 10 phrases staff would really type or say, comma separated.`,
+    editing
+      ? "EDITING: The manager is changing an existing SOP (shown as CURRENT DRAFT). Keep everything they did not mention exactly as it is: same wording, same photos, same order. Return the FULL updated SOP, not a diff. Keep photo ids already on steps unless asked to change them."
+      : "NEW SOP: If a CURRENT DRAFT is shown, you already drafted it earlier in this chat. Apply the manager's newest message to it and return the FULL updated SOP.",
+    "notes is one short line (25 words or fewer) on what you did or assumed. missing lists short items still unknown, or [].",
+  ].filter(Boolean).join("\n");
+}
+
+const draftBlock = (d) => !d ? "" : [
+  `CURRENT DRAFT: ${d.title || "(no title yet)"} [${d.category || "no category"}]`,
+  ...(d.steps || []).map((x, i) => `  ${i + 1}. ${x.t}${x.img ? ` [photo ${x.img}]` : ""}`),
+  d.script ? `  Say to the guest: ${d.script}` : "", d.flag ? `  Call the manager if: ${d.flag}` : "", d.kw ? `  Keywords: ${d.kw}` : "",
+].filter(Boolean).join("\n");
+
+// turns: [{role:"manager",text,images:[{id,caption}]} | {role:"assistant",kind:"ask",question,options} | {role:"assistant",kind:"draft",notes}]
+// images: [{id,mime,b64,caption}] actually sent (max 6). allowedImages: extra photo ids the draft may use (already on the existing SOP).
+async function authorSop(cfg, { hotelName, system, categories, detailKeys = [], roles = [], existingSop, draft, turns, images = [], allowedImages = [], asks = 0 }) {
+  const sys = authorSystem({ hotelName, system, categories, detailKeys, roles, editing: !!existingSop, asks });
+  const convo = turns.slice(-20).map((t) => {
+    if (t.role === "manager") {
+      const ph = (t.images || []).map((i) => i.id + (i.caption ? ` (${i.caption})` : "")).join(", ");
+      return `MANAGER: ${t.text || "(no text)"}${ph ? ` [attached photos: ${ph}]` : ""}`;
+    }
+    if (t.kind === "ask") return `ASSISTANT asked: ${t.question}${(t.options || []).length ? ` [options: ${t.options.join(" | ")}]` : ""}`;
+    return `ASSISTANT drafted the SOP${t.notes ? ` (${t.notes})` : ""}`;
+  }).join("\n");
+  const sent = cleanImages(images);
+  const user = [
+    existingSop ? `Editing existing SOP ${existingSop.id || ""}: ${existingSop.title || ""}` : "",
+    draftBlock(draft), "", "Conversation (the last MANAGER line is the newest message):", convo,
+    sent.length ? `\nPhotos follow, each introduced with its id: ${sent.map((i) => i.id).join(", ")}.` : "",
+  ].filter((x) => x !== "").join("\n");
+  const text = await complete(cfg, sys, user, { maxTokens: AUTHOR_MAX_TOKENS, timeoutMs: AUTHOR_TIMEOUT_MS, images: sent });
+  const raw = looseParse(text);
+  if (!raw) throw new Error("The AI reply wasn't understood");
+  return coerceAuthor(raw, { categories, validImages: [...sent.map((i) => i.id), ...allowedImages], fallbackCategory: (draft && draft.category) || (existingSop && existingSop.category) || "" });
+}
+
+const tidy = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
+// [CHECK] notes are never shown to staff: an authored one becomes a [FILL: ...] gap the manager sees and completes.
+const noCheck = (t) => t.replace(/\[CHECK:?\s*([^\]]*)\]/gi, (m, x) => `[FILL: ${x.trim() || "check this"}]`);
+
+// Turns the model's JSON into the strict shape the server stores. Throws when it is neither a usable ask nor a usable draft.
+function coerceAuthor(raw, ctx) {
+  const cats = ctx.categories || [];
+  const action = String(raw && raw.action || "").toLowerCase();
+  if (action === "ask") {
+    const question = tidy(raw.question, 400);
+    if (!question) throw new Error("The AI reply wasn't understood");
+    const seen = new Set(), options = [];
+    for (const o of Array.isArray(raw.options) ? raw.options : []) {
+      const t = tidy(typeof o === "string" ? o : o && o.text, 40);
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); options.push(t); }
+    }
+    return { action: "ask", question, options: options.length >= 2 ? options.slice(0, 4) : [] };
+  }
+  const src = raw && (raw.sop || (action === "draft" ? raw : null));
+  if (!src) throw new Error("The AI reply wasn't understood");
+  const valid = new Set(ctx.validImages || []), used = new Set();
+  const steps = [];
+  for (const x of (Array.isArray(src.steps) ? src.steps : []).slice(0, 40)) {
+    const t = noCheck(tidy(typeof x === "string" ? x : x && x.t, 1000));
+    if (!t) continue;
+    let img = x && typeof x === "object" && x.img != null ? String(x.img) : null;
+    if (img && (!valid.has(img) || used.has(img))) img = null;
+    if (img) used.add(img);
+    steps.push({ t, img });
+  }
+  const title = tidy(src.title, 200);
+  if (!title || !steps.length) throw new Error("The AI reply wasn't understood");
+  const missing = (Array.isArray(raw.missing) ? raw.missing : []).map((m) => tidy(typeof m === "string" ? m : "", 140)).filter(Boolean).slice(0, 6);
+  let category = cats.find((c) => c.toLowerCase() === String(src.category || "").trim().toLowerCase()) || "";
+  if (!category) {
+    category = cats.includes(ctx.fallbackCategory) ? ctx.fallbackCategory : cats[0] || "";
+    if (category) missing.push("Category: please check it");
+  }
+  const kwRaw = Array.isArray(src.kw) ? src.kw.join(", ") : src.kw ?? src.keywords ?? "";
+  const longText = (v) => noCheck(typeof v === "string" ? v.replace(/[ \t]+/g, " ").trim().slice(0, 1000) : "");
+  return {
+    action: "draft",
+    sop: { title, category, steps, script: longText(src.script), flag: longText(src.flag), kw: tidy(String(kwRaw), 1000) },
+    notes: tidy(raw.notes, 300),
+    missing,
+  };
+}
+
+module.exports = { authorSop, authorSystem, coerceAuthor, buildRequest, cleanImages, MAX_IMAGES, AUTHOR_MAX_ASKS, PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, coerceEscalate, fallbackEscalate, templateMessage, isHousekeepingTopic, guestPresent, looseParse, isEmergency, needsConfirm, MAX_ASKS };

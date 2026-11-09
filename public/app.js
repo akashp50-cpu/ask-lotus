@@ -644,11 +644,13 @@ $("testConn").onclick = async () => {
 const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 600;
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });
 function showSheet(which) {
-  ["editor", "userEd", "contactEd", "hotelEd", "masterEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  const open = !sheet.hidden && sheetS.target === 0; // already on screen: just swap the form, no slide
+  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "authorEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  if (open) { sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0)); return; }
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));
 }
-function hideSheet(velocity) { sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; }); }
+function hideSheet(velocity) { if (AU.active) authorDiscard(); sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; }); }
 sheet.querySelectorAll(".cancel").forEach((b) => (b.onclick = () => hideSheet()));
 scrim.onclick = () => hideSheet();
 addEventListener("keydown", (e) => { if (e.key === "Escape") { if (!$("lightbox").hidden) $("lightbox").hidden = true; else if (!sheet.hidden) hideSheet(); } });
@@ -668,8 +670,15 @@ const IC = {
   img: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="6" cy="7" r="1.3"/><path d="M14 11l-3.5-3.5L4 13"/></svg>',
   del: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
-$("newSop").onclick = () => openSop(null);
-function openSop(id, seedQ, logId) {
+$("newSop").onclick = () => (STATE.settings.aiOn ? authorOpen({ target: "hotel", from: "list" }) : openSop(null));
+function fillEditor(p) {
+  $("f-title").value = p.title || "";
+  if (p.category && STATE.cats.some((c) => c.name === p.category)) $("f-cat").value = p.category;
+  draftSteps = (p.steps || []).map((x) => ({ t: x.t, img: x.img || null })); if (!draftSteps.length) draftSteps = [{ t: "", img: null }];
+  renderSteps(); $("f-script").value = p.script || ""; $("f-flag").value = p.flag || ""; $("f-kw").value = p.kw || "";
+  growAll(); requestAnimationFrame(growAll);
+}
+function openSop(id, seedQ, logId, preset) {
   editing = id ? sop(id) : null; fromLog = logId || null;
   $("edTitle").textContent = editing ? editing.id : "New SOP";
   $("f-title").value = editing ? editing.title : seedQ || "";
@@ -681,8 +690,17 @@ function openSop(id, seedQ, logId) {
   $("f-status").setAttribute("aria-checked", editing ? editing.status === "live" : true);
   $("f-statusNote").textContent = editing && editing.status === "off" ? "Turned off for this hotel. Staff can't see it." : editing && editing.master && isGM() ? "Switch off to hide it from staff. You can turn it back on any time." : "";
   $("delEd").hidden = !editing; $("delEd").dataset.armed = ""; $("delEd").textContent = "Delete SOP";
+  $("edAi").hidden = !STATE.settings.aiOn;
+  if (preset) {
+    fillEditor(preset);
+    if (!editing) { $("f-status").setAttribute("aria-checked", "false"); $("f-statusNote").textContent = "Saved as a draft. Switch it on when it is ready for staff."; }
+  }
   showSheet("editor"); growAll(); requestAnimationFrame(growAll);
 }
+$("edAi").onclick = () => authorOpen({
+  target: "hotel", from: "editor", sopId: editing ? editing.id : null,
+  seed: { title: $("f-title").value.trim(), category: $("f-cat").value, steps: draftSteps.filter((x) => x.t.trim() || x.img).map((x) => ({ t: x.t.trim(), img: x.img })), script: $("f-script").value.trim(), flag: $("f-flag").value.trim(), kw: $("f-kw").value.trim() },
+});
 function grow(t) { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 const growAll = () => document.querySelectorAll("#stepsEd textarea,#mSteps textarea").forEach(grow);
 addEventListener("resize", () => { if (!sheet.hidden) growAll(); });
@@ -714,10 +732,10 @@ function stepEditor(cont, steps, o) {
 let imgCtx = null;
 function renderSteps(focusIdx) { stepEditor($("stepsEd"), draftSteps, { field: "t", focus: focusIdx, redraw: renderSteps }); }
 $("addStep").onclick = () => { draftSteps.push({ t: "", img: null }); renderSteps(draftSteps.length - 1); };
-function shrink(file) {
+function shrink(file, max = 1600) {
   return new Promise((res, rej) => {
     const fr = new FileReader(); fr.onerror = rej;
-    fr.onload = () => { const im = new Image(); im.onerror = rej; im.onload = () => { const k = Math.min(1, 1600 / Math.max(im.width, im.height)), c = document.createElement("canvas"); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); res(c.toDataURL("image/jpeg", 0.82)); }; im.src = fr.result; };
+    fr.onload = () => { const im = new Image(); im.onerror = rej; im.onload = () => { const k = Math.min(1, max / Math.max(im.width, im.height)), c = document.createElement("canvas"); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); res(c.toDataURL("image/jpeg", 0.82)); }; im.src = fr.result; };
     fr.readAsDataURL(file);
   });
 }
@@ -747,7 +765,7 @@ $("editor").addEventListener("submit", async (e) => {
     if (editing) Object.assign(editing, out); else STATE.sops.push(out);
     STATE.sops.sort((a, b) => a.id.localeCompare(b.id));
     if (fromLog) { try { await api(`/api/activity/${fromLog}/dismiss`, { body: {} }); markDismissed(fromLog); } catch {} }
-    toast(`Published ${out.id} v${out.ver}`); hideSheet(); renderAdmin();
+    toast(out.status === "live" ? `Published ${out.id} v${out.ver}` : `Saved ${out.id} as a draft`); hideSheet(); renderAdmin();
   } catch (x) { fail(x); }
   saving = false;
 });
@@ -1358,12 +1376,12 @@ function renderMasterList() {
   $("masterDetails").innerHTML = det.map((d) => `<div class="cell"><span class="body"><span class="t"><span class="tokchip">${esc(d.key)}</span></span><span class="m">${d.example ? "e.g. " + esc(d.example) + " · " : ""}Used in ${d.uses} SOP${d.uses === 1 ? "" : "s"}</span></span></div>`).join("");
 }
 $("mFilter").oninput = () => renderMasterList();
-$("newMaster").onclick = () => openMaster(null);
+$("newMaster").onclick = () => (STATE.settings.aiOn ? authorOpen({ target: "master", from: "list" }) : openMaster(null));
 
 let em = null, mDraft = null, mView = "pep", mSaving = false;
 const mSeg = Seg($("mView"), (v) => { mView = v; mSeg(v); renderMasterView(); });
 const chipify = (t) => esc(t).replace(/\{([^}]+)\}/g, '<span class="tokchip">$1</span>');
-function openMaster(id) {
+function openMaster(id, preset) {
   const M = STATE.owner.master;
   em = id ? M.sops.find((m) => m.id === id) : null;
   mDraft = em ? { steps: em.steps.map((s) => ({ t: s.t, hk: s.hk ?? null, img: s.img || null })) } : { steps: [{ t: "", hk: null, img: null }] };
@@ -1378,8 +1396,28 @@ function openMaster(id) {
   $("m-flag").value = em ? em.flag : ""; $("m-flag-hk").value = em && em.flag_hk ? em.flag_hk : "";
   $("m-kw").value = em ? em.kw : "";
   mView = "pep";
+  $("mAi").hidden = !STATE.settings.aiOn;
   showSheet("masterEd"); mSeg("pep", false); renderMasterView();
+  if (preset) fillMasterEditor(preset);
 }
+// Puts an AI draft into the open master editor. HotelKey wording is kept for steps whose PEP text did not change.
+function fillMasterEditor(p) {
+  const old = mDraft.steps, M = STATE.owner.master;
+  const steps = (p.steps || []).map((x) => { const o = old.find((y) => y.t === x.t); return { t: x.t, hk: o ? o.hk : null, img: x.img || null }; });
+  const dropped = old.filter((o) => o.hk && !steps.some((x) => x.hk === o.hk)).length;
+  mDraft.steps = steps.length ? steps : [{ t: "", hk: null, img: null }];
+  $("m-title").value = p.title || "";
+  if (p.category && M.cats.some((c) => c.name === p.category)) $("m-cat").value = p.category;
+  if ((p.script || "") !== $("m-script").value.trim()) $("m-script-hk").value = "";
+  if ((p.flag || "") !== $("m-flag").value.trim()) $("m-flag-hk").value = "";
+  $("m-script").value = p.script || ""; $("m-flag").value = p.flag || ""; $("m-kw").value = p.kw || "";
+  mView = "pep"; mSeg("pep", false); renderMasterView();
+  if (dropped) toast(`HotelKey wording was cleared on ${dropped} step${dropped === 1 ? "" : "s"} you changed. Check the HotelKey tab.`);
+}
+$("mAi").onclick = () => authorOpen({
+  target: "master", from: "editor", sopId: em ? em.id : null,
+  seed: { title: $("m-title").value.trim(), category: $("m-cat").value, steps: mDraft.steps.filter((x) => (x.t || "").trim() || x.img).map((x) => ({ t: (x.t || "").trim(), img: x.img })), script: $("m-script").value.trim(), flag: $("m-flag").value.trim(), kw: $("m-kw").value.trim() },
+});
 // Draft or live: drafts are not offered to hotels until published.
 function paintMasterStatus() {
   const draft = !!em && em.status === "draft";
@@ -1641,5 +1679,139 @@ async function impAct(body) {
   } catch (e) { fail(e); }
   impActing = false;
 }
+
+/* ---------- New SOP / Edit SOP with AI ---------- */
+// A chat where the manager briefs the AI. The result always lands in the normal editor for review; nothing is published from here.
+const AU = { active: false, target: "hotel", sopId: null, from: "list", seed: null, draftId: null, draft: null, thread: [], pending: [], busy: false, cardOpen: true };
+const AU_MAX_PHOTOS = 6;
+const fillify = (t) => chipify(t).replace(/\[FILL:([^\]]*)\]/g, '<span class="fill">[FILL:$1]</span>');
+const auIntro = () => AU.sopId || (AU.seed && AU.seed.title)
+  ? `I've loaded ${AU.sopId ? AU.sopId + ": " : ""}${AU.seed.title || "this SOP"}. Tell me what to change, for example "add a step after 3 about Quore", and attach a screenshot if it helps.`
+  : "Tell me how this procedure works, in your own words. Attach screenshots or photos if you have them. I'll ask about anything I'm missing, then write the steps.";
+
+function authorOpen({ target, from, sopId, seed }) {
+  Object.assign(AU, { active: true, target, from, sopId: sopId || null, seed: seed && seed.title ? seed : null, draftId: null, draft: seed && seed.title ? seed : null, pending: [], busy: false, cardOpen: true });
+  AU.thread = [{ role: "bot", text: auIntro() }];
+  $("auTitle").textContent = AU.sopId ? `Edit ${AU.sopId} with AI` : seed && seed.title ? "Edit with AI" : AU.target === "master" ? "New master SOP with AI" : "New SOP with AI";
+  $("auText").value = ""; $("auText").style.height = "auto";
+  showSheet("authorEd"); authorRender(); setTimeout(() => $("auText").focus(), 380);
+}
+function authorDiscard() {
+  const id = AU.draftId; AU.active = false; AU.draftId = null;
+  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: {} }).catch(() => {});
+}
+function authorBack() { // leave the chat without a draft: back to the editor it came from, or close
+  const from = AU.from, target = AU.target; authorDiscard();
+  if (from === "editor") showSheet(target === "master" ? "masterEd" : "editor"); else hideSheet();
+}
+$("auCancel").onclick = authorBack;
+$("auSelf").onclick = () => {
+  const from = AU.from, target = AU.target; authorDiscard();
+  if (from === "editor") showSheet(target === "master" ? "masterEd" : "editor");
+  else if (target === "master") openMaster(null); else openSop(null);
+};
+function authorHandoff() {
+  if (!AU.draft) return;
+  const d = AU.draft, from = AU.from, target = AU.target;
+  authorDiscard();
+  if (from === "editor") {
+    if (target === "master") { fillMasterEditor(d); showSheet("masterEd"); }
+    else { fillEditor(d); showSheet("editor"); }
+    toast("Draft loaded. Review it, then save.");
+  } else if (target === "master") openMaster(null, d); else openSop(null, null, null, d);
+}
+$("auOpen").onclick = authorHandoff;
+function authorRestart() {
+  if (AU.draftId && !confirm("Start over? The chat and the draft are cleared.")) return;
+  const id = AU.draftId; AU.draftId = null;
+  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: {} }).catch(() => {});
+  AU.draft = AU.seed; AU.thread = [{ role: "bot", text: auIntro() }]; AU.pending = []; AU.cardOpen = true; authorRender();
+}
+
+function authorCard() {
+  const d = AU.draft; if (!d) return "";
+  const r = AU.last || {};
+  const line = (label, v) => (v ? `<div class="auLine"><b>${label}</b>${fillify(v)}</div>` : "");
+  return `<div class="auCard ${AU.cardOpen ? "" : "collapsed"}" id="auCard">
+    <div class="auHead"><span class="eyebrow">Draft so far</span><button type="button" data-a="toggle">${AU.cardOpen ? "Hide" : "Show"}</button></div>
+    <h3>${esc(d.title || "Untitled")}</h3><div class="auMeta">${esc(d.category || "")} · ${d.steps.length} step${d.steps.length === 1 ? "" : "s"}</div>
+    <ol>${d.steps.map((x) => `<li><span>${fillify(x.t)}${x.img ? `<img alt="Photo for this step" loading="lazy" data-img="${esc(x.img)}" src="${imgUrl(x.img)}">` : ""}</span></li>`).join("")}</ol>
+    ${line("Say it like this", d.script)}${line("Call the manager if", d.flag)}${line("Ways staff might ask", d.kw)}
+    ${r.notes ? `<div class="auNote">${esc(r.notes)}</div>` : ""}
+    ${r.missing && r.missing.length ? `<div class="auMiss">Still needed: ${r.missing.map(esc).join("; ")}</div>` : ""}
+    <div class="auActs"><button type="button" data-a="start">Start over</button><button type="button" class="pri" data-a="open">Open in editor</button></div>
+  </div>`;
+}
+function authorRender(scrollTo) {
+  const body = $("auBody"), lastIdx = AU.thread.map((m) => m.role).lastIndexOf("bot");
+  body.innerHTML = AU.thread.map((m, i) => {
+    if (m.role === "err") return `<div class="auMsg err" role="alert">${esc(m.text)}</div>`;
+    if (m.role === "me") return `<div class="auMsg me">${m.text ? esc(m.text) : ""}${m.imgs && m.imgs.length ? `<div class="auThumbs">${m.imgs.map((id) => `<img alt="Attached photo" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}</div>`;
+    const chips = m.options && m.options.length ? `<div class="auChips">${m.options.map((o) => `<button type="button" class="chip press" data-opt="${esc(o)}" ${m.answered || AU.busy || i !== lastIdx ? "disabled" : ""}>${esc(o)}</button>`).join("")}</div>` : "";
+    return `<div class="auMsg bot">${esc(m.text)}</div>${chips}`;
+  }).join("") + (AU.busy ? `<div class="auTyping"><span class="spin"></span> Writing…</div>` : "") + authorCard();
+  body.querySelectorAll("[data-opt]").forEach((b) => (b.onclick = () => { AU.thread[lastIdx].answered = true; authorSend(b.dataset.opt, []); }));
+  body.querySelectorAll("[data-img]").forEach((im) => (im.onclick = () => openLB(im.src)));
+  body.querySelectorAll("#auCard [data-a]").forEach((b) => (b.onclick = () => {
+    const a = b.dataset.a;
+    if (a === "toggle") { AU.cardOpen = !AU.cardOpen; authorRender(); } else if (a === "start") authorRestart(); else if (a === "open") authorHandoff();
+  }));
+  $("auOpen").disabled = !AU.draft;
+  $("auSend").disabled = AU.busy || AU.pending.some((p) => p.up);
+  $("auAtt").innerHTML = AU.pending.map((p, i) => `<span class="th ${p.up ? "up" : ""}"><img alt="Photo to send" src="${esc(p.url)}"><button type="button" data-rm="${i}" aria-label="Remove photo">×</button></span>`).join("");
+  $("auAtt").querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { AU.pending.splice(+b.dataset.rm, 1); authorRender(); }));
+  if (scrollTo === "last") { const el = [...body.querySelectorAll(".auMsg.bot")].pop(); if (el) body.scrollTop += el.getBoundingClientRect().top - body.getBoundingClientRect().top - 6; }
+  else body.scrollTop = body.scrollHeight;
+}
+
+async function authorSend(text, imageIds) {
+  text = String(text || "").trim();
+  if (AU.busy || (!text && !imageIds.length)) return;
+  AU.thread.push({ role: "me", text, imgs: imageIds });
+  AU.busy = true; authorRender();
+  try {
+    const r = await api("/api/author", { body: { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined } });
+    AU.draftId = r.draftId; AU.last = r;
+    if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options }); AU.cardOpen = false; }
+    else { AU.draft = r.draft; AU.thread.push({ role: "bot", text: r.notes || "Here's the draft. Check it on the card below." }); AU.cardOpen = true; }
+    AU.busy = false; authorRender("last");
+  } catch (e) {
+    AU.busy = false;
+    AU.thread.pop(); // take the unsent message back so it can be edited and retried
+    if (/expired/i.test(e.message)) { AU.draftId = null; }
+    AU.thread.push({ role: "err", text: e.message });
+    $("auText").value = text; AU.pending = imageIds.map((id) => ({ id, url: imgUrl(id), up: false }));
+    authorRender();
+  }
+}
+function authorSubmit() {
+  if (AU.busy || AU.pending.some((p) => p.up)) return;
+  const text = $("auText").value, ids = AU.pending.map((p) => p.id);
+  $("auText").value = ""; $("auText").style.height = "auto"; AU.pending = [];
+  authorSend(text, ids);
+}
+$("auSend").onclick = authorSubmit;
+$("auText").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); authorSubmit(); } });
+$("auText").addEventListener("input", () => { const t = $("auText"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px"; });
+
+async function authorAttach(files) {
+  const list = [...files].filter((f) => f.type.startsWith("image/"));
+  if (!list.length) { if (files.length) toast("Choose a photo or screenshot"); return; }
+  for (const f of list) {
+    if (AU.pending.length >= AU_MAX_PHOTOS) { toast(`Up to ${AU_MAX_PHOTOS} photos at a time`); break; }
+    const p = { id: null, url: URL.createObjectURL(f), up: true }; AU.pending.push(p); authorRender();
+    try {
+      const dataUrl = await shrink(f, 1280);
+      p.id = (await api("/api/images", { body: { dataUrl } })).id; p.up = false;
+    } catch (e) { AU.pending.splice(AU.pending.indexOf(p), 1); fail(e.message ? e : new Error("That image couldn't be read. Try a JPG or PNG.")); }
+    authorRender();
+  }
+}
+$("auAttach").onclick = () => { $("auPick").value = ""; $("auPick").click(); };
+$("auPick").onchange = () => authorAttach($("auPick").files);
+$("auText").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => f.type.startsWith("image/"));
+  if (files.length) { e.preventDefault(); authorAttach(files); }
+});
 
 start();

@@ -775,6 +775,168 @@ app.put(
   })
 );
 
+const MAX_AUTHOR_IMAGES = 6, MAX_AUTHOR_SENT = 6;
+
+// ---------- New SOP / Edit SOP with AI ----------
+// A manager briefs the AI in a chat. The server keeps the thread and the current draft (sop_drafts); nothing is saved as an SOP
+// until the manager opens the draft in the normal editor and saves it there.
+const authorLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 80, standardHeaders: true, legacyHeaders: false });
+const AUTHOR_TTL_DAYS = 7;
+
+// Draft content from a client seed or a stored SOP: title, category, steps [{t,img}], script, flag, kw.
+function cleanDraft(b) {
+  const o = b && typeof b === "object" ? b : {};
+  return {
+    title: String(o.title || "").trim().slice(0, 200),
+    category: String(o.category ?? o.cat ?? "").trim().slice(0, 120),
+    steps: (Array.isArray(o.steps) ? o.steps : []).slice(0, 40).map((x) => ({ t: String(x && x.t || "").trim().slice(0, 1000), img: x && x.img ? String(x.img) : null })).filter((x) => x.t || x.img),
+    script: String(o.script || "").trim().slice(0, 1000),
+    flag: String(o.flag || "").trim().slice(0, 1000),
+    kw: String(o.kw ?? o.keywords ?? "").trim().slice(0, 1000),
+  };
+}
+const draftOut = (d) => (d && d.title ? d : null);
+
+async function authorContext(user, hotelId, target) {
+  if (target === "master") {
+    const [cats, dk, roles] = await Promise.all([
+      q("SELECT name FROM master_categories ORDER BY sort"),
+      q("SELECT key, example FROM master_details ORDER BY sort, key"),
+      q("SELECT DISTINCT role FROM contacts ORDER BY role"),
+    ]);
+    return {
+      hotelName: "Lotus Hospitality hotels",
+      system: "PEP (Hilton's name for HotelKey NextGen). Write the default PEP wording; HotelKey wording for other hotels is added separately by the Owner",
+      categories: cats.rows.map((r) => r.name),
+      detailKeys: dk.rows.map((r) => r.key),
+      roles: roles.rows.map((r) => r.role),
+    };
+  }
+  const [h, cats, roles] = await Promise.all([
+    hotelRow(hotelId),
+    q("SELECT name FROM categories WHERE hotel_id=$1 ORDER BY sort", [hotelId]),
+    q("SELECT role FROM contacts WHERE hotel_id=$1 ORDER BY id", [hotelId]),
+  ]);
+  const det = Object.entries(h.details || {}).filter(([, v]) => String(v ?? "").trim()).map(([k, v]) => `${k} (${String(v).trim().slice(0, 40)})`);
+  return {
+    hotelName: h.name,
+    system: h.system === "pep" ? "PEP (Hilton's name for HotelKey NextGen)" : "HotelKey",
+    categories: cats.rows.map((r) => r.name),
+    detailKeys: det.map((d) => d.replace(/ \(.*\)$/s, "")),
+    detailHints: det,
+    roles: roles.rows.map((r) => r.role),
+  };
+}
+
+app.post(
+  "/api/author",
+  authorLimiter,
+  auth("Manager"),
+  hotel,
+  wrap(async (req, res) => {
+    const target = req.body.target === "master" ? "master" : "hotel";
+    if (target === "master" && !isOwner(req.user)) return bad(res, 403, "Only the Owner can write master library SOPs.");
+    const message = String(req.body.message || "").trim().slice(0, 3000);
+    const imageIds = [...new Set((Array.isArray(req.body.imageIds) ? req.body.imageIds : []).map(String))].slice(0, MAX_AUTHOR_IMAGES);
+    if (!message && !imageIds.length) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
+    const cfg = aiConfig(await settingsRow());
+    if (!cfg) return bad(res, 400, "AI isn't switched on. Use Write it myself.");
+    const hotelKey = target === "master" ? null : req.hotel;
+
+    // Load this manager's draft, or start one (seeded from the SOP being edited, or from what the editor currently shows).
+    let row = null;
+    if (req.body.draftId != null) {
+      const id = String(req.body.draftId).slice(0, 64);
+      row = (await q(`SELECT * FROM sop_drafts WHERE id=$1 AND user_id=$2 AND hotel_id IS NOT DISTINCT FROM $3 AND updated_at > now() - interval '${AUTHOR_TTL_DAYS} days'`, [id, req.user.id, hotelKey])).rows[0];
+      if (!row) return bad(res, 404, "That draft has expired. Start over.");
+    } else {
+      let sopId = req.body.sopId ? String(req.body.sopId).slice(0, 40) : null;
+      let draft = cleanDraft(req.body.seed);
+      if (sopId && !(req.body.seed && req.body.seed.title)) {
+        const cur = target === "master"
+          ? (await q("SELECT id, category, title, steps, script, flag, keywords FROM master_sops WHERE id=$1", [sopId])).rows[0]
+          : (await q("SELECT id, category, title, steps, script, flag, keywords FROM sops WHERE hotel_id=$1 AND id=$2", [req.hotel, sopId])).rows[0];
+        if (!cur) return bad(res, 404, "That SOP no longer exists.");
+        draft = cleanDraft(sopOut(cur));
+      }
+      const id = crypto.randomUUID();
+      await q("DELETE FROM sop_drafts WHERE updated_at < now() - interval '30 days'");
+      await q("INSERT INTO sop_drafts (id, hotel_id, user_id, sop_id, draft) VALUES ($1,$2,$3,$4,$5)", [id, hotelKey, req.user.id, sopId, JSON.stringify(draft)]);
+      row = { id, hotel_id: hotelKey, sop_id: sopId, turns: [], draft };
+    }
+
+    // Photos: each must be one this user may see. The newest MAX_AUTHOR_SENT go to the model; all stay usable on steps.
+    const captions = req.body.captions && typeof req.body.captions === "object" ? req.body.captions : {};
+    const mine = (ids) => ids.length ? q("SELECT id, mime, data, hotel_id FROM images WHERE id = ANY($1)", [ids]).then((r) => new Map(r.rows.filter((i) => req.user.hotels.includes(i.hotel_id)).map((i) => [i.id, i]))) : Promise.resolve(new Map());
+    const have = await mine(imageIds);
+    const newImgs = imageIds.filter((id) => have.has(id)).map((id) => ({ id, caption: String(captions[id] || "").trim().slice(0, 200) || undefined }));
+    const turns = [...(row.turns || []), { role: "manager", text: message, images: newImgs }];
+    const sessionImgs = [];
+    for (const t of turns) for (const i of t.images || []) if (!sessionImgs.some((x) => x.id === i.id)) sessionImgs.push(i);
+    const sendIds = sessionImgs.slice(-MAX_AUTHOR_SENT);
+    const all = await mine(sendIds.map((i) => i.id));
+    const images = sendIds.filter((i) => all.has(i.id)).map((i) => ({ id: i.id, caption: i.caption, mime: all.get(i.id).mime, b64: all.get(i.id).data.toString("base64") }));
+    const draft = row.draft && row.draft.title ? row.draft : null;
+    const onSteps = (draft ? draft.steps : []).map((x) => x.img).filter(Boolean);
+
+    let asks = 0;
+    for (let i = turns.length - 2; i >= 0 && turns[i].role === "assistant" && turns[i].kind === "ask"; i -= 2) asks++;
+    const ctx = await authorContext(req.user, req.hotel, target);
+    let out;
+    try {
+      out = await ai.authorSop(cfg, {
+        hotelName: ctx.hotelName, system: ctx.system, categories: ctx.categories, detailKeys: ctx.detailKeys, roles: ctx.roles,
+        existingSop: row.sop_id ? { id: row.sop_id, title: draft && draft.title, category: draft && draft.category } : null,
+        draft, turns, images, allowedImages: [...onSteps, ...sessionImgs.map((i) => i.id)], asks,
+      });
+    } catch (e) {
+      console.error("AI author error:", e.message);
+      return bad(res, 502, "The AI didn't give a usable answer. Try again, or use Write it myself.");
+    }
+    // A photo the draft uses must still be one the manager can see.
+    if (out.action === "draft") {
+      const used = out.sop.steps.map((x) => x.img).filter(Boolean);
+      const ok = await mine(used);
+      for (const st of out.sop.steps) if (st.img && !ok.has(st.img)) st.img = null;
+      // Safety net for weaker models when revising a draft: drop a step repeated back-to-back,
+      // and give a step whose wording is unchanged its photo back if the model lost it.
+      const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+      out.sop.steps = out.sop.steps.filter((st, i, a) => !(i > 0 && norm(st.t) === norm(a[i - 1].t) && (!st.img || st.img === a[i - 1].img)));
+      if (draft) {
+        const prev = new Map(draft.steps.filter((x) => x.img).map((x) => [norm(x.t), x.img]));
+        const usedNow = new Set(out.sop.steps.map((x) => x.img).filter(Boolean));
+        for (const st of out.sop.steps) {
+          const img = !st.img && prev.get(norm(st.t));
+          if (img && !usedNow.has(img)) { st.img = img; usedNow.add(img); }
+        }
+      }
+    }
+    const bot = out.action === "ask"
+      ? { role: "assistant", kind: "ask", question: out.question, options: out.options }
+      : { role: "assistant", kind: "draft", notes: out.notes };
+    const newDraft = out.action === "draft" ? out.sop : row.draft;
+    await q("UPDATE sop_drafts SET turns=$2, draft=$3, updated_at=now() WHERE id=$1", [row.id, JSON.stringify([...turns, bot].slice(-40)), JSON.stringify(newDraft)]);
+    res.json({
+      draftId: row.id,
+      kind: out.action,
+      question: out.action === "ask" ? out.question : null,
+      options: out.action === "ask" ? out.options : [],
+      draft: draftOut(newDraft),
+      notes: out.action === "draft" ? out.notes : "",
+      missing: out.action === "draft" ? out.missing : [],
+    });
+  })
+);
+
+app.post(
+  "/api/author/:id/discard",
+  auth("Manager"),
+  wrap(async (req, res) => {
+    await q("DELETE FROM sop_drafts WHERE id=$1 AND user_id=$2", [String(req.params.id).slice(0, 64), req.user.id]);
+    res.json({ ok: true });
+  })
+);
+
 // ---------- master library (Owner) ----------
 const AMENITIES = ["breakfast", "pool", "pets", "laundry", "market"];
 
