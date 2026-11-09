@@ -45,6 +45,7 @@ async function runTurn({ cfg, hotel, sops, contacts, convo, question, expert, fa
       system: hotel.system === "pep" ? "PEP (Hilton's name for HotelKey NextGen)" : "HotelKey",
       turns, candidates: short.map((r) => forModel(r.s, contacts, hotel.details)), lastSop, expert,
       catalog: sops.map((x) => ({ id: x.id, title: x.title })), asks: convo.asks || 0,
+      minutes: ai.responseMinutes((hotel.chat_names || {}).response_minutes),
     });
     const emergencyId = emergency
       ? (rank(question, sops, 1)[0] || {}).s?.id || (sops.find((x) => /emergenc|fire|medical|safety/i.test(x.title + " " + x.category)) || {}).id || null

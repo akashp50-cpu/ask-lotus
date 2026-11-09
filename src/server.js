@@ -15,6 +15,7 @@ const { aiConfig, settingsFields } = require("./aiconfig");
 const { tokKey, forModel } = require("./tokens");
 const { ROUTES } = require("./defaults");
 const imp = require("./importer");
+const ob = require("./onboard");
 
 const PORT = process.env.PORT || 3000;
 const PROD = process.env.NODE_ENV === "production";
@@ -41,7 +42,7 @@ app.use(
 // Import uploads carry base64 documents (3 x 10 MB), so only those two routes get a bigger JSON limit, and only after sign-in.
 const jsonSmall = express.json({ limit: "6mb" });
 const jsonBig = express.json({ limit: "42mb" });
-app.use((req, res, next) => (/^\/api\/import\/(upload|sheet)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
+app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet)|setup\/extract)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
 app.use(
   session({
     store: new PgStore({ pool, tableName: "session" }),
@@ -148,7 +149,7 @@ const shortHotelName = (h) => {
 const chatDefaults = (h) => ({ front_desk: `${shortHotelName(h)} FD`, housekeeping: `${shortHotelName(h)} HK` });
 const chatNames = (h) => {
   const c = (h && h.chat_names) || {}, d = chatDefaults(h);
-  return Object.fromEntries(Object.entries(d).map(([k, v]) => [k, String(c[k] || "").trim() || v]));
+  return { ...Object.fromEntries(Object.entries(d).map(([k, v]) => [k, String(c[k] || "").trim() || v])), responseMinutes: ai.responseMinutes(c.response_minutes) };
 };
 
 const sopOut = (r) => ({
@@ -548,6 +549,7 @@ app.post(
       for (const h of req.body.hotels) await c.query("INSERT INTO user_hotels VALUES ($1,$2)", [r.rows[0].id, h]);
       return r.rows[0].id;
     });
+    for (const h of req.body.hotels) touchSetup(h);
     res.json({ id, tempPassword: pw });
   })
 );
@@ -615,6 +617,7 @@ app.post(
       const r = await q("INSERT INTO contacts (hotel_id, role, name, phone) VALUES ($1,$2,$3,$4) RETURNING id", [
         req.hotel, role.trim(), name.trim(), phone,
       ]);
+      touchSetup(req.hotel);
       res.json({ id: r.rows[0].id });
     } catch (e) {
       if (e.code === "23505") return bad(res, 400, "That role already exists.");
@@ -643,6 +646,7 @@ app.put(
           await c.query("UPDATE routes SET then_role=$1 WHERE hotel_id=$2 AND then_role=$3", [role, req.hotel, cur.role]);
         }
       });
+      touchSetup(req.hotel);
       res.json({ ok: true });
     } catch (e) {
       if (e.status === 404) return bad(res, 404, "That contact no longer exists.");
@@ -678,6 +682,7 @@ app.put(
     if (value && !(await q("SELECT 1 FROM contacts WHERE hotel_id=$1 AND role=$2", [req.hotel, value])).rows.length)
       return bad(res, 400, "That role doesn't exist.");
     await q(`UPDATE routes SET ${field}=$1 WHERE hotel_id=$2 AND id=$3`, [value, req.hotel, req.params.id]);
+    touchSetup(req.hotel);
     res.json({ ok: true });
   })
 );
@@ -695,7 +700,12 @@ app.put(
       const v = String(req.body[k] ?? "").replace(/\s+/g, " ").trim().slice(0, 40);
       if (v && v !== defs[k]) out[k] = v; else delete out[k];
     }
+    if (req.body.response_minutes !== undefined) {
+      const m = ai.responseMinutes(req.body.response_minutes);
+      if (m !== 5) out.response_minutes = m; else delete out.response_minutes;
+    }
     await q("UPDATE hotels SET chat_names=$1 WHERE id=$2", [JSON.stringify(out), req.hotel]);
+    if (h.setup !== "live") await q("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify({ chats_confirmed: true, last_activity: new Date().toISOString() })]);
     res.json({ chats: chatNames({ ...h, chat_names: out }), chatDefaults: defs });
   })
 );
@@ -729,13 +739,20 @@ app.put(
   wrap(async (req, res) => {
     const merge = req.body.merge === true;
     const incoming = cleanDetails(req.body.details, merge);
+    const row = (await q("SELECT details, setup, answers FROM hotels WHERE id=$1", [req.hotel])).rows[0];
+    const cur = row.details || {};
     let out = incoming;
-    if (merge) {
-      const cur = (await q("SELECT details FROM hotels WHERE id=$1", [req.hotel])).rows[0].details || {};
-      out = mergeDetails(cur, incoming);
+    if (merge) out = mergeDetails(cur, incoming);
+    // While the hotel is in setup, an edited detail stops saying "same as <template hotel>".
+    let patch = null;
+    if (row.setup !== "live") {
+      patch = { last_activity: new Date().toISOString() };
+      const pre = objOf(objOf(row.answers).prefilled);
+      if (Object.keys(pre).length) patch.prefilled = prunePrefilled(pre, cur, out);
     }
-    await q("UPDATE hotels SET details=$1 WHERE id=$2", [JSON.stringify(out), req.hotel]);
-    res.json({ details: out });
+    if (patch) await q("UPDATE hotels SET details=$1, answers = COALESCE(answers,'{}'::jsonb) || $3::jsonb WHERE id=$2", [JSON.stringify(out), req.hotel, JSON.stringify(patch)]);
+    else await q("UPDATE hotels SET details=$1 WHERE id=$2", [JSON.stringify(out), req.hotel]);
+    res.json({ details: out, ...(patch && patch.prefilled ? { prefilled: patch.prefilled } : {}) });
   })
 );
 
@@ -1297,6 +1314,7 @@ async function detailDefs(defaults) {
     return {
       key: d.key, hint: d.example, group: amen ? d.grp : null, q: owner.get(tokKey(d.key)) || null,
       section: amen ? AMEN_TITLE[d.grp] : DETAIL_GROUP_TITLE[d.grp] || DETAIL_SECTION[d.key] || "Other details",
+      ...ob.classify(d.key, amen ? d.grp : null), // screen, kind, sec, more, ml: where the guided setup shows it
     };
   });
 }
@@ -1330,6 +1348,112 @@ function detailsUsedBy(m, system, byKey) {
 }
 
 const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, chat_names FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
+
+// ----- guided onboarding: readiness, template hotel, document suggestions -----
+const touchSetup = (id) =>
+  q("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1 AND setup <> 'live'", [id, JSON.stringify({ last_activity: new Date().toISOString() })]).catch(() => {});
+const objOf = (x) => (x && typeof x === "object" && !Array.isArray(x) ? x : {});
+const shortOf = (h) => shortHotelName(h);
+
+// Default call routes (the same ones go-live seeds). Setup needs them early so the GM can pick who is called.
+async function ensureRoutes(c, hotelId) {
+  if ((await c.query("SELECT 1 FROM routes WHERE hotel_id=$1 LIMIT 1", [hotelId])).rows.length) return;
+  let i = 0;
+  for (const [id, label, sub, first, then, joiner] of ROUTES) {
+    await c.query("INSERT INTO routes (hotel_id, id, label, sub, first_role, then_role, joiner, sort) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [hotelId, id, label, sub, first, then, joiner, i++]);
+  }
+}
+
+// Detail values that changed since `before` no longer count as "same as the template hotel".
+function prunePrefilled(prefilled, before, after) {
+  const out = { ...prefilled };
+  for (const k of Object.keys(out)) {
+    if (ob.AMENITIES.includes(k) || ob.DETAIL_QS.includes(k)) continue;
+    if (ob.getDetail(before, k) !== ob.getDetail(after, k)) delete out[k];
+  }
+  return out;
+}
+
+// Every live hotel a GM may use as the "Lotus standards" source, with Hampton first.
+async function templateSources(excludeId) {
+  const { rows } = await q("SELECT id, name, brand, system, chat_names FROM hotels WHERE setup='live' AND id <> $1 ORDER BY (id='hop') DESC, name", [excludeId]);
+  return rows.map((r) => ({ id: r.id, name: r.name, short: shortOf(r), system: r.system }));
+}
+
+// Copies the template hotel's policy-type details into this hotel (empty ones only) and records where each came from.
+async function applyTemplate(c, hotelId, srcId) {
+  const src = (await c.query("SELECT id, setup, answers, details FROM hotels WHERE id=$1", [srcId])).rows[0];
+  if (!src || src.setup !== "live" || src.id === hotelId) return { err: "Pick a live hotel to copy the standards from." };
+  const h = (await c.query("SELECT id, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [hotelId])).rows[0];
+  const defs = (await detailDefs()).map((d) => ({ key: d.key, group: d.group }));
+  const cur = { details: h.details || {}, answers: objOf(h.answers) };
+  const patch = ob.templatePatch({ id: src.id, answers: objOf(src.answers), details: src.details || {} }, cur, defs);
+  const details = mergeDetails(cur.details, cleanDetails(patch.details, false));
+  const prefilled = { ...objOf(cur.answers.prefilled), ...patch.prefilled };
+  const upd = { ...patch.answers, prefilled, template: src.id, last_activity: new Date().toISOString() };
+  await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb, details=$3 WHERE id=$1", [hotelId, JSON.stringify(upd), JSON.stringify(details)]);
+  return { count: Object.keys(patch.prefilled).length, prefilled };
+}
+
+// Everything the guided screens need beyond the classic payload.
+async function setupExtras(h, req) {
+  const a = objOf(h.answers);
+  const [contacts, routes, users, tmpl, ready, settings] = await Promise.all([
+    q("SELECT id, role, name, phone FROM contacts WHERE hotel_id=$1 ORDER BY id", [h.id]),
+    q("SELECT id, label, sub, first_role AS first, then_role AS then, joiner AS join FROM routes WHERE hotel_id=$1 ORDER BY sort", [h.id]),
+    q(
+      `SELECT u.id, u.name, u.username, u.role, u.status, u.must_change_pw, u.last_seen FROM users u JOIN user_hotels uh ON uh.user_id=u.id
+        WHERE uh.hotel_id=$1 AND u.role IN ('Front Desk','Manager','GM') ORDER BY u.name`,
+      [h.id]
+    ),
+    templateSources(h.id),
+    hotelReadiness(h.id, h),
+    settingsRow(),
+  ]);
+  const names = {};
+  for (const t of tmpl) names[t.id] = t.short;
+  for (const id of new Set(Object.values(objOf(a.prefilled)))) if (!names[id]) { const r = (await hotelRow(id)); if (r) names[id] = shortOf(r); }
+  return {
+    uiStep: ob.STEP_IDS.includes(a.ui_step) ? a.ui_step : null,
+    prefilled: objOf(a.prefilled),
+    prefilledNames: names,
+    templates: tmpl,
+    layout: ob.LAYOUT.map(([screen, , sec]) => ({ screen, sec })),
+    suggestions: Array.isArray(a.suggestions) ? a.suggestions : [],
+    staffLater: a.staff_later === true,
+    chatsConfirmed: a.chats_confirmed === true,
+    lastActivity: a.last_activity || null,
+    setupContacts: contacts.rows,
+    routes: routes.rows,
+    users: users.rows,
+    readiness: ready.readiness,
+    aiOn: !!aiConfig(settings, "writing") || ai.mockEnabled(),
+    isOwner: isOwner(req.user),
+  };
+}
+
+// Readiness for one hotel: the score, the checklist and what is missing. `h` is the hotel row when the caller already has it.
+async function hotelReadiness(hotelId, h) {
+  h = h || (await hotelFull(hotelId));
+  const [defs, masters, contacts, fd] = await Promise.all([
+    detailDefs(),
+    q("SELECT id, category, title, applies, requires, steps, script, script_hk, flag, flag_hk, keywords FROM master_sops WHERE status='live' ORDER BY id"),
+    q("SELECT role, name, phone FROM contacts WHERE hotel_id=$1", [hotelId]),
+    q("SELECT count(*)::int AS n FROM users u JOIN user_hotels uh ON uh.user_id=u.id WHERE uh.hotel_id=$1 AND u.role='Front Desk' AND u.status='active'", [hotelId]),
+  ]);
+  const st = readSetup(h);
+  const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
+  const sel = new Set(selectedIds(masters.rows, h.brand, st.amen, st.selection));
+  const used = new Set();
+  for (const m of masters.rows) if (sel.has(m.id)) detailsUsedBy(m, h.system, byKey).forEach((k) => used.add(k));
+  const cn = (h.chat_names && typeof h.chat_names === "object") ? h.chat_names : {};
+  const a = objOf(h.answers);
+  const r = ob.readiness({
+    answers: a, details: h.details || {}, contacts: contacts.rows, frontDesk: fd.rows[0].n, used: [...used], defs,
+    chatCustom: !!(String(cn.front_desk || "").trim() && String(cn.housekeeping || "").trim()),
+  });
+  return { readiness: r, step: ob.STEP_IDS.includes(a.ui_step) ? a.ui_step : a.stage === "start" || h.setup === "new" ? "welcome" : "hotel", lastActivity: a.last_activity || null };
+}
 
 app.get(
   "/api/setup",
@@ -1371,11 +1495,13 @@ app.get(
       })),
       sources: srcs.rows,
       contacts: cc.rows[0].n,
+      ...(await setupExtras(h, req)),
     });
   })
 );
 
 // Step 1: pick how to start. "copy" takes the SOPs that are live at another hotel as the starting selection.
+// Either way, `template` (a live hotel's id) also pre-fills that hotel's policy-type details ("Lotus standards").
 app.post(
   "/api/setup/start",
   auth("GM"),
@@ -1390,14 +1516,168 @@ app.post(
       const src = (await q("SELECT setup FROM hotels WHERE id=$1", [from])).rows[0];
       if (!src || src.setup !== "live") return bad(res, 400, "You can only copy a hotel that is live.");
       const live = new Set((await q("SELECT master_id FROM sops WHERE hotel_id=$1 AND status='live' AND master_id IS NOT NULL", [from])).rows.map((r) => r.master_id));
-      const all = (await q("SELECT id FROM master_sops WHERE status='live' ORDER BY id")).rows.map((r) => r.id);
-      patch = { stage: "review", copyFrom: from, selection: { on: all.filter((id) => live.has(id)), off: all.filter((id) => !live.has(id)) } };
+      const all = (await q("SELECT id, requires FROM master_sops WHERE status='live' ORDER BY id")).rows;
+      patch = { stage: "review", copyFrom: from, selection: { on: all.filter((m) => live.has(m.id)).map((m) => m.id), off: all.filter((m) => !live.has(m.id)).map((m) => m.id) } };
+      // The amenity answers follow what the source hotel turned on; the GM confirms them on the Amenities screen.
+      const old = objOf(h.answers), pre = {};
+      for (const k of ob.AMENITIES) if (old[k] === undefined) { patch[k] = all.some((m) => m.requires === k && live.has(m.id)); pre[k] = from; }
+      patch.prefilled = { ...objOf(old.prefilled), ...pre };
     } else {
       patch = { stage: "about" };
       if (readSetup(h).copyFrom) { patch.copyFrom = null; patch.selection = { on: [], off: [] }; } // starting over from questions
     }
-    await q("UPDATE hotels SET setup='setup', ready=FALSE, answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify(patch)]);
+    patch.ui_step = "hotel";
+    patch.last_activity = new Date().toISOString();
+    const tmpl = req.body.template ? String(req.body.template) : null;
+    const out = await tx(async (c) => {
+      await c.query("UPDATE hotels SET setup='setup', ready=FALSE, answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify(patch)]);
+      await ensureRoutes(c, req.hotel);
+      return tmpl ? await applyTemplate(c, req.hotel, tmpl) : { count: 0 };
+    });
+    if (out.err) return bad(res, 400, out.err);
+    res.json({ ok: true, prefilled: out.count });
+  })
+);
+
+// Re-apply the Lotus standards (or switch the template hotel). Only fills details that are still empty.
+app.post(
+  "/api/setup/template",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const h = await hotelFull(req.hotel);
+    if (h.setup === "live") return bad(res, 400, "This hotel is already live.");
+    const out = await tx((c) => applyTemplate(c, req.hotel, String(req.body.fromHotel || "")));
+    if (out.err) return bad(res, 400, out.err);
+    res.json({ prefilled: out.prefilled, count: out.count });
+  })
+);
+
+// Remember which screen the GM is on, so setup resumes there.
+app.put(
+  "/api/setup/ui-step",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const step = String(req.body.step || "");
+    if (!ob.STEP_IDS.includes(step)) return bad(res, 400, "Unknown step.");
+    const h = await hotelFull(req.hotel);
+    if (h.setup === "live") return res.json({ ok: true });
+    await q("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify({ ui_step: step, last_activity: new Date().toISOString() })]);
     res.json({ ok: true });
+  })
+);
+
+// "Confirm" on a pre-filled field, and the two yes/no choices that aren't answers: staff later, chat names checked.
+app.put(
+  "/api/setup/flags",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const out = await tx(async (c) => {
+      const h = (await c.query("SELECT id, setup, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      if (h.setup === "live") return { prefilled: {} };
+      const a = objOf(h.answers), prefilled = { ...objOf(a.prefilled) };
+      const keys = (Array.isArray(req.body.confirm) ? req.body.confirm : []).map(String);
+      for (const k of keys) for (const p of Object.keys(prefilled)) if (p === k || tokKey(p) === tokKey(k)) delete prefilled[p];
+      const patch = { prefilled, last_activity: new Date().toISOString() };
+      if (req.body.staff_later !== undefined) patch.staff_later = !!req.body.staff_later;
+      if (req.body.chats_confirmed !== undefined) patch.chats_confirmed = !!req.body.chats_confirmed;
+      await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify(patch)]);
+      return { prefilled };
+    });
+    res.json(out);
+  })
+);
+
+app.get(
+  "/api/setup/readiness",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const h = await hotelFull(req.hotel);
+    const r = await hotelReadiness(req.hotel, h);
+    res.json({ hotel: { id: h.id, name: h.name, setup: h.setup }, step: r.step, stepName: ob.SCREEN_NAMES[r.step] || "Welcome", lastActivity: r.lastActivity, ...r.readiness });
+  })
+);
+
+// Read an uploaded document and return SUGGESTIONS (never saved to the hotel until the GM accepts them).
+const extractLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many documents. Wait a few minutes and try again." } });
+app.post(
+  "/api/setup/extract",
+  auth("GM"),
+  extractLimiter,
+  jsonBig,
+  hotel,
+  wrap(async (req, res) => {
+    try {
+      const h = await hotelFull(req.hotel);
+      if (h.setup === "live") return bad(res, 400, "This hotel is already live.");
+      const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
+      if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings.", noAi: true });
+      const files = loadFiles(req.body.files);
+      const defs = await detailDefs();
+      const editable = defs;
+      const results = [];
+      for (const f of files) {
+        const text = await imp.fileText(f.name, f.buf);
+        if (!text) continue;
+        const chunks = imp.chunkText(text.slice(0, imp.MAX_TEXT));
+        const outs = await Promise.all(chunks.map(async (c, i) => {
+          try {
+            const reply = await ai.complete(cfg, ob.EXTRACT_SYSTEM, ob.extractPrompt(c, i, chunks.length, editable), { maxTokens: 4000, timeoutMs: 60000 });
+            const j = imp.looseJSON(reply);
+            return j ? { ok: ob.coerceExtraction(j, { keys: editable.map((d) => d.key), text: c }) } : { bad: true };
+          } catch (e) { return { err: e }; }
+        }));
+        const good = outs.filter((o) => o.ok);
+        if (!good.length) {
+          const err = outs.find((o) => o.err);
+          throw new imp.ImportError(err ? imp.providerMessage(err.err) : "The AI's answer couldn't be read. Try again in a moment.");
+        }
+        results.push({ file: f.name, result: ob.mergeExtractions(good.map((g) => ({ file: f.name, result: g.ok }))) });
+      }
+      if (!results.length) throw new imp.ImportError("We couldn't find any text in that file. Scanned pages and photos can't be read. Try a text version.");
+      const found = ob.mergeExtractions(results.map((r) => ({ file: r.file, result: { details: r.result.details, answers: r.result.answers, contacts: r.result.contacts } })));
+      const st = readSetup(h), a = objOf(h.answers), det = h.details || {};
+      const contacts = (await q("SELECT role, name, phone FROM contacts WHERE hotel_id=$1", [req.hotel])).rows;
+      const stamp = Date.now().toString(36);
+      let n = 0;
+      const fresh = [];
+      for (const d of found.details) if (ob.getDetail(det, d.key) !== d.value) fresh.push({ kind: "detail", key: d.key, value: d.value, file: d.file });
+      for (const x of found.answers) {
+        const have = ob.AMENITIES.includes(x.key) ? st.amen[x.key] : st.qa[x.key];
+        if (have !== x.value) fresh.push({ kind: "answer", key: x.key, value: x.value, file: x.file });
+      }
+      for (const c of found.contacts) {
+        const have = contacts.find((k) => tokKey(k.role) === tokKey(c.role));
+        if (have && String(have.name).trim() === c.name && (!c.phone || ob.fmtPhone(have.phone) === c.phone)) continue;
+        fresh.push({ kind: "contact", role: c.role, name: c.name, phone: c.phone, file: c.file });
+      }
+      const sig = (s) => s.kind + ":" + tokKey(s.key || s.role);
+      const keep = (Array.isArray(a.suggestions) ? a.suggestions : []).filter((s) => !fresh.some((f) => sig(f) === sig(s)));
+      const all = [...keep, ...fresh.map((f) => ({ ...f, id: stamp + (n++).toString(36) }))].slice(-120);
+      await q("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify({ suggestions: all, last_activity: new Date().toISOString() })]);
+      res.json({ found: fresh.length, suggestions: all });
+    } catch (e) {
+      importFail(res, e);
+    }
+  })
+);
+
+app.post(
+  "/api/setup/suggestions/resolve",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const out = await tx(async (c) => {
+      const h = (await c.query("SELECT id, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const a = objOf(h.answers), ids = new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String));
+      const left = (Array.isArray(a.suggestions) ? a.suggestions : []).filter((s) => !ids.has(s.id));
+      await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify({ suggestions: left })]);
+      return left;
+    });
+    res.json({ suggestions: out });
   })
 );
 
@@ -1439,10 +1719,17 @@ app.put(
         if (old.qa[k] === undefined || old.qa[k] !== yes) details = applyQuestionDefaults(details, k, yes, sdef);
         qa[k] = yes;
       }
-      const patch = { ...amen, ...qa, selection };
+      // A changed answer or detail is the GM's own now, so it no longer says "same as <template hotel>".
+      let prefilled = { ...objOf(objOf(h.answers).prefilled) };
+      for (const k of [...AMENITIES, ...DETAIL_QS]) {
+        const prev = AMENITIES.includes(k) ? old.amen[k] : old.qa[k];
+        if (given[k] !== undefined && (prev === undefined || !!given[k] !== !!prev)) delete prefilled[k];
+      }
+      prefilled = prunePrefilled(prefilled, h.details || {}, details);
+      const patch = { ...amen, ...qa, selection, prefilled, last_activity: new Date().toISOString() };
       if (req.body.stage === "about" || req.body.stage === "review") patch.stage = req.body.stage;
       await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb, details=$3 WHERE id=$1", [req.hotel, JSON.stringify(patch), JSON.stringify(details)]);
-      return { answers: { ...amen, ...qa }, selection, details };
+      return { answers: { ...amen, ...qa }, selection, details, prefilled };
     });
     if (out.err) return bad(res, 400, out.err);
     res.json(out);
@@ -1493,6 +1780,12 @@ app.post(
   auth("GM"),
   hotel,
   wrap(async (req, res) => {
+    // The essentials (a GM or AGM phone, Wi-Fi, check-out time, a front desk login or "staff later", the amenity answers) come first.
+    const rdy = await hotelReadiness(req.hotel);
+    if (!rdy.readiness.essentialsDone) {
+      const left = rdy.readiness.missing.filter((i) => i.essential).map((i) => i.label);
+      return res.status(400).json({ error: `Finish these first: ${left.join("; ")}.`, missing: left });
+    }
     const out = await tx(async (c) => {
       const h = (await c.query("SELECT id, brand, system, setup, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
       if (h.setup === "live") return { err: "This hotel is already live." };
@@ -2144,7 +2437,9 @@ const BUILD = String(Date.now());
 const INDEX = require("fs")
   .readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8")
   .replace('href="/style.css"', `href="/style.css?v=${BUILD}"`)
-  .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`);
+  .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`)
+  .replace('src="/setup.js"', `src="/setup.js?v=${BUILD}"`)
+  .replace('src="/vendor/qrcode.js"', `src="/vendor/qrcode.js?v=${BUILD}"`);
 const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);
 app.get(["/", "/index.html"], sendIndex);
 app.use(express.static(path.join(__dirname, "..", "public"), { index: false, maxAge: 0 }));

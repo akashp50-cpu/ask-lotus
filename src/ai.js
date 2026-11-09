@@ -190,9 +190,9 @@ const isEmergency = (text) => EMERGENCY_RE.test(String(text || ""));
 // Money, safety, security, legal/ID or policy: expert advice must be confirmed with a manager.
 const CONFIRM_RE = /\b(refund\w*|comp|comps|comped|compensat\w*|discount\w*|rebate|waive\w*|charge\w*|fee|fees|price|rate|rates|money|cash|payment|pay|paid|deposit|credit card|chargeback|dispute\w*|lawsuit|legal|lawyer|police|safety|unsafe|security|theft|stolen|id|identification|passport|license|policy|policies|injur\w*|medical|fire|weapon|threat\w*|harass\w*|discriminat\w*|bed ?bugs?|insurance|liabilit\w*)\b/i;
 const needsConfirm = (text) => CONFIRM_RE.test(String(text || ""));
-// Narrower list for forcing "urgent" when a guest is present: decisions or risks a manager must own right now.
-// (Plain rate, payment or policy questions with a guest at the desk stay "chat" unless the model says otherwise.)
-const URGENT_RE = /\b(refund\w*|comp|comps|comped|compensat\w*|discount\w*|waive\w*|chargeback|dispute\w*|lawsuit|legal|lawyer|police|unsafe|theft|stolen|weapon|threat\w*|harass\w*|discriminat\w*|injur\w*|bed ?bugs?|no (photo )?id|fake id)\b/i;
+// Safety, security and aggression terms: the only non-emergency words the server forces "urgent" for (call now).
+// Money, refunds, comps, disputes, policy and system questions are NOT here: the team answers those in the chat within minutes.
+const URGENT_RE = /\b(police|unsafe|theft|thief|stolen|break-?in|weapon\w*|threat\w*|harass\w*|stalk\w*|intimidat\w*|abusive|aggress\w*|hostile|belligerent)\b/i;
 const needsUrgent = (text) => URGENT_RE.test(String(text || ""));
 
 const clip = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
@@ -216,11 +216,15 @@ function templateMessage(staffText) {
   return `${room ? "Room " + room[1] : "[Room #]"}: ${text || "[question]"}. Can a manager confirm?`;
 }
 
-// The level the server insists on whatever the model says: emergencies are always urgent; money or safety terms
-// with a guest present right now are urgent. Returns a reason code or null.
+// The level the server insists on whatever the model says: emergencies and safety/security/aggression terms are always urgent.
+// Returns a reason code or null.
+// How long the team usually takes to answer in the group chat: whole minutes, default 5, clamped to 1-60.
+const DEFAULT_MINUTES = 5;
+const responseMinutes = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && String(v ?? "").trim() !== "" ? Math.min(60, Math.max(1, n)) : DEFAULT_MINUTES; };
+
 function urgentReason(text, emergency) {
   if (emergency || isEmergency(text)) return "emergency";
-  if (needsUrgent(text) && guestPresent(text)) return "guest_waiting";
+  if (needsUrgent(text)) return "safety";
   return null;
 }
 
@@ -228,7 +232,7 @@ function urgentReason(text, emergency) {
 // ctx: { staffText, emergency, answer, forceAnyway } - forceAnyway builds one even when the model sent none (advice, emergencies).
 function coerceEscalate(raw, ctx = {}) {
   const staff = String(ctx.staffText || "");
-  const why = urgentReason(staff, ctx.emergency) || (ctx.answer && needsUrgent(ctx.answer) && guestPresent(staff) ? "guest_waiting" : null);
+  const why = urgentReason(staff, ctx.emergency);
   let o = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   if (o) {
     const level = String(o.level || "").toLowerCase();
@@ -308,15 +312,15 @@ function looseParse(text) {
 }
 
 // Added to the system prompt: when and how to route the agent to a manager (urgent call) or the team's WhatsApp chats.
-const ESCALATE_RULES = [
+const ESCALATE_RULES = (minutes) => [
   'ESCALATE: In an answer or advise reply you may add "escalate": {"level":"urgent" or "chat","chat":"front_desk" or "housekeeping","message":"the message to post"}.',
   'Include escalate when the SOP (steps or the "Call a manager if" line) or your own answer tells the agent to involve, ask or call a manager or someone else, when an "ask a manager" / "not set" gap blocks the answer, and on EVERY advise reply. Otherwise leave it out.',
-  'level "urgent" = a guest is waiting right now and cannot proceed, a money, refund or comp decision is happening now, a safety or security risk, someone is upset and escalating, or a system is down that stops check-in or check-out. The agent will phone a manager. Any other case is level "chat": a question the team can answer in their group chat in a few minutes. Emergencies (fire, medical, violence, gas, flood) are never "chat".',
+  `The team replies in the group chat within about ${responseMinutes(minutes)} minutes, so prefer "chat". level "urgent" (the agent phones a manager now) ONLY for: an emergency (fire, medical, gas, flood), a safety or security risk (weapon, threat, violence, theft in progress, police needed, harassment, someone hurt or injured), or a guest becoming aggressive or abusive. Everything else that needs a manager is level "chat", including refunds, comps, discounts, disputes, a guest waiting at the desk, policy exceptions, late checkout beyond the rules and system questions. The agent is told to call if nobody answers the chat. Emergencies are never "chat".`,
   'chat picks the group: "housekeeping" for rooms, cleaning, linens, towels, amenity stock, supplies, maintenance handoffs for a room, lost and found and room status; "front_desk" for everything else (reservations, rates, payments, PEP or HotelKey, policies, guest issues, shifts).',
   'message is ready to paste in WhatsApp, in the staff member\'s own voice: 1 to 3 short sentences, no emojis, no greeting. Include the room number and guest name only if the conversation gave them (otherwise write "[room #]"; never invent one), what the guest wants, what was already tried, and one clear question. Do not name the chat in the message.',
 ].join(" ");
 
-function converseSystem({ hotelName, system, expert }) {
+function converseSystem({ hotelName, system, expert, minutes }) {
   return [
     `You are the voice of Ask Lotus at ${hotelName || "this hotel"}: a seasoned master hotel operator with 20+ years running select-service and full-service hotels, from the front desk to general manager. You know PMS work, guest recovery, safety and revenue basics. You are coaching a front desk agent in the middle of a shift.`,
     system ? `Front desk system: ${system}.` : "",
@@ -335,7 +339,7 @@ function converseSystem({ hotelName, system, expert }) {
     "FOLLOW-UPS: After an answer, a follow-up (for example \"what if they say no?\") is answered from the same SOP unless the staff member clearly changed topic; if the topic is clearly new, ignore the earlier turns and treat it as a fresh question.",
     "ANSWER TEXT: Address what the staff member actually described, for example \"Since the lock flashes red, the key needs re-encoding: ...\". focus_steps lists the step numbers of the SOP most relevant to this conversation (leave it out if all apply).",
     'TIP: In an answer you may add "tip": ONE short line of practical operator advice (how to phrase something to an upset guest, what to note in the log). It adds to the SOP and never contradicts or replaces it, and contains no prices, policies, phone numbers or procedures that are not in the SOP. Leave it out when there is nothing useful.',
-    ESCALATE_RULES,
+    ESCALATE_RULES(minutes),
     expert
       ? 'NO SOP FITS: Use "advise": 2 to 4 short sentences of general best practice from your experience. Never state property-specific facts (fees, hours, phone numbers, room numbers, names) that are not in the SOPs. Set "confirm": true whenever money, refunds or comps, safety, security, legal or ID, or policy is involved. Never use advise for an emergency.'
       : "NO SOP FITS: reply with the none action. Never answer from your own knowledge.",
@@ -353,8 +357,8 @@ function sopBlock(s) {
 
 // turns: [{role:"staff",text} | {role:"assistant",kind:"ask",question,options} | {role:"assistant",kind:"answer",sop_id,answer} | {role:"assistant",kind:"advise"|"none"}]
 // candidates / lastSop: SOPs already resolved with tokens.forModel. Returns the parsed (uncoerced) JSON object.
-async function converse(cfg, { hotelName, system, turns, candidates, catalog, lastSop, expert, asks }) {
-  const sys = converseSystem({ hotelName, system, expert: expert !== false });
+async function converse(cfg, { hotelName, system, turns, candidates, catalog, lastSop, expert, asks, minutes }) {
+  const sys = converseSystem({ hotelName, system, expert: expert !== false, minutes });
   const convo = turns.slice(-16).map((t) => {
     if (t.role === "staff") return `STAFF: ${t.text}`;
     if (t.kind === "ask") return `ASSISTANT asked: ${t.question} [options: ${(t.options || []).join(" | ")}]`;
@@ -479,4 +483,4 @@ function coerceAuthor(raw, ctx) {
   };
 }
 
-module.exports = { authorSop, authorSystem, coerceAuthor, buildRequest, cleanImages, MAX_IMAGES, AUTHOR_MAX_ASKS, PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, coerceEscalate, fallbackEscalate, templateMessage, isHousekeepingTopic, guestPresent, looseParse, isEmergency, needsConfirm, MAX_ASKS };
+module.exports = { responseMinutes, authorSop, authorSystem, coerceAuthor, buildRequest, cleanImages, MAX_IMAGES, AUTHOR_MAX_ASKS, PROVIDERS, pickSop, answerFromSop, testConnection, complete, mockEnabled, converse, converseSystem, coerceTurn, coerceEscalate, fallbackEscalate, templateMessage, isHousekeepingTopic, guestPresent, looseParse, isEmergency, needsConfirm, MAX_ASKS };

@@ -439,5 +439,5 @@ function parseSheetRows(rows, ctx) {
 module.exports = {
   ImportError, MAX_FILES, MAX_FILE_BYTES, MAX_TEXT, CHUNK, EXTS, REQUIRES_LABELS, APPLIES_LABELS,
   decodeUpload, checkFile, extractAll, fileText, chunkText, looseJSON, cleanAiResult, mergeResults, analyzeText,
-  buildTemplate, sheetRowsFromFile, parseSheetRows, parseCsv, matchCategory, norm,
+  buildTemplate, sheetRowsFromFile, parseSheetRows, parseCsv, matchCategory, norm, providerMessage,
 };

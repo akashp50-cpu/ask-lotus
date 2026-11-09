@@ -139,15 +139,21 @@ test("escalate: emergencies are always urgent with the 911 flag, never chat", ()
   assert.strictEqual(ai.coerceTurn({ action: "ask", question: "Q?", options: ["A", "B"] }, c).escalate.emergency, true);
 });
 
-test("escalate: money or safety with a guest present right now is forced urgent; without a guest it stays chat", () => {
+test("escalate: refunds and money with a guest at the desk stay chat; safety words and injuries are urgent", () => {
   const chat = { level: "chat", chat: "front_desk", message: "Guest wants a refund." };
-  const now = ai.coerceTurn({ action: "advise", advice: "Listen first.", escalate: chat }, ctx({ staffText: "guest at the desk wants a refund" }));
-  assert.strictEqual(now.escalate.level, "urgent"); assert.strictEqual(now.escalate.why, "guest_waiting");
-  const later = ai.coerceTurn({ action: "advise", advice: "Listen first.", escalate: chat }, ctx({ staffText: "guest called yesterday about a refund" }));
-  assert.strictEqual(later.escalate.level, "chat");
-  const plain = ai.coerceTurn({ action: "advise", advice: "Offer a seat.", escalate: chat }, ctx({ staffText: "guest is waiting for a chair" }));
-  assert.strictEqual(plain.escalate.level, "chat"); // waiting, but no money or safety term
+  const run = (t, e = chat) => ai.coerceTurn({ action: "advise", advice: "Listen first.", escalate: e }, ctx({ staffText: t })).escalate;
+  for (const t of ["guest at the desk wants a refund", "guest is on the phone right now disputing a charge", "guest waiting wants a comp and a discount", "guest at the counter wants late checkout"]) assert.strictEqual(run(t).level, "chat", t);
+  assert.strictEqual(run("guest at the desk wants a refund").why, null);
+  const w = run("guest pulled a weapon at the desk"); assert.deepStrictEqual([w.level, w.emergency], ["urgent", true]);
+  const i = run("guest slipped and is injured in the lobby"); assert.deepStrictEqual([i.level, i.emergency], ["urgent", true]);
+  const t = run("a guest is making a threat to staff"); assert.deepStrictEqual([t.level, t.why, t.emergency], ["urgent", "safety", false]);
+  for (const x of ["guest is becoming aggressive", "abusive guest at the desk", "someone is harassing a guest", "theft in progress", "need to call the police"]) assert.strictEqual(run(x).level, "urgent", x);
   assert.ok(ai.guestPresent("guest is on the phone right now") && !ai.guestPresent("guest called yesterday"));
+});
+
+test("response minutes: default 5, rounded, clamped to 1-60", () => {
+  assert.deepStrictEqual([undefined, null, "", "abc", 5].map(ai.responseMinutes), [5, 5, 5, 5, 5]);
+  assert.deepStrictEqual([0, -3, 1, 10, "15", 60, 75, 7.6].map(ai.responseMinutes), [1, 1, 1, 10, 15, 60, 60, 8]);
 });
 
 test("fallback escalate: generic chat instruction with a template; housekeeping topics; emergency is urgent", () => {
@@ -159,7 +165,8 @@ test("fallback escalate: generic chat instruction with a template; housekeeping 
   assert.strictEqual(ai.fallbackEscalate({ staffText: "x", topicText: "Housekeeping supplies" }).chat, "housekeeping"); // matched SOP's topic
   const e = ai.fallbackEscalate({ staffText: "smoke on the third floor" });
   assert.deepStrictEqual([e.level, e.emergency], ["urgent", true]);
-  assert.strictEqual(ai.fallbackEscalate({ staffText: "guest at the desk disputes a charge" }).level, "urgent");
+  assert.strictEqual(ai.fallbackEscalate({ staffText: "guest at the desk disputes a charge" }).level, "chat");
+  assert.strictEqual(ai.fallbackEscalate({ staffText: "guest is threatening staff" }).level, "urgent");
   assert.strictEqual(ai.templateMessage("room 214 key is not working"), "Room 214: key is not working. Can a manager confirm?");
 });
 
@@ -167,4 +174,7 @@ test("system prompt carries the escalate rules", () => {
   const p = ai.converseSystem({ hotelName: "H", system: "PEP", expert: true });
   for (const needle of ['"escalate"', "urgent", "housekeeping", "front_desk", "EVERY advise", "never invent", "no emojis", "[room #]", "never \"chat\""]) assert.ok(p.toLowerCase().includes(needle.toLowerCase()), needle);
   assert.ok(ai.converseSystem({ expert: false }).includes("ESCALATE"));
+  assert.ok(p.includes("within about 5 minutes, so prefer \"chat\""));
+  assert.ok(ai.converseSystem({ expert: true, minutes: 12 }).includes("within about 12 minutes") && ai.converseSystem({ expert: true, minutes: 999 }).includes("within about 60 minutes"));
+  assert.ok(/refunds, comps, discounts, disputes, a guest waiting at the desk/.test(p));
 });

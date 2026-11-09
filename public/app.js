@@ -66,7 +66,7 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- state ---------- */
-const STATE = { me: null, hotels: [], hotel: null, cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null }, home: null };
+const STATE = { me: null, hotels: [], hotel: null, convos: [], cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null }, home: null };
 const sop = (id) => STATE.sops.find((s) => s.id === id);
 const RANKS = { "Front Desk": 0, Manager: 1, GM: 2, Owner: 3 };
 const canManage = () => STATE.me && RANKS[STATE.me.role] >= 1;
@@ -244,9 +244,10 @@ function route() {
   else if (hash === "#import" && isOwner()) { ownerTab = "import"; v = "owner"; } // the Owner's Import lives under the Owner tabs
   else if (hash === "#import" && isGM()) v = "import";
   else if (isGM() && !ready && hash !== "#admin") v = "setup"; // a hotel that isn't live opens its setup
-  else if (isGM() && ready && (hash === "#manage" || hash === "#details")) v = "setup";
+  else if (isGM() && ready && (hash === "#manage" || hash === "#details" || hash === "#kit")) v = "setup";
   else if (hash === "#admin" && canManage()) v = "admin";
   if (v === mode) { if (v === "setup") renderSetup(false); return; }
+  if (v !== "setup") document.body.classList.remove("wzon");
   const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat";
   const inEl = $(v); MODE_ORDER.forEach((m) => { if (m !== v) $(m).hidden = true; }); inEl.hidden = false;
   $("ownerBtn").setAttribute("aria-pressed", v === "owner");
@@ -303,7 +304,7 @@ function sopCard(s, logId, answer, extra = {}) {
     ${escalateBlock(extra.escalate)}
     <ol class="steps">${s.steps.map((x, i) => `<li${focus.has(i + 1) ? ' class="hl"' : ""}><span>${staffText(x.t)}${x.img ? `<button type="button" class="ansImg" data-img="${esc(x.img)}" aria-label="Enlarge photo"><img alt="Photo for this step" loading="lazy" src="${imgUrl(x.img)}"></button>` : ""}</span></li>`).join("")}</ol>
     ${s.script ? `<div class="say"><b>Say it like this</b>${staffText(s.script)}</div>` : ""}
-    ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}</div>` : ""}
+    ${s.flag ? `<div class="esc"><b>Call the manager if</b>${staffText(s.flag)}${flagHint(s, extra.escalate)}</div>` : ""}
     <div class="ft">${STATE.settings.showSource ? `<span class="tag">${esc(s.id)} · v${s.ver}</span><span>Updated ${fmtD(s.updated)}</span>` : ""}
     <span class="fb"><button type="button" data-v="y" class="press">Helpful</button><button type="button" data-v="n" class="press">Not helpful</button></span></div>`;
   card.querySelectorAll(".ansImg").forEach((b) => (b.onclick = () => openLB(imgUrl(b.dataset.img))));
@@ -323,7 +324,7 @@ function routeFor(e) {
 }
 const URGENT_WHY = {
   emergency: "Emergency. Call 911 first, then the people below.",
-  guest_waiting: "A guest is waiting and this involves money or safety. Don't hold it for a chat reply.",
+  safety: "Safety or security risk. Don't wait for a chat reply. Call now.",
   ai: "This can't wait for a chat reply. Call now.",
 };
 function callNowBlock(e) {
@@ -331,11 +332,27 @@ function callNowBlock(e) {
   const lines = [e.emergency ? `<span class="who-line"><strong>Call 911 first</strong></span>` : "", r ? `<span class="who-line">${esc(r.label)}: ${telize(esc(routeText(r)))}</span>` : ""].join("");
   return `<div class="callNow" role="group" aria-label="Call now"><b>Call now</b><p class="why">${esc(URGENT_WHY[e.why] || URGENT_WHY.ai)}</p>${lines}</div>`;
 }
+const replyMins = () => { const n = Math.round(Number((STATE.chats || {}).responseMinutes)); return n >= 1 && n <= 60 ? n : 5; };
+const minWord = (n) => `${n} minute${n === 1 ? "" : "s"}`;
+// "No reply in 5 minutes? Call Name (Role)": the first contact of the housekeeping route (housekeeping topics) or the guest route.
+function callFallback(e) {
+  const r = routeFor({ chat: e.chat }), c = r && contact(r.first);
+  const who = c ? `${telize(esc(`${c.name} (${c.role}) ${c.phone}`))}` : "the manager on duty";
+  return `<span class="noReply">No reply in ${minWord(replyMins())}? Call ${c ? who : esc(who)}</span>`;
+}
 function chatBlock(e) {
   return `<div class="chatAsk"><b>Ask in the <span class="chatNm">${esc(chatName(e.chat))}</span> chat</b>
     <span class="postLbl">Post this:</span>
     <blockquote class="msgQuote" tabindex="0">${esc(e.message)}</blockquote>
-    <button type="button" class="pillbtn tint press copyMsg">Copy message</button></div>`;
+    <button type="button" class="pillbtn tint press copyMsg">Copy message</button>
+    ${callFallback(e)}</div>`;
+}
+const EMERG_SOP_RE = /\b(fire|smoke|medical|ambulance|911|unconscious|collapsed|bleeding|injur\w*|heart attack|seizure|overdos\w*|choking|drown\w*|weapon|gun|shooting|stabb\w*|assault\w*|violen\w*|gas leak|carbon monoxide|flood\w*|burst pipe|suicid\w*)\b/i;
+const isEmergencySop = (s) => /emergenc/i.test(s.cat || "") || EMERG_SOP_RE.test(s.title || "");
+// Small muted line in the "Call the manager if" box: message the chat first unless this is an emergency or the turn is already urgent.
+function flagHint(s, esc0) {
+  if (isEmergencySop(s) || (esc0 && (esc0.level === "urgent" || esc0.emergency))) return "";
+  return `<span class="flagHint">Not an emergency? Message the ${esc(chatName("front_desk"))} chat first. No reply in ${minWord(replyMins())}? Call.</span>`;
 }
 const escalateBlock = (e) => (!e ? "" : e.level === "urgent" ? callNowBlock(e) : chatBlock(e));
 // Clipboard API first; if the browser refuses, select the text (and try the old copy command) so a long-press still works.
@@ -586,6 +603,11 @@ function renderContacts() {
       catch (e) { fail(e); inp.value = chatName(k); }
     };
   }
+  const rm = $("chatMins"); rm.value = replyMins();
+  rm.onchange = async () => {
+    try { const r = await api("/api/hotel/chats", { method: "PUT", body: { response_minutes: rm.value } }); STATE.chats = r.chats; rm.value = replyMins(); toast(`Reply time set to ${minWord(replyMins())}`); }
+    catch (e) { fail(e); rm.value = replyMins(); }
+  };
   $("contactList").innerHTML = STATE.contacts.map((c) => `<button type="button" class="cell" data-c="${c.id}"><span class="av" style="background:${color(c.id)}">${esc(initials(c.name))}</span>
     <span class="body"><span class="t">${esc(c.role)}</span><span class="m">${esc(c.name)} · ${esc(c.phone)}</span></span>${chev}</button>`).join("") || `<div class="empty">No contacts yet. Add your AGM, GM, COO, Engineer and Head Housekeeper. The call routes above use those role names.</div>`;
   $("contactList").querySelectorAll("[data-c]").forEach((b) => (b.onclick = () => openContact(+b.dataset.c)));
@@ -870,7 +892,7 @@ const SU = {
   pick: "questions", from: null, open: new Set(), showAll: false, secOpen: new Set(["Timing & policies"]),
   saveP: Promise.resolve(), busy: false, focus: null, dirty: false,
 };
-const suView = () => (!hotelObj().ready ? "wizard" : location.hash === "#details" ? "details" : "manage");
+const suView = () => (!hotelObj().ready ? "wizard" : location.hash === "#details" ? "details" : location.hash === "#kit" ? "kit" : "manage");
 const suBrand = () => SU.data.hotel.brand;
 const suFits = (m) => m.applies === "all" || suBrand() === "hilton";
 const suSuggest = (m) => suFits(m) && (!m.requires || !!SU.ans[m.requires]);
@@ -887,7 +909,7 @@ const titleList = (ids) => ids.map((m) => m.title).join(", ");
 
 function setupHeader() {
   const h = hotelObj(), view = suView();
-  $("setupTitle").textContent = view === "manage" ? "SOPs on and off" : view === "details" ? "Hotel details" : h.name || "Set up";
+  $("setupTitle").textContent = view === "manage" ? "SOPs on and off" : view === "details" ? "Hotel details" : view === "kit" ? "Welcome kit" : h.name || "Set up";
   $("setupSub").textContent = view === "wizard" ? `Setting up · ${brandName(h)} · ${sysName(h)}` : `${h.name || ""} · ${brandName(h)} · ${sysName(h)}`;
   $("setupBack").lastChild.textContent = view === "wizard" ? "Hotels" : "Home";
   $("setupBack").hidden = view === "wizard" && !isOwner();
@@ -904,7 +926,7 @@ async function suLoad() {
   const d = await api("/api/setup");
   if (hid !== STATE.hotel) return false;
   SU.data = d;
-  SU.ans = {}; [...AMEN_LIST, ...DQ_LIST].forEach((k) => (SU.ans[k] = !!d.answers[k]));
+  SU.ans = {}; [...AMEN_LIST, ...DQ_LIST].forEach((k) => (SU.ans[k] = d.answers[k])); // undefined = not answered yet
   SU.det = { ...(d.details || {}) };
   SU.ov = { on: new Set(d.selection.on), off: new Set(d.selection.off) };
   if (d.copyFrom) { SU.pick = "copy"; SU.from = SU.from || d.copyFrom; }
@@ -914,74 +936,28 @@ async function suLoad() {
 
 async function renderSetup(fresh) {
   setupHeader();
-  if (SU.hotel !== STATE.hotel) { Object.assign(SU, { hotel: STATE.hotel, data: null, step: 0, open: new Set(), showAll: false, from: null, pick: "questions", busy: false }); fresh = true; }
+  if (SU.hotel !== STATE.hotel) { Object.assign(SU, { hotel: STATE.hotel, data: null, step: 0, open: new Set(), showAll: false, from: null, pick: "questions", busy: false }); fresh = true; WZ.crows = null; WZ.more = new Set(); WZ.pend = {}; WZ.pw = {}; }
   SU.view = suView();
+  if (SU.view === "kit") { renderKit(); return; }
   if (fresh || !SU.data) {
     $("suBody").innerHTML = `<div class="group"><div class="empty">Loading…</div></div>`;
     try { if (!(await suLoad())) return; } catch (e) { fail(e); return; }
-    if (!SU.step) SU.step = { start: 1, about: 2, review: 3 }[SU.data.stage] || 1;
+    if (SU.view === "wizard") { WZ.screen = wzStartScreen(); WZ.crows = null; WZ.prevPct = ((Math.max(wzIdx(WZ.screen), 0) + 1) / WZ_STEPS.length) * 100; }
   }
-  if (SU.data.hotel.setup === "new") SU.step = 1;
   paintSetup();
 }
 
 function paintSetup() {
   if (SU.view === "manage") paintReview();
   else if (SU.view === "details") paintDetails();
-  else if (SU.step === 1) paintStart();
-  else if (SU.step === 2) paintAbout();
-  else paintReview();
-  // put keyboard focus back on the control that was just used
-  if (SU.focus) {
+  else if (SU.view === "kit") renderKit();
+  else paintWizard(false);
+  // put keyboard focus back on the control that was just used (the wizard does this itself)
+  if (SU.focus && SU.view !== "wizard") {
     const el = [...$("suBody").querySelectorAll("[data-f]")].find((e) => e.dataset.f === SU.focus);
     if (el) el.focus({ preventScroll: true });
     SU.focus = null;
   }
-}
-
-function stepBar() {
-  const labels = ["Start", "About your hotel", "Review and go live"];
-  const max = SU.data.hotel.setup === "new" ? 1 : 3;
-  return `<ol class="stepbar" aria-label="Setup steps">${labels.map((l, i) => `<li><button type="button" class="stepdot press" data-step="${i + 1}" ${i + 1 === SU.step ? 'aria-current="step"' : ""} ${i + 1 > max ? "disabled" : ""}><b>${i + 1}</b><span>${l}</span></button></li>`).join("")}</ol>`;
-}
-function bindStepBar() {
-  $("suBody").querySelectorAll("[data-step]").forEach((b) => (b.onclick = () => { SU.step = +b.dataset.step; paintSetup(); scrollTo(0, 0); }));
-}
-
-/* ----- step 1: start ----- */
-function paintStart() {
-  const d = SU.data, h = d.hotel, copy = SU.pick === "copy";
-  const src = d.sources.find((s) => s.id === SU.from);
-  const notes = [];
-  if (copy && src && src.system !== h.system) notes.push(`${esc(src.name)} runs ${src.system === "pep" ? "PEP" : "HotelKey"}. Steps switch to ${h.system === "pep" ? "PEP" : "HotelKey"} wording automatically.`);
-  if (copy && h.brand !== "hilton") notes.push("Hilton-only SOPs are left off for independent hotels.");
-  $("suBody").innerHTML = `${stepBar()}
-    <div class="sec"><span>How do you want to start?</span></div>
-    <div class="group" role="radiogroup" aria-label="How to start">
-      <button type="button" class="radio" role="radio" data-pick="questions" aria-checked="${!copy}"><span class="body" style="flex:1"><span class="rt">Answer a few questions <span class="mtag hk">Recommended</span></span><span class="rs">About two minutes. We suggest the SOPs that fit your hotel, and you review them before going live.</span></span>${checkSvg}</button>
-      <button type="button" class="radio" role="radio" data-pick="copy" aria-checked="${copy}"><span class="body" style="flex:1"><span class="rt">Copy another hotel</span><span class="rs">Start with the SOPs another live hotel already uses.</span></span>${checkSvg}</button>
-    </div>
-    ${copy ? `<div class="sec"><span>Copy from</span></div>
-      ${d.sources.length ? `<div class="group" role="radiogroup" aria-label="Hotel to copy">${d.sources.map((s) => `<button type="button" class="radio" role="radio" data-src="${esc(s.id)}" aria-checked="${s.id === SU.from}"><span class="body" style="flex:1"><span class="rt">${esc(s.name)}</span><span class="rs">${s.system === "pep" ? "PEP" : "HotelKey"} · ${plural(s.live, "SOP")} on</span></span>${checkSvg}</button>`).join("")}</div>` : `<div class="group"><div class="empty">No other hotel is live yet, so there is nothing to copy. Answer a few questions instead.</div></div>`}
-      ${notes.map((n) => `<p class="hint">${n}</p>`).join("")}` : ""}
-    <button type="button" class="bigbtn press" id="suGo" ${copy && !d.sources.length ? "disabled" : ""}>${SU.busy ? "One moment…" : "Continue"}</button>
-    <p class="foot">Have your own binder? <button type="button" class="inlinebtn" id="suImport">Import it</button></p>`;
-  bindStepBar();
-  $("suImport").onclick = () => openImport(STATE.hotel);
-  $("suBody").querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { SU.pick = b.dataset.pick; paintStart(); }));
-  $("suBody").querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => { SU.from = b.dataset.src; paintStart(); }));
-  $("suGo").onclick = async () => {
-    if (SU.busy) return;
-    const cp = SU.pick === "copy";
-    if (cp && !SU.from) return toast("Pick a hotel to copy");
-    SU.busy = true; paintStart();
-    try {
-      await api("/api/setup/start", { body: cp ? { mode: "copy", from: SU.from } : { mode: "questions" } });
-      await refreshMe();
-      await suLoad();
-      SU.step = cp ? 3 : 2; SU.busy = false; setupHeader(); paintSetup(); scrollTo(0, 0);
-    } catch (e) { SU.busy = false; paintStart(); fail(e); }
-  };
 }
 
 /* ----- details form pieces (used by step 2, the review side panel and Hotel details) ----- */
@@ -1035,86 +1011,10 @@ function earlyHtml() {
 }
 const policiesHtml = () => `<div class="sec"><span>Policies and cash</span></div><div class="group">${DQ_LIST.map(dqHtml).join("")}${earlyHtml()}</div>`;
 
-/* ----- step 2: about your hotel ----- */
-function paintAbout() {
-  const d = SU.data, h = d.hotel, defs = d.detailDefs, sops = d.sops;
-  const on = sops.filter(suOn).length;
-  const owner = isOwner();
-  const opts = (o, cur) => o.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("");
-  const ident = owner
-    ? `<div class="form">
-        <label class="fld"><span>Hotel name</span><input id="su-name" value="${esc(h.name)}" autocomplete="off"></label>
-        <label class="fld"><span>Brand</span><select id="su-brand">${opts([["hilton", "Hilton"], ["independent", "Independent"]], h.brand)}</select></label>
-        <label class="fld"><span>Property system</span><select id="su-system">${opts([["pep", "PEP"], ["hotelkey", "HotelKey"]], h.system)}</select></label>
-      </div><p class="hint">As the Owner you can change these until the hotel goes live.</p>`
-    : `<div class="form">
-        <label class="fld"><span>Hotel name</span><input value="${esc(h.name)}" readonly></label>
-        <label class="fld"><span>Brand</span><input value="${h.brand === "hilton" ? "Hilton" : "Independent"}" readonly></label>
-        <label class="fld"><span>Property system</span><input value="${h.system === "pep" ? "PEP" : "HotelKey"}" readonly></label>
-      </div><p class="hint">Lotus set these when the hotel was added. Ask an Owner if something is wrong.</p>`;
-  const ch = d.chats || {}, chd = d.chatDefaults || {};
-  const chatsHtml = `<div class="sec"><span>WhatsApp chats</span></div><div class="form">
-      <label class="fld"><span>Front desk chat name</span><input id="su-chatFd" value="${esc(ch.front_desk || "")}" placeholder="${esc(chd.front_desk || "")}" maxlength="40" autocomplete="off"></label>
-      <label class="fld"><span>Housekeeping chat name</span><input id="su-chatHk" value="${esc(ch.housekeeping || "")}" placeholder="${esc(chd.housekeeping || "")}" maxlength="40" autocomplete="off"></label>
-    </div><p class="hint">When staff need a manager's answer and it isn't urgent, Ask Lotus tells them which chat to ask in and gives them a message to copy. Use the chat names your team sees in WhatsApp.</p>`;
-  const amen = AMEN_LIST.map((k) => {
-    const [name, q] = AMEN_Q[k], yes = !!SU.ans[k];
-    const ms = sops.filter((m) => m.requires === k && suFits(m));
-    const adf = defs.filter((x) => x.group === k);
-    return `<div class="amen" data-amen="${k}"><div class="amenhead"><span class="body"><b>${name}</b><small>${q}</small></span>
-        <span class="yn" role="radiogroup" aria-label="${esc(q)}"><button type="button" role="radio" data-f="yn-${k}-yes" data-yn="yes" aria-checked="${yes}">Yes</button><button type="button" role="radio" data-f="yn-${k}-no" data-yn="no" aria-checked="${!yes}">No</button></span></div>
-      ${ms.length ? `<p class="amennote">${yes ? "Turns on" : "Leaves off"}: ${esc(titleList(ms))}</p>` : ""}
-      ${yes && adf.length ? `<div class="form amenform" data-sec="${name}">${adf.map((x) => fldHtml(x)).join("")}</div>` : ""}</div>`;
-  }).join("");
-  $("suBody").innerHTML = `${stepBar()}
-    <div class="sec"><span>This hotel</span></div>${ident}
-    ${chatsHtml}
-    <div class="sec"><span>What does ${esc(h.name)} have?</span></div>
-    <div class="group">${amen}</div>
-    ${policiesHtml()}
-    <div class="sec"><span>Hotel details</span></div>
-    <p class="hint" style="margin-top:0">Everything here is optional. Leave blank if you don't know yet; staff will see "ask a manager" until you fill it in.</p>
-    ${generalSections(defs).map(([t, l]) => secHtml(t, l)).join("")}
-    <div class="stickybar"><div class="count" aria-live="polite"><b>${on}</b> of ${sops.length} SOPs will be on</div><button type="button" class="bigbtn press" id="suNext">${SU.busy ? "Saving…" : "Review SOPs"}</button></div>`;
-  bindStepBar(); bindSecs($("suBody")); bindFields($("suBody"));
-  for (const [id, k] of [["su-chatFd", "front_desk"], ["su-chatHk", "housekeeping"]]) {
-    const inp = $(id); if (!inp) continue;
-    inp.onchange = () => suRun(() => api("/api/hotel/chats", { method: "PUT", body: { [k]: inp.value } })).then((r) => { d.chats = r.chats; d.chatDefaults = r.chatDefaults; inp.value = r.chats[k]; toast("Chat name saved"); }).catch(fail);
-  }
-  $("suBody").querySelectorAll("[data-yn]").forEach((b) => (b.onclick = () => setAnswer(b.closest("[data-amen]").dataset.amen, b.dataset.yn === "yes")));
-  if (owner) {
-    const save = async () => {
-      try {
-        const body = { name: $("su-name").value, brand: $("su-brand").value, system: $("su-system").value };
-        await api(`/api/owner/hotels/${encodeURIComponent(h.id)}`, { hotel: false, method: "PUT", body });
-        await refreshMe(); await suLoad(); setupHeader(); paintAbout(); toast("Saved");
-      } catch (e) { fail(e); await suLoad().catch(() => {}); paintAbout(); }
-    };
-    ["su-name", "su-brand", "su-system"].forEach((id) => ($(id).onchange = save));
-  }
-  $("suNext").onclick = async () => {
-    if (SU.busy) return;
-    SU.busy = true; $("suNext").textContent = "Saving…";
-    try {
-      const details = {};
-      $("suBody").querySelectorAll("input[data-k]").forEach((i) => (details[i.dataset.k] = i.value));
-      const r = await suRun(() => api("/api/setup/answers", { method: "PUT", body: { answers: SU.ans, details, stage: "review" } }));
-      SU.det = { ...r.details }; SU.ov = { on: new Set(r.selection.on), off: new Set(r.selection.off) };
-      SU.step = 3; SU.busy = false; paintSetup(); scrollTo(0, 0);
-    } catch (e) { SU.busy = false; paintAbout(); fail(e); }
-  };
-}
 async function setAnswer(k, yes) {
   if (SU.ans[k] === yes) return;
   if (DQ_LIST.includes(k)) return setDq(k, yes);
-  SU.ans[k] = yes; SU.focus = `yn-${k}-${yes ? "yes" : "no"}`;
-  if (yes) SU.data.detailDefs.filter((x) => x.group === k).forEach((x) => { if (SU.det[x.key] === NOT_OFFERED) delete SU.det[x.key]; });
-  paintAbout();
-  try {
-    const r = await suRun(() => api("/api/setup/answers", { method: "PUT", body: { answers: { [k]: yes } } }));
-    SU.det = { ...r.details }; SU.ov = { on: new Set(r.selection.on), off: new Set(r.selection.off) };
-    SU.focus = `yn-${k}-${yes ? "yes" : "no"}`; paintAbout();
-  } catch (e) { fail(e); }
+  return wzSetAnswer(k, yes);
 }
 
 // A detail question answered: the server fills the standard wording into empty details (typed text is kept). Works before and after go-live.
@@ -1146,15 +1046,15 @@ async function suSet(ids, on) {
     if (suSuggest(m) !== on) (on ? SU.ov.on : SU.ov.off).add(m.id);
   }
   paintSetup();
-  suRun(() => api("/api/setup/selection", { method: "PUT", body: { on: [...SU.ov.on], off: [...SU.ov.off] } })).catch(fail);
+  wzTrack(suRun(() => api("/api/setup/selection", { method: "PUT", body: { on: [...SU.ov.on], off: [...SU.ov.off] } }))).catch(fail);
 }
 
-function paintReview() {
-  const manage = SU.view === "manage", d = SU.data, h = d.hotel, sops = d.sops;
-  const on = sops.filter(suOn).length;
+// The category list with switches: used by "SOPs on and off" and by the SOP summary on the Review screen.
+function catRowsHtml() {
+  const d = SU.data, sops = d.sops, manage = SU.view === "manage";
   const cats = d.cats.map((c) => ({ ...c, list: sops.filter((m) => m.cat === c.name) })).filter((c) => c.list.length);
   const reqName = (m) => (m.requires ? ` · Needs ${AMEN_Q[m.requires][0].toLowerCase()}` : "");
-  const catRows = cats.map((c) => {
+  return cats.map((c) => {
     const elig = c.list.filter(suFits), cOn = c.list.filter(suOn).length, all = elig.length && elig.every(suOn);
     const off = !elig.length, open = SU.open.has(c.name), id = "cat-" + c.prefix;
     const meta = off ? "Off: Hilton hotels only" : `${cOn} of ${c.list.length} on${elig.length < c.list.length ? ` · ${c.list.length - elig.length} Hilton only` : ""}`;
@@ -1164,56 +1064,24 @@ function paintReview() {
         return `<div class="rowline"><span>${esc(m.title)}<small>${esc(m.id)}${reqName(m)}${fits ? "" : " · Off: Hilton hotels only"}${m.st === "draft" ? " · Draft" : ""}</small></span>${sw(suOn(m), m.title, `data-sopsw="${esc(m.id)}" data-f="sop-${esc(m.id)}"`, !fits)}</div>`;
       }).join("")}</div></div>`;
   }).join("");
-
-  let aside = "";
-  if (!manage) {
-    const use = {};
-    sops.filter(suOn).forEach((m) => m.uses.forEach((k) => (use[k] = (use[k] || 0) + 1)));
-    const needed = d.detailDefs.filter((x) => use[x.key] && !suFilled(x.key)).sort((a, b) => use[b.key] - use[a.key]);
-    const shown = SU.showAll ? needed : needed.slice(0, 6);
-    aside = `<aside class="rvside">
-      <div class="sec" style="margin-top:0"><span>Still needed</span><span>${needed.length}</span></div>
-      ${needed.length ? `<div class="form" data-sec="needed">${shown.map((x) => fldHtml(x, { used: use[x.key] })).join("")}</div>
-        ${needed.length > 6 ? `<button type="button" class="plain press" id="suAll" style="margin-top:8px">${SU.showAll ? "Show fewer" : `Show all ${needed.length}`}</button>` : ""}
-        <p class="hint">Blank is fine for now. Staff see "ask a manager" until it's filled in. You can add these any time from Hotel details.</p>`
-        : `<div class="group"><div class="empty">Nothing missing for the SOPs you turned on.</div></div>`}
-      <div class="sec"><span>Who to call</span></div>
-      <div class="group"><div class="cell"><span class="body"><span class="t wrap">${d.contacts ? plural(d.contacts, "contact") + " added" : "No contacts yet"}</span><span class="m wrapm">Staff see these names and numbers when a question needs a manager. Add your AGM, GM and others.</span></span></div>
-        <button type="button" class="cell press" id="suContacts"><span class="body"><span class="t">Open Contacts</span></span>${chev}</button></div>
-      <button type="button" class="bigbtn press" id="suLive" ${on ? "" : "disabled"}>${SU.busy ? "Going live…" : "Go live"}</button>
-      <p class="hint">${esc(h.name)} opens to staff right away. You can switch SOPs, details and contacts any time from Hotel home.</p>
-    </aside>`;
-  }
-  $("suBody").innerHTML = `${manage ? "" : stepBar()}
-    <div class="sumbar" aria-live="polite"><b>${on}</b><span>of ${sops.length} SOPs ${manage ? "are on" : "will be on"}</span>${manage ? "" : `<button type="button" class="pillbtn press" id="suBackAbout">${SU.data.copyFrom ? "Add hotel details" : "Edit answers"}</button>`}</div>
-    <div class="rvgrid"><div class="rvmain"><div class="sec" style="margin-top:6px"><span>${manage ? "Categories" : "Pick what staff can ask about"}</span></div><div class="group" id="catList">${catRows}</div>
-      <p class="foot">Tap a category to switch single SOPs. ${h.brand === "hilton" ? "" : "Hilton-only SOPs stay off for independent hotels."}${manage ? " Changes save right away." : ""}</p></div>${aside}</div>`;
-  if (!manage) bindStepBar();
-  const body = $("suBody");
+}
+function bindCatRows(body) {
+  const sops = SU.data.sops;
   body.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { const n = b.dataset.cat; SU.open.has(n) ? SU.open.delete(n) : SU.open.add(n); SU.focus = "cat-" + n; paintSetup(); }));
   body.querySelectorAll("[data-catsw]").forEach((b) => (b.onclick = () => {
     const n = b.dataset.catsw, elig = sops.filter((m) => m.cat === n && suFits(m));
     SU.focus = "catsw-" + n; suSet(elig.map((m) => m.id), !elig.every(suOn));
   }));
   body.querySelectorAll("[data-sopsw]").forEach((b) => (b.onclick = () => { const m = suById(b.dataset.sopsw); SU.focus = "sop-" + m.id; suSet([m.id], !suOn(m)); }));
-  if (!manage) {
-    bindFields(body, () => { const n = body.querySelectorAll('[data-sec="needed"] input[data-k]'); const t = [...n].filter((i) => !i.value.trim()).length; const hd = body.querySelector(".rvside .sec span:last-child"); if (hd) hd.textContent = t; });
-    $("suBackAbout").onclick = () => { SU.step = 2; paintSetup(); scrollTo(0, 0); };
-    const all = $("suAll"); if (all) all.onclick = () => { SU.showAll = !SU.showAll; paintSetup(); };
-    $("suContacts").onclick = () => { tab = "contacts"; go("admin"); };
-    $("suLive").onclick = async () => {
-      if (SU.busy) return;
-      SU.busy = true; paintSetup();
-      try {
-        await SU.saveP;
-        const r = await api("/api/setup/go-live", { body: {} });
-        await refreshMe(); await loadHotel();
-        SU.data = null; SU.step = 0; SU.busy = false; STATE.home = null; tab = "home";
-        toast(`${hotelName(STATE.hotel)} is live · ${plural(r.on, "SOP")} on`);
-        go("admin");
-      } catch (e) { SU.busy = false; paintSetup(); fail(e); }
-    };
-  }
+}
+
+// "SOPs on and off" on Hotel home (the setup review lives in setup.js).
+function paintReview() {
+  const d = SU.data, h = d.hotel, sops = d.sops, on = sops.filter(suOn).length;
+  $("suBody").innerHTML = `<div class="sumbar" aria-live="polite"><b>${on}</b><span>of ${sops.length} SOPs are on</span></div>
+    <div class="rvgrid"><div class="rvmain"><div class="sec" style="margin-top:6px"><span>Categories</span></div><div class="group" id="catList">${catRowsHtml()}</div>
+      <p class="foot">Tap a category to switch single SOPs. ${h.brand === "hilton" ? "" : "Hilton-only SOPs stay off for independent hotels."} Changes save right away.</p></div></div>`;
+  bindCatRows($("suBody"));
 }
 
 /* ----- Hotel details (all details, saved as you go) ----- */
@@ -1261,6 +1129,7 @@ function paintHome() {
       <button type="button" class="htile press" data-go="details"><span class="hl">Hotel details</span><strong>${H.details.filled} <small>of ${H.details.total} filled</small></strong><span class="hs">Hours, fees, locations used in SOPs</span></button>
       <button type="button" class="htile press" data-go="contacts"><span class="hl">Contacts</span><strong>${H.contacts} <small>${H.contacts === 1 ? "person" : "people"}</small></strong><span class="hs">Who staff call</span></button>
       <button type="button" class="htile press" data-go="newsop"><span class="hl">Add a hotel-only SOP</span><strong>New</strong><span class="hs">Write a procedure only this hotel uses</span></button>
+      <button type="button" class="htile press" data-go="kit"><span class="hl">Welcome kit</span><strong>Print</strong><span class="hs">Desk card, QR code, Home Screen steps, staff logins</span></button>
       <button type="button" class="htile press" data-go="import"><span class="hl">Import SOPs</span><strong>Import</strong><span class="hs">From a PDF, Word, Excel or text file, as drafts</span></button>
     </div>
     <p class="foot">Accept replaces your copy with Lotus's latest wording. Keep mine leaves your copy as it is.</p>`;
@@ -1273,7 +1142,7 @@ function paintHome() {
   if (aa) aa.onclick = () => done(async () => { for (const u of pending) await api(`/api/updates/${encodeURIComponent(u.sopId)}/accept`, { body: {} }); }, "Accepted all updates");
   box.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
     const g = b.dataset.go;
-    if (g === "manage" || g === "details") { SU.step = 0; go(g); }
+    if (g === "manage" || g === "details" || g === "kit") { SU.step = 0; WZ.celebrate = false; go(g); }
     else if (g === "contacts") { tab = "contacts"; renderAdmin(true); }
     else if (g === "import") openImport(STATE.hotel);
     else openSop(null);
@@ -1321,11 +1190,14 @@ function renderHotelCards() {
         <div><dt>${gms.length === 1 ? "GM" : "GMs"}</dt><dd class="gm">${gms.length ? gms.map((g) => esc(g.name) + (g.must_change_pw ? ' <small>invited</small>' : "")).join(", ") : '<small>None yet</small>'}</dd></div>
         ${h.pending ? `<div><dt>Updates</dt><dd>${h.pending} <small>waiting</small></dd></div>` : ""}
       </dl>
-      <div class="acts"><button type="button" class="pillbtn press" data-open="${esc(h.id)}">Open hotel</button><button type="button" class="pillbtn tint press" data-gm="${esc(h.id)}">Invite GM</button></div>
+      ${h.setup === "live" ? "" : `<div data-prog="${esc(h.id)}">${ownerProgressHtml(h)}</div>`}
+      <div class="acts"><button type="button" class="pillbtn press" data-open="${esc(h.id)}">Open hotel</button><button type="button" class="pillbtn tint press" data-gm="${esc(h.id)}">Invite GM</button>${h.setup === "live" ? "" : `<button type="button" class="pillbtn press" data-remind="${esc(h.id)}">Copy reminder</button>`}</div>
     </div>`;
   }).join("");
   $("hotelCards").querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => selectHotel(b.dataset.open, "admin")));
   $("hotelCards").querySelectorAll("[data-gm]").forEach((b) => (b.onclick = () => openUser(null, { role: "GM", hotels: [b.dataset.gm] })));
+  $("hotelCards").querySelectorAll(".hcard").forEach(wzBindCopy);
+  loadOwnerProgress();
 }
 
 let draftBrand = "independent", draftSystem = "hotelkey";
@@ -1821,3 +1693,4 @@ $("auText").addEventListener("paste", (e) => {
 });
 
 start();
+suInit();
