@@ -57,7 +57,7 @@ test("anthropic request: base64 image blocks, each introduced by a text line wit
   assert.deepStrictEqual(c[2], { type: "image", source: { type: "base64", media_type: "image/jpeg", data: "AAAA" } });
   assert.strictEqual(c[3].text, "Photo a2:");
   assert.strictEqual(c[4].source.media_type, "image/png");
-  assert.strictEqual(r.body.max_tokens, 1500);
+  assert.strictEqual(r.body.max_tokens, 4000); // floor for models that reason before replying
   assert.strictEqual(r.body.system, "SYS");
 });
 
@@ -77,7 +77,7 @@ test("google request: inline_data parts", () => {
   const parts = r.body.contents[0].parts;
   assert.deepStrictEqual(parts[2], { inline_data: { mime_type: "image/jpeg", data: "AAAA" } });
   assert.strictEqual(parts[3].text, "Photo a2:");
-  assert.strictEqual(r.body.generationConfig.maxOutputTokens, 1500);
+  assert.strictEqual(r.body.generationConfig.maxOutputTokens, 4000);
 });
 
 test("no images: the user message stays a plain string; at most 6 images; bad ones are ignored", () => {

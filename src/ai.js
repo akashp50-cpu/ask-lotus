@@ -73,7 +73,9 @@ const contentParts = {
 // Builds the provider request without sending it (so it can be unit-tested). read(json) pulls the text out of the reply.
 function buildRequest(cfg, system, user, opts = {}) {
   const { provider, model, baseUrl, apiKey } = cfg;
-  const maxTokens = opts.maxTokens || 400;
+  // Newer models spend part of max_tokens on internal reasoning before the visible reply, so a tight cap cuts the
+  // JSON off mid-answer. Keep a generous floor: billing is per token actually used, not per cap.
+  const maxTokens = Math.max(opts.maxTokens || 400, MIN_OUTPUT_TOKENS);
   const imgs = cleanImages(opts.images);
   if (provider === "anthropic") {
     return {
@@ -110,6 +112,8 @@ function buildRequest(cfg, system, user, opts = {}) {
 }
 
 // Send one system + user message (optionally with photos), get text back. opts: { maxTokens (default 400), timeoutMs (default 15s), images }.
+const MIN_OUTPUT_TOKENS = 4000;
+
 async function complete(cfg, system, user, opts = {}) {
   if (mockEnabled()) return mockNext();
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;

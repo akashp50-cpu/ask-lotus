@@ -1,0 +1,47 @@
+{
+  "id": "2026-11-09b-honors-late-checkout",
+  "note": "Late checkout by Hilton Honors tier and occupancy, plus sign-up offer. Rules from Akash 2026-11-09: Diamond Reserve 4 PM (HH-11); Diamond 1 PM at <=60% occupancy else 12:30 PM; Gold 1 PM at <=40% else 12 PM; Silver 12:30 PM at <=40% else 12 PM; Member/non-member 12 PM; joins at the desk: 12:30 PM, 1 PM at <=40%.",
+  "images": {},
+  "sops": [
+    {
+      "id": "HH-13",
+      "cat": "Hilton Honors and brand standards",
+      "title": "Late checkout by Honors tier",
+      "applies": "hilton",
+      "requires": null,
+      "kw": "late checkout, late check out, honors late checkout, diamond late checkout, gold late checkout, silver late checkout, stay later, checkout time, occupancy, honors member checkout",
+      "steps": [
+        { "t": "Ask if the guest is a Hilton Honors member and check their tier on the reservation in PEP." },
+        { "t": "Check tonight's occupancy in PEP before you promise a time." },
+        { "t": "Diamond Reserve: 4 PM is guaranteed. Follow HH-11 to confirm the time they really need." },
+        { "t": "Diamond: up to 1 PM when occupancy is 60% or lower. Above 60%, up to 12:30 PM." },
+        { "t": "Gold: up to 1 PM when occupancy is 40% or lower. Otherwise 12 PM." },
+        { "t": "Silver: up to 12:30 PM when occupancy is 40% or lower. Otherwise 12 PM." },
+        { "t": "Member tier and non-members: 12 PM." },
+        { "t": "Not a member? This is your chance: offer to enroll them right now (HH-01). If they join at the desk, give them 12:30 PM, or up to 1 PM when occupancy is 40% or lower." },
+        { "t": "Past these times, a full night is charged unless a manager approves it." },
+        { "t": "Set the time in PEP (Stay tab > Departure Time), post it in the housekeeping WhatsApp chat, and log it in Quore (SH-12).", "hampton": "Set the time in PEP (Stay tab > Departure Time), post it in the Hampton HK WhatsApp chat, and log it in Quore (SH-12)." }
+      ],
+      "script": "\"Are you a Hilton Honors member? Let me see what I can do for you.\" Not a member: \"If you join Hilton Honors right now, it's free, and I can give you a later checkout today.\"",
+      "flag": "The guest wants later than their tier allows. Call {AGM}."
+    },
+    {
+      "id": "CO-04",
+      "cat": "Departures and check-out",
+      "title": "Late checkout request",
+      "applies": "all",
+      "requires": null,
+      "kw": "late check out, late checkout, stay later, extend checkout, leave later",
+      "steps": [
+        { "t": "Check-out is {Check-out time}." },
+        { "t": "Ask if the guest is a Hilton Honors member and which tier, then follow HH-13. Members get more time depending on tier and occupancy, and non-members can join on the spot for a later checkout.", "hk": "Skip this step at this hotel." },
+        { "t": "Look at tonight's occupancy and whether housekeeping can still finish every room on time. Reach out to housekeeping before you approve." },
+        { "t": "Limit how many late checkouts you give. With teams, if one member gets it the rest will ask too." },
+        { "t": "After {Late check-out cutoff}, a full night is charged unless a manager waives it." },
+        { "t": "Update the departure time in PEP and tell housekeeping.", "hk": "Update the departure time in HotelKey and tell housekeeping." }
+      ],
+      "script": "\"I can give you until ___. After {Late check-out cutoff} we do have to charge a full night.\"",
+      "flag": "The guest wants past {Late check-out cutoff} without the charge. Call {AGM}."
+    }
+  ]
+}
