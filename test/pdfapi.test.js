@@ -67,7 +67,7 @@ test.after(async () => {
   if (srv) srv.kill();
   fs.rmSync(MOCK, { force: true });
   if (pool) {
-    await pool.query("DELETE FROM imports WHERE filenames && $1", [["check-out.pdf", "policy.pdf"]]);
+    await pool.query("DELETE FROM imports WHERE filenames && $1", [["check-out.pdf", "policy.pdf", "studio-notes.txt", "studio.csv"]]);
     await pool.query("DELETE FROM users WHERE username LIKE 'tpdf\\_%'");
     await pool.query("DELETE FROM hotels WHERE id = ANY($1)", [[HID, OTHER]]);
     await pool.query("DELETE FROM master_categories WHERE name=$1", [CAT]);
@@ -308,4 +308,38 @@ test("images/discard keeps pictures that an old version of a SOP still shows", {
   const r = await call("tpdf_mgr", "POST", "/api/images/discard", { ids: [p] });
   assert.strictEqual(r.body.removed, 0); assert.deepStrictEqual(await exists([p]), [p]);
   await pool.query("DELETE FROM sop_history WHERE sop_id='TP-93' AND hotel_id=$1", [HID]);
+});
+
+// The studio sends one drop as one batch and lets the manager refine a card in the chat.
+const b64 = (t) => "data:text/plain;base64," + Buffer.from(t).toString("base64");
+test("studio: sheets and documents join one batch (batchId); items say which file they came from", { skip }, async () => {
+  mock([{ matches: [], new: [{ title: "Studio from text", category: CAT, steps: ["One", "Two"] }] }]);
+  const a = await call("tpdf_gm", "POST", "/api/import/upload", { target: HID, files: [{ name: "studio-notes.txt", data: b64("Studio notes\nDo one then two.\n".repeat(5)) }] });
+  assert.strictEqual(a.status, 200, JSON.stringify(a.body));
+  assert.strictEqual(a.body.new[0].src, "studio-notes.txt");
+  const csv = `Title,Category,Step 1,Step 2\nStudio from sheet,${CAT},First,Second\n`;
+  const b = await call("tpdf_gm", "POST", "/api/import/sheet", { target: HID, batchId: a.body.id, file: { name: "studio.csv", data: b64(csv) } });
+  assert.strictEqual(b.status, 200, JSON.stringify(b.body));
+  assert.strictEqual(b.body.id, a.body.id);
+  assert.deepStrictEqual(b.body.files, ["studio-notes.txt", "studio.csv"]);
+  assert.deepStrictEqual(b.body.new.map((x) => x.title).sort(), ["Studio from sheet", "Studio from text"]);
+  assert.strictEqual(b.body.new.find((x) => x.title === "Studio from sheet").src, "studio.csv");
+  // another hotel's batch is never joined: a new batch starts instead
+  const c = await call("tpdf_owner", "POST", "/api/import/sheet", { target: "master", batchId: a.body.id, file: { name: "studio.csv", data: b64(csv.replace(CAT, CAT)) } });
+  assert.strictEqual(c.status, 200); assert.notStrictEqual(c.body.id, a.body.id);
+  await call("tpdf_owner", "POST", `/api/import/${c.body.id}/discard`, {});
+  // refine one item: new wording replaces it, Add as draft saves that wording
+  const i = b.body.new.findIndex((x) => x.title === "Studio from text");
+  const put = await call("tpdf_gm", "PUT", `/api/import/${a.body.id}/item`, { group: "new", index: i, draft: { title: "Studio from text", category: CAT, steps: [{ t: "One, shorter", img: null }, { t: "Two", img: "not-mine" }], script: "Say it", flag: "" } });
+  assert.strictEqual(put.status, 200, JSON.stringify(put.body));
+  assert.deepStrictEqual(put.body.new[i].steps, ["One, shorter", "Two"]);
+  assert.ok(!put.body.new[i].imgs, "an unknown picture id is dropped");
+  assert.strictEqual((await call("tpdf_gm", "PUT", `/api/import/${a.body.id}/item`, { group: "new", index: 9, draft: { title: "x", steps: [{ t: "y" }] } })).status, 404);
+  assert.strictEqual((await call("tpdf_gm", "PUT", `/api/import/${a.body.id}/item`, { group: "new", index: i, draft: { title: "x", steps: [] } })).status, 400);
+  assert.strictEqual((await call("tpdf_mgr", "PUT", `/api/import/${a.body.id}/item`, { group: "new", index: i, draft: { title: "x", steps: [{ t: "y" }] } })).status, 403);
+  const add = await call("tpdf_gm", "POST", `/api/import/${a.body.id}/act`, { group: "new", index: i, action: "add" });
+  assert.strictEqual(add.status, 200, JSON.stringify(add.body));
+  const row = (await pool.query("SELECT steps, script FROM sops WHERE hotel_id=$1 AND title='Studio from text'", [HID])).rows[0];
+  assert.strictEqual(row.steps[0].t, "One, shorter"); assert.strictEqual(row.script, "Say it");
+  assert.strictEqual((await call("tpdf_gm", "PUT", `/api/import/${a.body.id}/item`, { group: "new", index: i, draft: { title: "x", steps: [{ t: "y" }] } })).status, 400, "a handled item cannot be refined");
 });

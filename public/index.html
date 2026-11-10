@@ -111,7 +111,7 @@
       <div id="tab-sops" class="tabp" hidden>
         <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="filter" placeholder="Search SOPs" aria-label="Search SOPs"></div>
         <div class="pills small" id="cats" style="padding-top:10px"></div>
-        <div class="sec"><span id="libCount">SOPs</span><span class="secb"><button id="libManage" hidden>SOPs on and off</button><button id="libImport" hidden>Import</button><button id="newSop">New SOP</button></span></div>
+        <div class="sec"><span id="libCount">SOPs</span><span class="secb"><button id="libManage" hidden>SOPs on and off</button><button id="newSop">New SOP</button></span></div>
         <div class="group" id="sopList"></div>
         <p class="foot">Saving publishes to the front desk chat and bumps the version number.</p>
       </div>
@@ -222,15 +222,40 @@
         </details>
         <p class="foot">Editing a master SOP bumps its version. Each hotel then sees it as an update to accept or keep their own. New and imported SOPs start as drafts: hotels only see them once you publish.</p>
       </div>
-      <div id="ownerImportHead" class="large" hidden><h1>Import</h1><p>Bring in procedures from your own documents</p></div>
-      <div id="ownerImport" hidden></div>
       <div style="height:40px"></div>
     </section>
 
-    <section id="import" hidden>
-      <div class="large"><button type="button" class="backbtn press" id="impBack"><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg><span>Home</span></button><h1>Import</h1><p id="impSub"></p></div>
-      <div id="impBody"></div>
-      <div style="height:40px"></div>
+    <section id="studio" hidden aria-labelledby="stTitle">
+      <div class="stHead">
+        <div class="stHeadTx"><h1 id="stTitle" tabindex="-1">New SOP with AI</h1><p id="stSub">Describe a procedure, attach photos, or drop documents and PDF guides, one or many.</p></div>
+        <div class="stHeadAct">
+          <label class="stTarget" id="stTargetWrap" hidden><span>Save to</span><select id="stTarget"></select></label>
+          <button type="button" class="gbtn sm press" id="stEarlier" aria-haspopup="dialog" aria-expanded="false" aria-controls="stPop" hidden>Earlier uploads</button>
+          <button type="button" class="gbtn press" id="stClose">Close</button>
+        </div>
+        <div class="stPop" id="stPop" role="dialog" aria-label="Earlier uploads" hidden></div>
+      </div>
+      <div class="stGrid" id="stGrid" data-pane="chat">
+        <section class="stPane stChat" aria-label="Conversation">
+          <div class="stThread" id="stThread"></div>
+          <div class="stComposer" id="stComposer">
+            <div class="stTray" id="stTray"></div>
+            <div class="stRefine" id="stRefine" hidden></div>
+            <div class="stRow">
+              <button type="button" class="stIc" id="stPhoto" aria-label="Attach photos"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button type="button" class="stIc" id="stDoc" aria-label="Attach documents"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.4 11.6 12.2 20.8a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button>
+              <textarea id="stText" rows="1" aria-label="Message" placeholder="Describe a procedure, or drop files here"></textarea>
+              <button type="button" class="stSend press" id="stSend" aria-label="Send" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+            </div>
+            <p class="stHint" id="stHint"></p>
+            <input type="file" id="stPickPhoto" accept="image/*" multiple hidden>
+            <input type="file" id="stPickDoc" accept=".pdf,.docx,.xlsx,.csv,.txt,.md" multiple hidden>
+          </div>
+        </section>
+        <section class="stPane stSop" id="stSop" aria-label="SOP"></section>
+      </div>
+      <div class="stSr" id="stLive" role="status" aria-live="polite"></div>
+      <div class="stDrop" id="stDrop" hidden aria-hidden="true"><span>Drop files to add them</span></div>
     </section>
 
     <section id="setup" hidden>
@@ -281,23 +306,6 @@
         <div class="sec"><span>Visibility</span></div>
         <div class="form"><div class="rowline"><span>Live for front desk<small id="f-statusNote"></small></span><button type="button" class="switch" id="f-status" role="switch" aria-label="Live for front desk"><i></i></button></div></div>
         <button type="button" class="danger" id="delEd">Delete SOP</button>
-      </div>
-    </form>
-
-    <form id="authorEd" hidden>
-      <div class="sbar"><button type="button" id="auCancel">Cancel</button><h2 id="auTitle">New SOP with AI</h2><button type="button" class="done" id="auOpen" disabled>Open in editor</button></div>
-      <div class="sbody auBody" id="auBody" aria-live="polite"></div>
-      <div class="auComposer">
-        <div class="auAtt" id="auAtt"></div>
-        <div class="auRow">
-          <button type="button" class="iconbtn auAttach" id="auAttach" aria-label="Attach photos or screenshots"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="6" cy="7" r="1.3"/><path d="M14 11l-3.5-3.5L4 13"/></svg></button>
-          <button type="button" class="iconbtn auAttach" id="auAttachPdf" aria-label="Attach a PDF guide"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/><path d="M6.5 9h4M6.5 11.5h4" stroke-linecap="round"/></svg></button>
-          <textarea id="auText" rows="1" aria-label="Message" placeholder="Describe the procedure, or attach a PDF guide"></textarea>
-          <button type="button" class="sendbtn press" id="auSend" aria-label="Send"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button>
-        </div>
-        <button type="button" class="linkbtn" id="auSelf">Write it myself</button>
-        <input type="file" id="auPick" accept="image/*" multiple hidden>
-        <input type="file" id="auPdf" accept="application/pdf,.pdf" hidden>
       </div>
     </form>
 
@@ -392,6 +400,7 @@
 <script src="/vendor/qrcode.js"></script>
 <script src="/setup.js"></script>
 <script src="/dash.js"></script>
+<script src="/studio.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

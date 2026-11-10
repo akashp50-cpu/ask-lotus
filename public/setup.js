@@ -353,7 +353,7 @@ function wzWelcome() {
     <div class="wzalt"><button type="button" class="lnk" id="wzCopyToggle" aria-expanded="${WZ.copyOpen}">Copy another hotel instead</button>
     ${WZ.copyOpen ? `<div class="wzcopy">${d.sources.length ? `<div class="group" role="radiogroup" aria-label="Hotel to copy">${d.sources.map((s) => `<button type="button" class="radio" role="radio" data-src="${esc(s.id)}" aria-checked="${s.id === (WZ.copyFrom || d.sources[0].id)}"><span class="body" style="flex:1"><span class="rt">${esc(s.name)}</span><span class="rs">${s.system === "pep" ? "PEP" : "HotelKey"} · ${plural(s.live, "SOP")} on</span></span>${checkSvg}</button>`).join("")}</div>
       <button type="button" class="bigbtn ghost press" id="wzCopyGo">Copy and continue</button>` : `<div class="group"><div class="empty">No other hotel you manage is live yet, so there is nothing to copy.</div></div>`}</div>` : ""}
-    <p class="foot center">Have your own binder? <button type="button" class="inlinebtn" id="wzImport">Import it</button></p></div>`;
+    <p class="foot center">Have your own binder? <button type="button" class="inlinebtn" id="wzImport">Turn it into SOPs</button></p></div>`;
 }
 function wzBindWelcome() {
   const root = $("suBody");
@@ -364,7 +364,7 @@ function wzBindWelcome() {
   $("wzCopyToggle").onclick = () => { WZ.copyOpen = !WZ.copyOpen; paintWizard(false); };
   root.querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => { WZ.copyFrom = b.dataset.src; paintWizard(false); }));
   const cg = $("wzCopyGo"); if (cg) cg.onclick = () => wzBegin({ mode: "copy", from: WZ.copyFrom || SU.data.sources[0].id });
-  $("wzImport").onclick = () => openImport(STATE.hotel);
+  $("wzImport").onclick = () => studioOpen({ target: STATE.hotel });
 }
 async function wzBegin(body) {
   if (WZ.busy) return;

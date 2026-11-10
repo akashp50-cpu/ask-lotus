@@ -214,7 +214,7 @@ function renderPropMenu() {
   }).join("");
   $("propMenu").querySelectorAll("[data-h]:not([disabled])").forEach((b) => (b.onclick = async () => {
     closeMenus(); if (b.dataset.h === STATE.hotel) return;
-    await selectHotel(b.dataset.h, mode === "admin" ? "admin" : mode === "owner" ? "owner" : "chat");
+    await selectHotel(b.dataset.h, mode === "admin" || mode === "studio" ? "admin" : mode === "owner" ? "owner" : "chat");
   }));
 }
 
@@ -245,19 +245,19 @@ async function loadHotel() {
   restoreConvo();
 }
 
-const MODE_ORDER = ["chat", "admin", "owner", "import", "setup"];
+const MODE_ORDER = ["chat", "admin", "owner", "studio", "setup"];
 function route() {
   if (!STATE.me || STATE.me.must_change_pw) return;
   let v = "chat";
   const ready = hotelObj().ready, hash = location.hash;
-  if (hash === "#owner" && isOwner()) { ownerTab = "portfolio"; v = "owner"; }
-  else if (hash === "#import" && isOwner()) { ownerTab = "import"; v = "owner"; } // the Owner's Import lives under the Owner tabs
-  else if (hash === "#import" && isGM()) v = "import";
+  if (hash === "#owner" && isOwner()) v = "owner";
+  else if ((hash === "#studio" || hash === "#import") && canManage()) v = "studio"; // #import is the old Import page: it is part of the studio now
   else if (isGM() && !ready && hash !== "#admin") v = "setup"; // a hotel that isn't live opens its setup
   else if (isGM() && ready && (hash === "#manage" || hash === "#details" || hash === "#kit")) v = "setup";
   else if (hash === "#admin" && canManage()) v = "admin";
-  if (v === mode) { if (v === "setup") renderSetup(false); else if (v === "owner") { renderOwner(); Glass.renderNav(); } return; }
+  if (v === mode) { if (v === "setup") renderSetup(false); else if (v === "owner") { renderOwner(); Glass.renderNav(); } else if (v === "studio") studioEnter(); return; }
   if (v !== "setup") document.body.classList.remove("wzon");
+  if (mode === "studio") studioLeave();
   const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat"; document.body.dataset.mode = v;
   const inEl = $(v); MODE_ORDER.forEach((m) => { if (m !== v) $(m).hidden = true; }); inEl.hidden = false;
   $("ownerBtn").setAttribute("aria-pressed", v === "owner");
@@ -266,7 +266,7 @@ function route() {
     if (SU.dirty) { SU.dirty = false; loadHotel().then(() => renderAdmin(true)).catch(fail); } else renderAdmin(true);
   } else $("gearBtn").setAttribute("aria-pressed", false);
   if (v === "owner") renderOwner(true);
-  if (v === "import") renderImport();
+  if (v === "studio") studioEnter();
   if (v === "setup") renderSetup(true);
   if (prev && !RM.matches) { const dir = MODE_ORDER.indexOf(v) > MODE_ORDER.indexOf(prev) ? 1 : -1; Spring(0, (p) => { inEl.style.opacity = p; inEl.style.transform = `translateX(${(1 - p) * 24 * dir}px)`; }).to(1, { damping: 1, response: 0.38 }, () => (inEl.style.transform = "")); }
   scrollTo(0, 0);
@@ -555,7 +555,8 @@ async function renderAdmin(refresh) {
   $("sQ").textContent = wk.length;
   $("sRate").textContent = (wk.length ? Math.round((ans / wk.length) * 100) : 0) + "%";
   $("sGap").textContent = gaps().length;
-  $("libManage").hidden = $("libImport").hidden = !isGM();
+  $("libManage").hidden = !isGM();
+  $("newSop").textContent = STATE.settings.aiOn ? "New SOP with AI" : "New SOP";
   ({ dashboard: Glass.renderDashboard, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: Glass.renderSettingsPage })[tab]();
 }
 
@@ -720,12 +721,12 @@ const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 6
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });
 function showSheet(which) {
   const open = !sheet.hidden && sheetS.target === 0; // already on screen: just swap the form, no slide
-  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "authorEd", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
   if (open) { sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0)); return; }
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));
 }
-function hideSheet(velocity) { if (AU.active) authorDiscard(); sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; if (AUQ && !AU.active) authorResume(); }); }
+function hideSheet(velocity) { sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; studioSheetClosed(); }); }
 sheet.querySelectorAll(".cancel").forEach((b) => (b.onclick = () => hideSheet()));
 scrim.onclick = () => hideSheet();
 addEventListener("keydown", (e) => { if (e.key === "Escape") { if (!$("lightbox").hidden) $("lightbox").hidden = true; else if (!sheet.hidden) hideSheet(); } });
@@ -746,8 +747,8 @@ const IC = {
   del: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
 $("libManage").onclick = () => { SU.step = 0; WZ.celebrate = false; SU.backTab = "sops"; go("manage"); };
-$("libImport").onclick = () => openImport(STATE.hotel);
-$("newSop").onclick = () => (STATE.settings.aiOn ? authorOpen({ target: "hotel", from: "list" }) : openSop(null));
+// New SOP: the AI studio. A Manager without an AI key goes straight to the editor; a GM still gets the studio for the spreadsheet template.
+$("newSop").onclick = () => (STATE.settings.aiOn || isGM() ? studioOpen({ target: STATE.hotel }) : openSop(null));
 function fillEditor(p) {
   $("f-title").value = p.title || "";
   if (p.category && STATE.cats.some((c) => c.name === p.category)) $("f-cat").value = p.category;
@@ -774,10 +775,10 @@ function openSop(id, seedQ, logId, preset) {
   }
   showSheet("editor"); growAll(); requestAnimationFrame(growAll);
 }
-$("edAi").onclick = () => authorOpen({
-  target: "hotel", from: "editor", sopId: editing ? editing.id : null,
+$("edAi").onclick = () => { hideSheet(); studioOpen({
+  target: STATE.hotel, sopId: editing ? editing.id : null,
   seed: { title: $("f-title").value.trim(), category: $("f-cat").value, steps: draftSteps.filter((x) => x.t.trim() || x.img).map((x) => ({ t: x.t.trim(), img: x.img })), script: $("f-script").value.trim(), flag: $("f-flag").value.trim(), kw: $("f-kw").value.trim() },
-});
+}); };
 function grow(t) { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 const growAll = () => document.querySelectorAll("#stepsEd textarea,#mSteps textarea").forEach(grow);
 addEventListener("resize", () => { if (!sheet.hidden) growAll(); });
@@ -842,7 +843,7 @@ $("editor").addEventListener("submit", async (e) => {
     if (editing) Object.assign(editing, out); else STATE.sops.push(out);
     STATE.sops.sort((a, b) => a.id.localeCompare(b.id));
     if (fromLog) { try { await api(`/api/activity/${fromLog}/dismiss`, { body: {} }); markDismissed(fromLog); } catch {} }
-    toast(out.status === "live" ? `Published ${out.id} v${out.ver}` : `Saved ${out.id} as a draft`); hideSheet(); renderAdmin();
+    toast(out.status === "live" ? `Published ${out.id} v${out.ver}` : `Saved ${out.id} as a draft`); hideSheet(); renderAdmin(); studioSaved(out, false);
   } catch (x) { fail(x); }
   saving = false;
 });
@@ -1148,8 +1149,8 @@ function paintDetails() {
 
 $("toSetup").onclick = () => go("chat");
 
-/* ---------- owner: Portfolio (hotels, and the master library by hotel) and Import ---------- */
-let ownerTab = "portfolio", mFilter = "all";
+/* ---------- owner: Portfolio (hotels, and the master library by hotel) ---------- */
+let mFilter = "all";
 $("ownerBtn").onclick = () => { closeMenus(); go(mode === "owner" ? "admin" : "owner"); };
 
 async function loadOwnerHotels() { STATE.owner.hotels = await api("/api/owner/hotels", { hotel: false }); }
@@ -1160,12 +1161,9 @@ async function openMasterLoaded(id) { try { if (!STATE.owner.master) await loadM
 
 async function renderOwner(refresh) {
   if (!isOwner()) return;
-  const imp = ownerTab === "import";
-  $("ownerPortfolio").hidden = imp; $("ownerImportHead").hidden = !imp; $("ownerImport").hidden = !imp;
-  if (imp) { renderImport(); return; }
   if (refresh || !STATE.owner.hotels) $("ownerSub").textContent = STATE.owner.hotels ? $("ownerSub").textContent : "Loading…";
   try { await Promise.all([refresh || !STATE.owner.hotels ? loadOwnerHotels() : null, refresh || !STATE.owner.matrix ? loadMatrix() : null]); } catch (e) { fail(e); }
-  if (mode !== "owner" || ownerTab !== "portfolio") return;
+  if (mode !== "owner") return;
   const hs = STATE.owner.hotels, X = STATE.owner.matrix;
   if (hs && X) $("ownerSub").textContent = `${hs.length} hotel${hs.length === 1 ? "" : "s"} · ${X.masters.length} master SOP${X.masters.length === 1 ? "" : "s"}`;
   renderHotelCards(); renderMatrix();
@@ -1319,7 +1317,7 @@ $("masterDetailsSec").addEventListener("toggle", async (e) => {
 });
 $("newMaster").onclick = async () => {
   try { if (!STATE.owner.master) await loadMaster(); } catch (e) { return fail(e); }
-  STATE.settings.aiOn ? authorOpen({ target: "master", from: "list" }) : openMaster(null);
+  STATE.settings.aiOn ? studioOpen({ target: "master" }) : openMaster(null);
 };
 
 let em = null, mDraft = null, mView = "pep", mSaving = false;
@@ -1358,10 +1356,10 @@ function fillMasterEditor(p) {
   mView = "pep"; mSeg("pep", false); renderMasterView();
   if (dropped) toast(`HotelKey wording was cleared on ${dropped} step${dropped === 1 ? "" : "s"} you changed. Check the HotelKey tab.`);
 }
-$("mAi").onclick = () => authorOpen({
-  target: "master", from: "editor", sopId: em ? em.id : null,
+$("mAi").onclick = () => { hideSheet(); studioOpen({
+  target: "master", sopId: em ? em.id : null,
   seed: { title: $("m-title").value.trim(), category: $("m-cat").value, steps: mDraft.steps.filter((x) => (x.t || "").trim() || x.img).map((x) => ({ t: (x.t || "").trim(), img: x.img })), script: $("m-script").value.trim(), flag: $("m-flag").value.trim(), kw: $("m-kw").value.trim() },
-});
+}); };
 // Draft or live: drafts are not offered to hotels until published.
 function paintMasterStatus() {
   const draft = !!em && em.status === "draft";
@@ -1429,7 +1427,7 @@ $("masterEd").addEventListener("submit", async (e) => {
     const M = STATE.owner.master;
     if (em) Object.assign(em, out); else M.sops.push(out);
     toast(`Saved ${out.id}${out.status === "draft" ? " as a draft" : ` v${out.ver}`}${out.hotelsWithUpdate ? ` · ${out.hotelsWithUpdate} hotel${out.hotelsWithUpdate === 1 ? " has" : "s have"} an update` : ""}`);
-    hideSheet(); portfolioStale(); renderOwner(true);
+    hideSheet(); portfolioStale(); renderOwner(true); studioSaved(out, true);
   } catch (x) { fail(x); }
   mSaving = false;
 });
@@ -1492,434 +1490,9 @@ async function prepPdf(file, { hotelId, steps, onStatus }) {
   return { body, ids, isGuide: r.isGuide, shots: ids.length };
 }
 
-/* ---------- import: documents and spreadsheet -> review -> drafts ---------- */
-const IMP = { target: null, info: null, batch: null, list: [], files: [], st: {}, busy: "", group: "matches", open: new Set(), pick: {} };
-const IMP_TYPES = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"];
-const impEl = () => (isOwner() ? $("ownerImport") : $("impBody"));
-const impTargetName = (t) => (t === "master" ? "the master library" : hotelName(t));
-
-// Opens Import for a hotel (GM, or the Owner coming from a hotel's setup or home).
-function openImport(hotelId) {
-  IMP.target = hotelId; IMP.batch = null; IMP.files = []; IMP.st = {};
-  if (isOwner()) ownerTab = "import";
-  go("import");
-}
-// Opens one waiting import batch for this hotel straight at its review (from the Dashboard's Needs you).
-async function openImportBatch(id) {
-  try {
-    const b = await api(`/api/import/${id}`, { hotel: false });
-    IMP.target = STATE.hotel; IMP.files = []; IMP.st = {}; IMP.batch = b; IMP.open = new Set(); IMP.group = firstOpenGroup();
-    if (isOwner()) ownerTab = "import";
-    go("import");
-  } catch (e) { fail(e); }
-}
-$("impBack").onclick = () => go(hotelObj().ready ? "admin" : "chat");
-
-async function renderImport() {
-  if (!isGM()) return;
-  const box = impEl();
-  const t = isOwner() ? IMP.target || "master" : STATE.hotel;
-  if (IMP.target !== t) { IMP.target = t; IMP.batch = null; IMP.files = []; IMP.st = {}; }
-  $("impBack").lastElementChild.textContent = hotelObj().ready ? TAB_TITLE[tab] || "Dashboard" : "Setup";
-  $("impSub").textContent = isOwner() ? "" : `${hotelName(STATE.hotel)} only`;
-  if (!IMP.info) box.innerHTML = `<div class="group"><div class="empty">Loading…</div></div>`;
-  try {
-    const [info, list] = await Promise.all([api("/api/import/info", { hotel: false }), api(`/api/imports?target=${encodeURIComponent(IMP.target)}`, { hotel: false })]);
-    IMP.info = info; IMP.list = list;
-  } catch (e) { fail(e); return; }
-  paintImport();
-}
-
-function paintImport() { if (IMP.batch) paintImpReview(); else paintImpStart(); }
-
-const fmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
-
-function paintImpStart() {
-  const box = impEl(), I = IMP.info;
-  const targets = isOwner() ? [["master", "Master library", "Every hotel starts from it. Changes reach hotels as updates."], ...I.hotels.map((h) => [h.id, `${h.name} only`, "Hotel-only procedures, added as drafts"])] : [];
-  const files = IMP.files;
-  box.innerHTML = `
-    ${isOwner() ? `<div class="sec"><span>Import into</span></div><div class="group" id="impTargets" role="radiogroup" aria-label="Import into"></div>`
-      : `<p class="hint" style="margin-top:14px">Importing into <b>${esc(hotelName(STATE.hotel))}</b> only. Everything arrives as a draft. Nothing goes live until you switch it on.</p>`}
-    <div class="sec"><span>Upload documents</span></div>
-    <div class="group"><div class="cell imp">
-      <span class="body"><span class="t wrap">Read my binder, SOP files or checklists</span><span class="m wrapm">PDF, Word, Excel, CSV or text, ${I.maxMb} MB each. We sort what we find into what you already have, new procedures and hotel details. You review everything first.</span><span class="m wrapm"><b>PDF guides with a screenshot under each step</b> keep their screenshots on the steps. Choose up to ${I.maxPdfs} PDFs at once. Other files: up to ${I.maxFiles} at a time.</span></span>
-      ${files.length ? `<div class="impfiles">${files.map((f, i) => `<span class="impfile"><span>${esc(f.name)} <small>${fmtSize(f.size)}</small>${IMP.st[i] ? `<small class="impst ${IMP.st[i].cls}" data-st="${i}" role="status">${esc(IMP.st[i].text)}</small>` : ""}</span><button type="button" class="iconbtn del" data-rm="${i}" aria-label="Remove ${esc(f.name)}" ${IMP.busy ? "disabled" : ""}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></span>`).join("")}</div>` : ""}
-      <div class="acts"><button type="button" class="pillbtn press" id="impPick" ${IMP.busy ? "disabled" : ""}>${files.length ? "Change files" : "Choose files"}</button>
-      <button type="button" class="pillbtn tint press" id="impRead" ${!files.length || IMP.busy || !I.aiOn ? "disabled" : ""}>${IMP.busy === "ai" ? "Reading…" : "Read documents"}</button></div>
-      ${IMP.busy === "ai" ? `<span class="m wrapm" role="status" id="impProg"><span class="spin"></span> ${esc(IMP.progress || "Reading your files. This can take a minute.")}</span>` : ""}
-      ${!I.aiOn ? `<span class="m wrapm no">Reading documents needs an AI key, and none is set up yet. ${isOwner() ? "Add one in Settings, or" : "Ask the Owner to add one, or"} use the spreadsheet below.</span>` : ""}
-      <input type="file" id="impFile" multiple accept="${IMP_TYPES.join(",")}" hidden>
-    </div></div>
-    <div class="sec"><span>Spreadsheet</span></div>
-    <div class="group"><div class="cell imp">
-      <span class="body"><span class="t wrap">Fill in our template</span><span class="m wrapm">One row per procedure: title, category, up to 12 steps, what to say, when to call a manager. No AI needed. Rows with a title you already have are flagged.</span></span>
-      <div class="acts"><a class="pillbtn press" href="/api/import/template.xlsx" download>Download template</a>
-      <button type="button" class="pillbtn tint press" id="impSheet" ${IMP.busy ? "disabled" : ""}>${IMP.busy === "sheet" ? "Reading…" : "Upload spreadsheet"}</button></div>
-      <input type="file" id="impSheetFile" accept=".xlsx,.csv" hidden>
-    </div></div>
-    <div class="sec"><span>Earlier imports</span></div>
-    <div class="group">${IMP.list.length ? IMP.list.map((b) => `<button type="button" class="cell press" data-batch="${b.id}"><span class="body"><span class="t">${esc(b.files.join(", "))}</span><span class="m">${b.status === "done" ? "All handled" : `${b.open} of ${b.total} left to review`} · ${fmtDT(b.created)}${b.by ? " · " + esc(b.by) : ""}</span></span>${chev}</button>`).join("") : `<div class="empty">Nothing imported yet.</div>`}</div>
-    <p class="foot">Imported procedures start as drafts that need approval. Nothing goes live by itself.</p>`;
-  if (isOwner()) {
-    radios($("impTargets"), targets, IMP.target, (v) => { IMP.target = v; IMP.batch = null; renderImport(); });
-  }
-  $("impPick").onclick = () => $("impFile").click();
-  $("impFile").onchange = (e) => {
-    const picked = [...e.target.files];
-    const bad = picked.find((f) => !IMP_TYPES.includes("." + f.name.split(".").pop().toLowerCase()) || f.size > I.maxMb * 1048576);
-    const nPdf = picked.filter((f) => /\.pdf$/i.test(f.name)).length;
-    if (picked.length - nPdf > I.maxFiles) return toast(`Choose up to ${I.maxFiles} files besides PDFs`);
-    if (nPdf > I.maxPdfs) return toast(`Choose up to ${I.maxPdfs} PDFs at a time`);
-    if (bad) return toast(`${bad.name}: use PDF, Word, Excel, CSV or text under ${I.maxMb} MB`);
-    IMP.files = picked; IMP.st = {}; paintImpStart();
-  };
-  box.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { IMP.files.splice(+b.dataset.rm, 1); IMP.st = {}; paintImpStart(); }));
-  $("impRead").onclick = () => impSend("ai");
-  $("impSheet").onclick = () => $("impSheetFile").click();
-  $("impSheetFile").onchange = (e) => { if (e.target.files[0]) impSend("sheet", e.target.files[0]); };
-  box.querySelectorAll("[data-batch]").forEach((b) => (b.onclick = async () => {
-    try { IMP.batch = await api(`/api/import/${b.dataset.batch}`, { hotel: false }); IMP.group = firstOpenGroup(); IMP.open = new Set(); paintImpReview(); scrollTo(0, 0); } catch (x) { fail(x); }
-  }));
-}
-
 const readDataUrl = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error(`Couldn't read ${f.name}`)); r.readAsDataURL(f); });
 
-// A line under a file in the list: what is happening to it now. Updates the screen in place (a full repaint for every page would flicker).
-function impStatus(i, text, cls = "") {
-  IMP.st[i] = { text, cls };
-  const el = document.querySelector(`[data-st="${i}"]`);
-  if (el) { el.textContent = text; el.className = "impst " + cls; } else if (IMP.busy) paintImpStart();
-}
-
-async function impSend(kind, one) {
-  if (IMP.busy) return;
-  const target = IMP.target;
-  IMP.busy = kind; IMP.st = {}; paintImpStart();
-  try {
-    let batch;
-    if (kind === "ai") {
-      // Other documents go in one request. PDFs are read here on this device, one after another (screenshots uploaded, then the
-      // structure sent), into the same batch.
-      const isPdf = (f) => /\.pdf$/i.test(f.name);
-      const idx = IMP.files.map((f, i) => i);
-      const others = idx.filter((i) => !isPdf(IMP.files[i])), pdfs = idx.filter((i) => isPdf(IMP.files[i])), problems = [];
-      pdfs.forEach((i) => impStatus(i, "Waiting", ""));
-      if (others.length) {
-        IMP.progress = "Reading your documents. This can take a minute."; paintImpStart();
-        others.forEach((i) => impStatus(i, "Reading…", ""));
-        const files = await Promise.all(others.map(async (i) => ({ name: IMP.files[i].name, data: await readDataUrl(IMP.files[i]) })));
-        batch = await api("/api/import/upload", { hotel: false, body: { target, files } });
-        others.forEach((i) => impStatus(i, "Done", "ok"));
-      }
-      let lastErr = null;
-      for (let k = 0; k < pdfs.length; k++) {
-        const i = pdfs[k], f = IMP.files[i];
-        IMP.progress = `PDF ${k + 1} of ${pdfs.length}: ${f.name}`;
-        const line = $("impProg"); if (line) line.lastChild.textContent = " " + IMP.progress;
-        try {
-          if (f.size > I_MAX_BYTES()) throw new Error("That PDF is over 10 MB.");
-          const prep = await prepPdf(f, { hotelId: target === "master" ? undefined : target, onStatus: (t) => impStatus(i, t, "") });
-          impStatus(i, prep.isGuide ? `Sorting ${prep.shots} screenshots into steps…` : "Reading the text…", "");
-          // the screenshots are the server's from here on: it keeps the ones the drafts use and deletes the rest, also when this fails
-          batch = await runJob("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, ...prep.body } });
-          impStatus(i, prep.isGuide ? `Done · ${prep.shots} screenshot${prep.shots === 1 ? "" : "s"}` : "Done · read as text", "ok");
-        } catch (e) {
-          lastErr = e; problems.push(`${f.name}: ${e.message}`);
-          impStatus(i, e.message || "Couldn't read this PDF.", "no");
-        }
-      }
-      if (!batch && lastErr) throw lastErr;
-      if (batch && problems.length) batch.meta = { ...batch.meta, failedFiles: problems };
-    } else {
-      batch = await api("/api/import/sheet", { hotel: false, body: { target, file: { name: one.name, data: await readDataUrl(one) } } });
-    }
-    IMP.busy = ""; IMP.progress = ""; IMP.files = []; IMP.st = {}; IMP.batch = batch; IMP.open = new Set(); IMP.group = firstOpenGroup();
-    paintImpReview(); scrollTo(0, 0);
-  } catch (e) { IMP.busy = ""; IMP.progress = ""; if (IMP.target === target) paintImpStart(); fail(e); }
-}
-const I_MAX_BYTES = () => ((IMP.info && IMP.info.maxMb) || 10) * 1048576;
-
-const firstOpenGroup = () => ["matches", "new", "details"].find((g) => IMP.batch[g].some((x) => !x.state)) || ["matches", "new", "details"].find((g) => IMP.batch[g].length) || "new";
-const STATE_TEXT = { kept: "Kept ours", used: "Used theirs", added: "Added as a draft", applied: "Saved", skipped: "Skipped" };
-
-const olSteps = (steps, id, clamp, imgs) => `<ol class="${clamp ? "clamp" : ""}">${steps.map((t, i) => `<li>${chipify(t)}${imgs && imgs[i] ? `<img class="stepThumb" alt="Screenshot for step ${i + 1}" loading="lazy" data-img="${esc(imgs[i])}" src="${imgUrl(imgs[i])}">` : ""}</li>`).join("")}</ol>${clamp && steps.length > 3 ? `<button type="button" class="inlinebtn" data-more="${id}">Show all ${steps.length}</button>` : ""}`;
-
-function paintImpReview() {
-  const box = impEl(), B = IMP.batch, g = IMP.group, master = B.target === "master";
-  const counts = { matches: B.matches.filter((x) => !x.state).length, new: B.new.filter((x) => !x.state).length, details: B.details.filter((x) => !x.state).length };
-  const label = { matches: "Already in the library", new: "New procedures", details: "Hotel details found" };
-  const notes = [];
-  if (B.meta.truncated) notes.push("The documents were longer than we can read at once, so only the first part was used. Split them and import the rest separately.");
-  if (B.meta.failedParts) notes.push(`${B.meta.failedParts} of ${B.meta.parts} parts couldn't be read, so some procedures may be missing.`);
-  if (B.meta.emptyFiles && B.meta.emptyFiles.length) notes.push(`No text found in: ${B.meta.emptyFiles.join(", ")}.`);
-  for (const w of B.meta.warnings || []) notes.push(esc(w));
-  for (const w of B.meta.failedFiles || []) notes.push(`Not imported: ${esc(w)}`);
-  if (B.meta.examples) notes.push(`${B.meta.examples} example row${B.meta.examples === 1 ? "" : "s"} ignored.`);
-  if (B.meta.skippedCount) notes.push(`${B.meta.skippedCount} row${B.meta.skippedCount === 1 ? "" : "s"} skipped: ${(B.meta.skipped || []).slice(0, 5).map((s) => `row ${s.row}${s.title ? " (" + esc(s.title) + ")" : ""} ${esc(s.reason.toLowerCase())}`).join("; ")}${B.meta.skippedCount > 5 ? "…" : ""}.`);
-  const list = B[g];
-  const stateTag = (x) => (x.state ? `<span class="mtag">${STATE_TEXT[x.state]}${x.state === "added" && x.sop_id ? " · " + esc(x.sop_id) : ""}${x.state === "applied" && x.hotel ? " · " + esc(hotelName(x.hotel)) : ""}</span>` : "");
-  let body = "";
-  if (g === "matches") {
-    body = B.matches.map((m) => {
-      const k = "m" + m.i, full = IMP.open.has(k), ours = m.ours;
-      return `<div class="cell imp ${m.state ? "done" : ""}">
-        <div class="hd"><span class="body"><span class="t wrap">${esc(ours ? ours.title : m.title)}</span><span class="m wrapm">${esc(m.sop_id)}${m.difference ? " · " + esc(m.difference) : ""}</span></span>${stateTag(m)}</div>
-        <div class="cmp"><div><h4>${ours && ours.library ? "In the library" : "Ours"}</h4>${ours ? olSteps(ours.steps, k, !full) : "<em>This SOP no longer exists.</em>"}</div><div><h4>${m.imgs ? "From the guide" : "Theirs"}</h4>${olSteps(m.steps, k, !full, m.imgs)}</div></div>
-        ${m.state ? "" : `<div class="acts"><button type="button" class="pillbtn press" data-act="keep" data-i="${m.i}">Keep ours</button><button type="button" class="pillbtn tint press" data-act="use" data-i="${m.i}" ${ours && !ours.library ? "" : "disabled"}>Use theirs</button></div>
-        <span class="m wrapm">${m.imgs ? "This guide overlaps your SOP: using it replaces the steps and adds its screenshots. " : ""}${master ? "Using theirs updates the master and bumps its version. Hotels then see an update to accept or keep." : ours && ours.library ? "This hotel will start with the Lotus library wording when you go live. Keep ours is fine here. You can change wording from the Library after going live." : "Using theirs rewrites the steps of this SOP at your hotel."}</span>`}
-      </div>`;
-    }).join("");
-  } else if (g === "new") {
-    body = B.new.map((n) => {
-      const k = "n" + n.i, full = IMP.open.has(k);
-      return `<div class="cell imp ${n.state ? "done" : ""}">
-        <div class="hd"><span class="body"><span class="t wrap">${esc(n.title)}</span><span class="m wrapm">${n.category ? esc(n.category) : '<span class="no">Needs a category</span>'} · ${plural(n.steps.length, "step")}${n.imgs ? " · " + plural(n.imgs.filter(Boolean).length, "screenshot") : ""}${master && n.applies === "hilton" ? " · Hilton only" : ""}${master && n.requires ? " · only if " + esc(AMEN[n.requires] || n.requires) : ""}</span></span>${stateTag(n)}</div>
-        ${n.imgs && !full ? `<div class="thumbStrip">${n.imgs.filter(Boolean).slice(0, 6).map((id) => `<img alt="Screenshot" loading="lazy" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}
-        ${full ? `<div class="cmp one"><div>${olSteps(n.steps, k, false, n.imgs)}${n.script ? `<p class="prevp"><b>Say</b> ${chipify(n.script)}</p>` : ""}${n.flag ? `<p class="prevp"><b>Call</b> ${chipify(n.flag)}</p>` : ""}</div></div>` : ""}
-        ${n.state ? "" : `<div class="acts">
-          ${n.category ? "" : `<select data-cat="${n.i}" aria-label="Category" class="impsel"><option value="">Pick a category</option>${B.cats.map((c) => `<option>${esc(c)}</option>`).join("")}</select>`}
-          <button type="button" class="pillbtn press" data-prev="${k}">${full ? "Hide" : "Preview"}</button>
-          <button type="button" class="pillbtn press" data-act="skip" data-i="${n.i}">Skip</button>
-          <button type="button" class="pillbtn tint press" data-act="add" data-i="${n.i}">${master ? "Add to master as draft" : "Add as draft"}</button></div>`}
-      </div>`;
-    }).join("");
-  } else {
-    body = B.details.map((d) => `<div class="cell imp ${d.state ? "done" : ""}">
-        <div class="hd"><span class="body"><span class="t wrap">${esc(d.key)}</span><span class="m wrapm">${esc(d.value)}${d.known ? "" : " · new detail name"}</span></span>${stateTag(d)}</div>
-        ${d.state ? "" : `<div class="acts">
-          ${master ? `<select data-dh="${d.i}" aria-label="Hotel" class="impsel"><option value="">Pick a hotel</option>${IMP.info.hotels.map((h) => `<option value="${esc(h.id)}">${esc(h.name)}</option>`).join("")}</select>` : ""}
-          <button type="button" class="pillbtn press" data-act="skip" data-i="${d.i}">Skip</button>
-          <button type="button" class="pillbtn tint press" data-act="apply" data-i="${d.i}">${master ? "Use" : "Use for " + esc(hotelName(B.target))}</button></div>`}
-      </div>`).join("");
-  }
-  const addAll = g === "new" && counts.new > 1 ? `<button type="button" id="impAll">${master ? "Add all new to master as drafts" : "Add all new as drafts"} (${counts.new})</button>` : "";
-  box.innerHTML = `
-    <button type="button" class="backbtn press" id="impList" style="margin-top:10px"><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Imports</button>
-    <div class="statusline"><span class="status ${B.open ? "invited" : "ok"}">${B.open ? "In review" : "All handled"}</span><span><b>${esc(B.files.join(", "))}</b><br><small>Into ${esc(impTargetName(B.target))}${B.by ? " · " + esc(B.by) : ""} · ${fmtDT(B.created)}</small></span></div>
-    ${notes.map((n) => `<p class="hint no">${n}</p>`).join("")}
-    <div class="pills wrapp" role="tablist">${["matches", "new", "details"].map((k) => `<button type="button" class="press" role="tab" data-g="${k}" aria-pressed="${k === g}">${label[k]} (${counts[k]})</button>`).join("")}</div>
-    <div class="sec"><span>${label[g]}</span>${addAll}</div>
-    <div class="group">${list.length ? body : `<div class="empty">${g === "matches" ? "Nothing here matched a procedure you already have." : g === "new" ? "No new procedures found." : "No hotel details found."}</div>`}</div>
-    <p class="foot">${g === "matches" ? "Keep ours leaves your wording alone. Use theirs replaces the steps." : g === "new" ? (master ? "Added procedures start as drafts in the master library. Hotels don't see them until you publish them there." : "Added procedures start as drafts. They are not visible to staff until switched on.") : "Details fill the {Detail name} placeholders in SOPs."}</p>
-    <div class="acts" style="margin-top:14px"><button type="button" class="danger" id="impDiscard">Discard this import</button></div>`;
-  $("impList").onclick = async () => { IMP.batch = null; await renderImport(); };
-  box.querySelectorAll("[data-g]").forEach((b) => (b.onclick = () => { IMP.group = b.dataset.g; paintImpReview(); }));
-  box.querySelectorAll("[data-more]").forEach((b) => (b.onclick = () => { IMP.open.add(b.dataset.more); paintImpReview(); }));
-  box.querySelectorAll("img[data-img]").forEach((im) => (im.onclick = () => openLB(im.src)));
-  box.querySelectorAll("[data-prev]").forEach((b) => (b.onclick = () => { const k = b.dataset.prev; IMP.open.has(k) ? IMP.open.delete(k) : IMP.open.add(k); paintImpReview(); }));
-  box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => {
-    const body = { group: g, index: +b.dataset.i, action: b.dataset.act };
-    if (g === "new") { const s = box.querySelector(`[data-cat="${b.dataset.i}"]`); if (s) body.category = s.value; }
-    if (g === "details" && master && body.action === "apply") { body.hotel = (box.querySelector(`[data-dh="${b.dataset.i}"]`) || {}).value; if (!body.hotel) return toast("Pick a hotel first"); }
-    impAct(body);
-  }));
-  const all = $("impAll"); if (all) all.onclick = () => impAct({ group: "new", action: "addAll" });
-  $("impDiscard").onclick = async () => {
-    if (!confirm("Discard this import? Items you haven't handled will be lost.")) return;
-    try { await api(`/api/import/${B.id}/discard`, { hotel: false, body: {} }); IMP.batch = null; await renderImport(); toast("Import discarded"); } catch (e) { fail(e); }
-  };
-}
-
-let impActing = false;
-async function impAct(body) {
-  if (impActing) return; impActing = true;
-  try {
-    const nb = await api(`/api/import/${IMP.batch.id}/act`, { hotel: false, body });
-    const note = nb.note; delete nb.note;
-    IMP.batch = nb;
-    if (nb.target === "master") { STATE.owner.master = null; portfolioStale(); }
-    else { SU.dirty = true; if (nb.target === STATE.hotel) loadHotel().catch(() => {}); }
-    paintImpReview(); toast(note || "Done");
-  } catch (e) { fail(e); }
-  impActing = false;
-}
-
-/* ---------- New SOP / Edit SOP with AI ---------- */
-// A chat where the manager briefs the AI. The result always lands in the normal editor for review; nothing is published from here.
-const AU = { active: false, target: "hotel", sopId: null, from: "list", seed: null, draftId: null, draft: null, thread: [], pending: [], busy: false, cardOpen: true, queue: [], updateId: null, picks: new Set() };
-let AUQ = null; // SOPs still to write from the same PDF, kept while the finished one is open in the editor
-const AU_MAX_PHOTOS = 6;
-const fillify = (t) => chipify(t).replace(/\[FILL:([^\]]*)\]/g, '<span class="fill">[FILL:$1]</span>');
-const auIntro = () => AU.sopId || (AU.seed && AU.seed.title)
-  ? `I've loaded ${AU.sopId ? AU.sopId + ": " : ""}${AU.seed.title || "this SOP"}. Tell me what to change, for example "add a step after 3 about Quore", and attach a screenshot if it helps.`
-  : "Tell me how this procedure works, in your own words. Attach screenshots or photos if you have them. I'll ask about anything I'm missing, then write the steps.";
-
-function authorOpen({ target, from, sopId, seed }) {
-  AUQ = null;
-  Object.assign(AU, { active: true, target, from, sopId: sopId || null, seed: seed && seed.title ? seed : null, draftId: null, draft: seed && seed.title ? seed : null, pending: [], busy: false, cardOpen: true, queue: [], updateId: null, picks: new Set() });
-  AU.thread = [{ role: "bot", text: auIntro() }];
-  $("auTitle").textContent = AU.sopId ? `Edit ${AU.sopId} with AI` : seed && seed.title ? "Edit with AI" : AU.target === "master" ? "New master SOP with AI" : "New SOP with AI";
-  $("auText").value = ""; $("auText").style.height = "auto";
-  showSheet("authorEd"); authorRender(); setTimeout(() => $("auText").focus(), 380);
-}
-// keepDraft: the draft is going to the editor, so the pictures on its steps stay. Everything else cut from the chat's PDFs is deleted.
-function authorDiscard(keepDraft) {
-  const id = AU.draftId; AU.active = false; AU.draftId = null; AU.queue = []; AUQ = null;
-  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: { keepDraft: !!keepDraft } }).catch(() => {});
-}
-function authorBack() { // leave the chat without a draft: back to the editor it came from, or close
-  const from = AU.from, target = AU.target; authorDiscard();
-  if (from === "editor") showSheet(target === "master" ? "masterEd" : "editor"); else hideSheet();
-}
-$("auCancel").onclick = authorBack;
-$("auSelf").onclick = () => {
-  const from = AU.from, target = AU.target; authorDiscard();
-  if (from === "editor") showSheet(target === "master" ? "masterEd" : "editor");
-  else if (target === "master") openMaster(null); else openSop(null);
-};
-function authorHandoff() {
-  if (!AU.draft) return;
-  const d = AU.draft, from = AU.from, target = AU.target, upd = AU.updateId;
-  if (AU.queue.length && AU.draftId) { // more SOPs to write from the same PDF: keep the chat, come back after this one is saved
-    AUQ = { draftId: AU.draftId, queue: AU.queue.slice(), target, thread: AU.thread.slice() };
-    AU.active = false; AU.draftId = null; AU.queue = [];
-  } else authorDiscard(true);
-  if (from === "editor") {
-    if (target === "master") { fillMasterEditor(d); showSheet("masterEd"); }
-    else { fillEditor(d); showSheet("editor"); }
-    toast("Draft loaded. Review it, then save.");
-  } else if (target === "master") openMaster(upd && STATE.owner.master && STATE.owner.master.sops.some((m) => m.id === upd) ? upd : null, d);
-  else openSop(upd && sop(upd) ? upd : null, null, null, d);
-  if (upd && from !== "editor") toast(`Updating ${upd}. Review it, then save.`);
-}
-// After the editor closes: the next SOP from the same PDF.
-function authorResume() {
-  const q = AUQ; AUQ = null; if (!q || !q.queue.length) return;
-  Object.assign(AU, { active: true, target: q.target, from: "list", sopId: null, seed: null, draftId: q.draftId, draft: null, pending: [], busy: false, cardOpen: true, queue: q.queue.slice(1), updateId: null, picks: new Set() });
-  AU.thread = [...q.thread, { role: "bot", text: `Saved or closed. Next up: ${q.queue[0]}.` }];
-  $("auTitle").textContent = AU.target === "master" ? "New master SOP with AI" : "New SOP with AI";
-  showSheet("authorEd"); authorRender();
-  authorSend(`Next one: ${q.queue[0]}`, [], null, { nextSop: true });
-}
-$("auOpen").onclick = authorHandoff;
-function authorRestart() {
-  if (AU.draftId && !confirm("Start over? The chat and the draft are cleared.")) return;
-  const id = AU.draftId; AU.draftId = null;
-  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: {} }).catch(() => {});
-  AU.draft = AU.seed; AU.thread = [{ role: "bot", text: auIntro() }]; AU.pending = []; AU.cardOpen = true; authorRender();
-}
-
-function authorCard() {
-  const d = AU.draft; if (!d) return "";
-  const r = AU.last || {};
-  const line = (label, v) => (v ? `<div class="auLine"><b>${label}</b>${fillify(v)}</div>` : "");
-  return `<div class="auCard ${AU.cardOpen ? "" : "collapsed"}" id="auCard">
-    <div class="auHead"><span class="eyebrow">Draft so far</span><button type="button" data-a="toggle">${AU.cardOpen ? "Hide" : "Show"}</button></div>
-    <h3>${esc(d.title || "Untitled")}</h3><div class="auMeta">${esc(d.category || "")} · ${d.steps.length} step${d.steps.length === 1 ? "" : "s"}</div>
-    <ol>${d.steps.map((x) => `<li><span>${fillify(x.t)}${x.img ? `<img alt="Photo for this step" loading="lazy" data-img="${esc(x.img)}" src="${imgUrl(x.img)}">` : ""}</span></li>`).join("")}</ol>
-    ${line("Say it like this", d.script)}${line("Call the manager if", d.flag)}${line("Ways staff might ask", d.kw)}
-    ${r.notes ? `<div class="auNote">${esc(r.notes)}</div>` : ""}
-    ${AU.updateId ? `<div class="auNote">This replaces the steps of ${esc(AU.updateId)} when you save it in the editor.</div>` : ""}
-    ${AU.queue.length ? `<div class="auNote">${AU.queue.length} more to write after this one: ${AU.queue.map(esc).join("; ")}. Open this one in the editor, save it, and the next one follows.</div>` : ""}
-    ${r.missing && r.missing.length ? `<div class="auMiss">Still needed: ${r.missing.map(esc).join("; ")}</div>` : ""}
-    <div class="auActs"><button type="button" data-a="start">Start over</button><button type="button" class="pri" data-a="open">Open in editor</button></div>
-  </div>`;
-}
-function authorRender(scrollTo) {
-  const body = $("auBody"), lastIdx = AU.thread.map((m) => m.role).lastIndexOf("bot");
-  body.innerHTML = AU.thread.map((m, i) => {
-    if (m.role === "err") return `<div class="auMsg err" role="alert">${esc(m.text)}</div>`;
-    if (m.role === "me") return `<div class="auMsg me">${m.pdf ? `<span class="auPdf" title="${esc(m.pdf.name)}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/></svg><span>${esc(m.pdf.name)}${m.pdf.pages ? ` · ${plural(m.pdf.pages, "page")} · ${plural(m.pdf.shots, "screenshot")}` : " · reading…"}</span></span>` : ""}${m.text ? esc(m.text) : ""}${m.imgs && m.imgs.length ? `<div class="auThumbs">${m.imgs.map((id) => `<img alt="Attached photo" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}</div>`;
-    const live = !(m.answered || AU.busy || i !== lastIdx);
-    const chips = m.options && m.options.length
-      ? `<div class="auChips">${m.options.map((o) => m.multi
-        ? `<button type="button" class="chip press" data-pick="${esc(o)}" aria-pressed="${AU.picks.has(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`
-        : `<button type="button" class="chip press" data-opt="${esc(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`).join("")}${m.multi ? `<button type="button" class="chip press auGo" data-go="1" ${live && AU.picks.size ? "" : "disabled"}>${AU.picks.size ? `Continue with ${AU.picks.size}` : "Tap the ones you want"}</button>` : ""}</div>` : "";
-    return `<div class="auMsg bot">${esc(m.text)}</div>${chips}`;
-  }).join("") + (AU.busy ? `<div class="auTyping"><span class="spin"></span> <span class="pt">${esc(AU.progress || "Writing…")}</span></div>` : "") + authorCard();
-  body.querySelectorAll("[data-opt]").forEach((b) => (b.onclick = () => { AU.thread[lastIdx].answered = true; authorSend(b.dataset.opt, []); }));
-  body.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { const o = b.dataset.pick; AU.picks.has(o) ? AU.picks.delete(o) : AU.picks.add(o); authorRender(); }));
-  body.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
-    const m = AU.thread[lastIdx], chosen = m.options.filter((o) => AU.picks.has(o));
-    if (!chosen.length) return;
-    m.answered = true; AU.picks = new Set();
-    AU.queue = chosen.slice(1);
-    authorSend(chosen.length === 1 ? `Make this one: ${chosen[0]}` : `Make these ${chosen.length} SOPs, one at a time. Start with: ${chosen[0]}. Then: ${chosen.slice(1).join("; ")}`, []);
-  }));
-  body.querySelectorAll("[data-img]").forEach((im) => (im.onclick = () => openLB(im.src)));
-  body.querySelectorAll("#auCard [data-a]").forEach((b) => (b.onclick = () => {
-    const a = b.dataset.a;
-    if (a === "toggle") { AU.cardOpen = !AU.cardOpen; authorRender(); } else if (a === "start") authorRestart(); else if (a === "open") authorHandoff();
-  }));
-  $("auOpen").disabled = !AU.draft;
-  $("auSend").disabled = AU.busy || AU.pending.some((p) => p.up);
-  $("auAtt").innerHTML = AU.pending.map((p, i) => `<span class="th ${p.up ? "up" : ""}"><img alt="Photo to send" src="${esc(p.url)}"><button type="button" data-rm="${i}" aria-label="Remove photo">×</button></span>`).join("");
-  $("auAtt").querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { AU.pending.splice(+b.dataset.rm, 1); authorRender(); }));
-  if (scrollTo === "last") { const el = [...body.querySelectorAll(".auMsg.bot")].pop(); if (el) body.scrollTop += el.getBoundingClientRect().top - body.getBoundingClientRect().top - 6; }
-  else body.scrollTop = body.scrollHeight;
-}
-
-// pdf: a File (a PDF guide). It is read in this browser; only its steps and screenshots go to the server.
-const auProgress = (t) => { AU.progress = t; const el = $("auBody").querySelector(".auTyping .pt"); if (el) el.textContent = t; };
-async function authorSend(text, imageIds, pdf, extra) {
-  text = String(text || "").trim();
-  if (AU.busy || (!text && !imageIds.length && !pdf)) return;
-  const mine = { role: "me", text, imgs: imageIds, pdf: pdf ? { name: pdf.name } : null };
-  AU.thread.push(mine);
-  AU.busy = true; AU.progress = pdf ? `Opening ${pdf.name}…` : ""; authorRender();
-  try {
-    const body = { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined, ...(extra || {}) };
-    if (pdf) {
-      const prep = await prepPdf(pdf, { steps: true, onStatus: auProgress });
-      Object.assign(body, prep.body); auProgress("Writing…");
-    }
-    const r = pdf ? await runJob("/api/author/pdf", { body }) : await api("/api/author", { body });
-    AU.draftId = r.draftId; AU.last = r;
-    if (r.pdf) { mine.pdf = r.pdf; if (r.pdf.warnings && r.pdf.warnings.length) AU.thread.push({ role: "bot", text: r.pdf.warnings.join(" ") }); }
-    if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options, multi: !!r.multi }); AU.cardOpen = false; AU.picks = new Set(); }
-    else { AU.draft = r.draft; AU.updateId = r.updateId || null; AU.thread.push({ role: "bot", text: r.notes || "Here's the draft. Check it on the card below." }); AU.cardOpen = true; }
-    AU.busy = false; authorRender("last");
-  } catch (e) {
-    AU.busy = false;
-    AU.thread.pop(); // take the unsent message back so it can be edited and retried
-    if (/expired/i.test(e.message)) { AU.draftId = null; }
-    AU.thread.push({ role: "err", text: e.message });
-    $("auText").value = text; AU.pending = imageIds.map((id) => ({ id, url: imgUrl(id), up: false }));
-    authorRender();
-  }
-}
-function authorSubmit() {
-  if (AU.busy || AU.pending.some((p) => p.up)) return;
-  const text = $("auText").value, ids = AU.pending.map((p) => p.id);
-  $("auText").value = ""; $("auText").style.height = "auto"; AU.pending = [];
-  authorSend(text, ids);
-}
-$("auSend").onclick = authorSubmit;
-$("auText").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); authorSubmit(); } });
-$("auText").addEventListener("input", () => { const t = $("auText"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 120) + "px"; });
-
-async function authorAttach(files) {
-  const list = [...files].filter((f) => f.type.startsWith("image/"));
-  if (!list.length) { if (files.length) toast("Choose a photo or screenshot"); return; }
-  for (const f of list) {
-    if (AU.pending.length >= AU_MAX_PHOTOS) { toast(`Up to ${AU_MAX_PHOTOS} photos at a time`); break; }
-    const p = { id: null, url: URL.createObjectURL(f), up: true }; AU.pending.push(p); authorRender();
-    try {
-      const dataUrl = await shrink(f, 1280);
-      p.id = (await api("/api/images", { body: { dataUrl } })).id; p.up = false;
-    } catch (e) { AU.pending.splice(AU.pending.indexOf(p), 1); fail(e.message ? e : new Error("That image couldn't be read. Try a JPG or PNG.")); }
-    authorRender();
-  }
-}
-$("auAttachPdf").onclick = () => { $("auPdf").value = ""; $("auPdf").click(); };
-$("auPdf").onchange = async () => {
-  const f = $("auPdf").files[0]; if (!f) return;
-  if (AU.busy) return toast("Wait for the reply first");
-  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") return toast("Choose a PDF");
-  if (f.size > 10 * 1048576) return toast("That PDF is over 10 MB");
-  const text = $("auText").value, ids = AU.pending.map((p) => p.id).filter(Boolean);
-  if (AU.pending.some((p) => p.up)) return toast("Wait for the photo to finish uploading");
-  $("auText").value = ""; $("auText").style.height = "auto"; AU.pending = [];
-  authorSend(text, ids, f);
-};
-$("auAttach").onclick = () => { $("auPick").value = ""; $("auPick").click(); };
-$("auPick").onchange = () => authorAttach($("auPick").files);
-$("auText").addEventListener("paste", (e) => {
-  const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => f.type.startsWith("image/"));
-  if (files.length) { e.preventDefault(); authorAttach(files); }
-});
-
 Glass.init();
+studioInit();
 start();
 suInit();

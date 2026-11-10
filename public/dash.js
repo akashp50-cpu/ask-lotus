@@ -129,15 +129,13 @@ const Glass = (function () {
     ["team", "Team", "people", () => canManage()],
     ["contacts", "Contacts", "people", () => canManage()],
     ["owner", "Portfolio", "lotus", () => isOwner()],
-    ["import", "Import", "lotus", () => isOwner()],
   ];
   const GROUPS = { hotel: "Hotel", people: "People", lotus: "Lotus" };
   const PHONE_BAR = ["dashboard", "chat", "sops", "gaps"];
-  const current = () => (mode === "chat" ? "chat" : mode === "owner" ? (ownerTab === "import" ? "import" : "owner") : mode === "admin" ? tab : null);
+  const current = () => (mode === "chat" ? "chat" : mode === "owner" ? "owner" : mode === "admin" ? tab : null);
   function navTo(k) {
     closeMenus();
     if (k === "chat" || k === "owner") return go(k);
-    if (k === "import") return go("import");
     tab = k; if (k === "settings") setSec = null;
     if (mode === "admin") { renderAdmin(true); scrollTo(0, 0); } else go("admin");
   }
@@ -280,7 +278,7 @@ const Glass = (function () {
     if (H.fresh.length === 1) { const m = H.fresh[0]; rows.push({ k: "new", icon: "add", title: `New from Lotus: ${m.title}`, sub: `${m.cat} · not at your hotel yet`, btns: [["Skip", "skip", 0, m.id], ["Add", "add", 1, m.id]] }); }
     else if (H.fresh.length) rows.push({ k: "new", icon: "add", title: `${H.fresh.length} new SOPs from Lotus`, sub: some(H.fresh.map((m) => m.title), 3), btns: [["Review", "review-new", 1]] });
     if (H.drafts) rows.push({ k: "drafts", icon: "draft", title: `${plural(H.drafts, "draft")} to review`, sub: "Staff can't see drafts until you turn them on.", btns: [["Review drafts", "drafts", 1]] });
-    for (const b of H.imports) rows.push({ k: "imp" + b.id, icon: "lib", title: `Import waiting: ${some(b.files, 2) || "your upload"}`, sub: `${plural(b.open, "procedure")} to decide: use the guide's steps or keep yours.`, btns: [["Decide", "import", 1, b.id]] });
+    for (const b of H.imports) rows.push({ k: "imp" + b.id, icon: "lib", title: `Upload waiting: ${some(b.files, 2) || "your upload"}`, sub: `${plural(b.open, "procedure")} to decide: use the guide's steps or keep yours.`, btns: [["Decide", "import", 1, b.id]] });
     if (H.missing.length) rows.push({ k: "missing", icon: "info", title: `${plural(H.missing.length, "hotel detail")} missing`, sub: `${some(H.missing, 4)}. Staff see "ask a manager" until they are filled in.`, btns: [["Fill in", "details", 1]] });
     return rows;
   }
@@ -329,7 +327,7 @@ const Glass = (function () {
     else if (a === "review-upd") openSheet("upd");
     else if (a === "review-new") openSheet("new");
     else if (a === "drafts") { libDraft = true; cat = ""; renderCatPills(); navTo("sops"); }
-    else if (a === "import") openImportBatch(+id);
+    else if (a === "import") studioOpenBatch(+id);
     else if (a === "accept-all") needsRun(async () => { for (const u of needs.updates.filter((x) => !x.kept)) await post(`/api/updates/${enc(u.sopId)}/accept`); }, "Accepted all updates");
     else if (a === "add") needsRun(() => post(`/api/updates/new/${enc(id)}/add`), "Added. Staff can ask about it now");
     else if (a === "skip") needsRun(() => post(`/api/updates/new/${enc(id)}/skip`), "Skipped. It's in your Off list if you change your mind");

@@ -2433,6 +2433,8 @@ async function newImportRow(user, target, kind, filenames, result) {
     await q("INSERT INTO imports (hotel_id, created_by, kind, filenames, result) VALUES ($1,$2,$3,$4,$5) RETURNING *", [target, user.id, kind, filenames, JSON.stringify(result)])
   ).rows[0];
 }
+// Which file an item came from, so the studio can say "from check-out.pdf". Left off when several files were read as one text.
+const srcOf = (r, name) => (name ? { ...r, matches: r.matches.map((x) => ({ ...x, src: name })), new: r.new.map((x) => ({ ...x, src: name })) } : r);
 const withStates = (r) => ({
   ...r,
   matches: r.matches.map((x) => ({ ...x, state: null })),
@@ -2517,10 +2519,12 @@ app.post(
       const ctx = await importCtx(req.target);
       const { result, failedParts, parts } = await imp.analyzeText((system, user, opts) => ai.complete(cfg, system, user, opts), text, ctx);
       if (!result.matches.length && !result.new.length && !result.details.length) throw new imp.ImportError("We didn't find any procedures or hotel details in that text.");
-      const row = await newImportRow(req.user, req.target, "ai", files.map((f) => f.name), {
-        ...withStates(result),
-        meta: { truncated, failedParts, parts, emptyFiles: empty, chars: text.length },
-      });
+      const add = srcOf(withStates(result), files.length === 1 ? files[0].name : null);
+      const meta = { truncated, failedParts, parts, emptyFiles: empty, chars: text.length };
+      const row = (await joinBatch(req.user, req.target, req.body.batchId, add, (m) => ({
+        ...m, truncated: !!(m.truncated || truncated), failedParts: (m.failedParts || 0) + (failedParts || 0), parts: (m.parts || 0) + (parts || 0),
+        emptyFiles: [...(m.emptyFiles || []), ...(empty || [])], chars: (m.chars || 0) + text.length,
+      }), files.map((f) => f.name))) || (await newImportRow(req.user, req.target, "ai", files.map((f) => f.name), { ...add, meta }));
       res.json(await batchView(row));
     } catch (e) {
       importFail(res, e);
@@ -2545,6 +2549,23 @@ function mergeIntoResult(result, add) {
     else if (result.new[i].steps.length < n.steps.length) result.new[i] = { ...n, state: null };
   }
   for (const d of add.details || []) if (!result.details.some((x) => !x.state && sameStr(x.key, d.key))) result.details.push({ ...d, state: null });
+}
+
+// A read that arrives with a batchId (the studio sends one drop as one batch) joins that open batch of the same target instead of starting another.
+// patch(meta) returns the batch's new meta. Returns the saved row, or null when there is no such batch (the caller then starts a new one).
+async function joinBatch(user, target, batchId, add, patch, names) {
+  const id = Number.isInteger(+batchId) && batchId ? +batchId : null;
+  if (!id) return null;
+  return tx(async (c) => {
+    const cur = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [id])).rows[0];
+    if (!cur || !canUseBatch(user, cur) || cur.status === "discarded" || (cur.hotel_id || null) !== (target || null)) return null;
+    const r = cur.result;
+    mergeIntoResult(r, add);
+    r.meta = patch(r.meta || {});
+    await dropMissingImgs([...r.matches, ...r.new], c);
+    await c.query("UPDATE imports SET result=$2, status='review', filenames = filenames || $3::text[] WHERE id=$1", [cur.id, JSON.stringify(r), names]);
+    return (await c.query("SELECT * FROM imports WHERE id=$1", [cur.id])).rows[0];
+  });
 }
 
 app.post(
@@ -2608,7 +2629,7 @@ async function importPdfJob({ user, target, sub, cfg, batchId }) {
 
   // Belt and braces: a picture that has vanished since the upload means no picture, never a broken one.
   await dropMissingImgs([...result.matches, ...result.new]);
-  const withStatesR = withStates(result);
+  const withStatesR = srcOf(withStates(result), name);
   let out = null;
   if (batchId) {
     out = await tx(async (c) => {
@@ -2644,10 +2665,11 @@ app.post(
         const why = out.skipped.length ? ` ${out.skipped.length} row(s) were skipped (${[...new Set(out.skipped.map((s) => s.reason))].join("; ")}).` : out.examples ? " Only the example rows were found. Replace them with your own." : "";
         throw new imp.ImportError("No procedures found in that file." + why);
       }
-      const row = await newImportRow(req.user, req.target, "sheet", [file.name], {
-        ...withStates({ matches: out.matches, new: out.new, details: [] }),
-        meta: { skipped: out.skipped.slice(0, 50), skippedCount: out.skipped.length, examples: out.examples },
-      });
+      let row = null;
+      const add = srcOf(withStates({ matches: out.matches, new: out.new, details: [] }), file.name);
+      const meta = { skipped: out.skipped.slice(0, 50), skippedCount: out.skipped.length, examples: out.examples };
+      row = await joinBatch(req.user, req.target, req.body.batchId, add, (m) => ({ ...m, skipped: [...(m.skipped || []), ...meta.skipped].slice(0, 50), skippedCount: (m.skippedCount || 0) + meta.skippedCount, examples: (m.examples || 0) + (meta.examples || 0) }), [file.name]);
+      if (!row) row = await newImportRow(req.user, req.target, "sheet", [file.name], { ...add, meta });
       res.json(await batchView(row));
     } catch (e) {
       importFail(res, e);
@@ -2662,6 +2684,41 @@ app.get(
     const row = (await q("SELECT * FROM imports WHERE id=$1", [req.params.id])).rows[0];
     if (!row || !canUseBatch(req.user, row)) return bad(res, 404, "That import no longer exists.");
     res.json(await batchView(row));
+  })
+);
+
+// The studio lets the manager refine one item of a batch in the chat ("make step 3 shorter"): the new wording replaces the item, so Add as draft /
+// Use the guide's steps save what the manager sees. Only items nobody has handled yet; pictures must be ones already on the item or ones this user may see.
+app.put(
+  "/api/import/:id(\\d+)/item",
+  auth("GM"),
+  wrap(async (req, res) => {
+    const group = req.body.group, idx = Number.isInteger(req.body.index) ? req.body.index : -1;
+    if (!["matches", "new"].includes(group)) return bad(res, 400, "Unknown item.");
+    const d = cleanDraft(req.body.draft);
+    if (!d.title) return bad(res, 400, "Add a title.");
+    if (!d.steps.length) return bad(res, 400, "Add at least one step.");
+    const out = await tx(async (c) => {
+      const row = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
+      if (!row || !canUseBatch(req.user, row) || row.status === "discarded") return { err: [404, "That import no longer exists."] };
+      const result = row.result, item = (result[group] || [])[idx];
+      if (!item) return { err: [404, "That item is gone."] };
+      if (item.state) return { err: [400, "That one is already handled."] };
+      const ctx = await importCtx(row.hotel_id);
+      const ids = [...new Set(d.steps.map((x) => x.img).filter(Boolean))];
+      const seen = new Set((item.imgs || []).filter(Boolean));
+      const mine = ids.length ? new Set((await c.query("SELECT id FROM images WHERE id = ANY($1) AND hotel_id = ANY($2)", [ids, req.user.hotels])).rows.map((r) => r.id)) : new Set();
+      const imgs = d.steps.map((x) => (x.img && (seen.has(x.img) || mine.has(x.img)) ? x.img : null));
+      item.title = d.title;
+      item.steps = d.steps.map((x) => x.t);
+      if (imgs.some(Boolean)) item.imgs = imgs; else delete item.imgs;
+      item.script = d.script; item.flag = d.flag;
+      if (group === "new" && ctx.categories.includes(d.category)) item.category = d.category;
+      await saveBatchResult(c, row, result);
+      return { row: { ...row, result } };
+    });
+    if (out.err) return bad(res, out.err[0], out.err[1]);
+    res.json(await batchView(out.row));
   })
 );
 
@@ -2845,6 +2902,7 @@ const INDEX = require("fs")
   .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`)
   .replace('src="/theme.js"', `src="/theme.js?v=${BUILD}"`)
   .replace('src="/dash.js"', `src="/dash.js?v=${BUILD}"`)
+  .replace('src="/studio.js"', `src="/studio.js?v=${BUILD}"`)
   .replace('src="/setup.js"', `src="/setup.js?v=${BUILD}"`)
   .replace('src="/vendor/qrcode.js"', `src="/vendor/qrcode.js?v=${BUILD}"`);
 const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);
