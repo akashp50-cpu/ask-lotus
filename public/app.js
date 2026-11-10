@@ -585,9 +585,11 @@ function renderActivity() {
 }
 
 function renderTeam() {
-  const r = {}; STATE.users.forEach((u) => (r[u.role] = (r[u.role] || 0) + 1));
+  // Only the people at the hotel that is open; switch hotels to see another team.
+  const people = STATE.users.filter((u) => (u.hotels || []).includes(STATE.hotel));
+  const r = {}; people.forEach((u) => (r[u.role] = (r[u.role] || 0) + 1));
   $("teamCount").textContent = Object.entries(r).map(([k, v]) => `${v} ${k}`).join(" · ") || "Team";
-  $("teamList").innerHTML = STATE.users.map((u) => {
+  $("teamList").innerHTML = (people.length ? "" : `<p class="m">No one is set up at ${esc(hotelName(STATE.hotel))} yet.</p>`) + people.map((u) => {
     const locked = !canGrant(u.role);
     const st = u.status === "off" ? `<span class="status off">Off</span>` : u.must_change_pw ? `<span class="status invited">Not signed in yet</span>` : "";
     return `<button type="button" class="cell" data-user="${u.id}" ${locked ? "disabled" : ""}>${avatar(u)}
