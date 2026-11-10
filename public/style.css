@@ -1058,3 +1058,7 @@ body.wzon #setup:not([hidden]) ~ * .toast,body.wzon .toast{bottom:calc(96px + en
   body.shell main{padding-bottom:0!important}
   body.shell .col{max-width:none!important}
 }
+
+/* Top bar: no band over the page glow. It only turns to glass once the page scrolls under it. */
+body.shell header{background:transparent;-webkit-backdrop-filter:none;backdrop-filter:none;border-bottom-color:transparent;transition:background .25s,border-color .25s}
+body.shell header.scrolled{background:var(--chrome);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);border-bottom-color:var(--sep)}
