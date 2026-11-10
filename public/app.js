@@ -514,6 +514,23 @@ function renderCatPills() {
 }
 $("filter").oninput = () => renderList();
 
+// Keep an open app current: SOPs published elsewhere show up without signing out.
+// Runs when someone comes back to the app and every 5 minutes while it is open; never redraws a chat or an open editor.
+let lastSync = Date.now();
+async function quietSync() {
+  if (!STATE.me || !STATE.hotel || document.hidden || Date.now() - lastSync < 60e3) return;
+  lastSync = Date.now();
+  const h = STATE.hotel;
+  try {
+    const d = await api("/api/bootstrap");
+    if (h !== STATE.hotel || !STATE.me) return;
+    Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, details: d.details || {}, chats: d.chats || {}, chatDefaults: d.chatDefaults || {} });
+    if (!$("admin").hidden && tab === "sops" && sheet.hidden) { renderCatPills(); renderList(); }
+  } catch { /* offline or signed out: the next sync tries again */ }
+}
+document.addEventListener("visibilitychange", quietSync);
+setInterval(quietSync, 5 * 60e3);
+
 async function renderAdmin(refresh) {
   if ((tab === "settings" || tab === "dashboard") && !canManage()) tab = "sops";
   if (tab === "home" && !isGM()) tab = "sops";
