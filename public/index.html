@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0B0B0C">
+<meta name="theme-color" content="#F7F1E4">
 <title>Ask Lotus</title>
 <link rel="icon" href="/logo-mark.png">
 <link rel="apple-touch-icon" href="/icon-180.png">
@@ -54,6 +54,8 @@
 
 <!-- APP -->
 <div id="app" hidden>
+<aside id="side" class="side" aria-label="Main"></aside>
+<nav id="tabbar" class="tabbar" aria-label="Main"></nav>
 <header id="hdr" class="gut">
   <div class="col navrow">
     <span class="apptitle brandname" id="appTitle">Ask Lotus<svg class="star" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1.5c.5 5.6 4.9 10 10.5 10.5-5.6.5-10 4.9-10.5 10.5-.5-5.6-4.9-10-10.5-10.5C7.1 11.5 11.5 7.1 12 1.5Z"/></svg></span>
@@ -71,6 +73,7 @@
   </div>
 </header>
 <div class="menu" id="propMenu" role="menu" hidden></div>
+<div class="menu moremenu" id="moreMenu" role="menu" aria-label="More" data-up hidden></div>
 <div class="menu" id="acctMenu" role="menu" hidden>
   <div class="who" id="acctWho"></div>
   <div class="mi themeRow" role="group" aria-label="Appearance"><span>Appearance</span><span class="themeSeg"></span></div>
@@ -87,7 +90,7 @@
     </section>
 
     <section id="admin" hidden>
-      <div class="large"><button type="button" class="backbtn press" id="backBtn" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back</button><button type="button" class="backbtn press" id="toSetup" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back to setup</button><h1 id="adminTitle">Manager</h1><p id="adminHotel"></p></div>
+      <div class="large" id="adminHead"><button type="button" class="backbtn press" id="backBtn" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back</button><button type="button" class="backbtn press" id="toSetup" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Back to setup</button><h1 id="adminTitle">Manager</h1><p id="adminHotel"></p></div>
       <div class="tiles" id="tiles">
         <div class="tile"><span>Live SOPs</span><strong id="sLive">0</strong></div>
         <div class="tile"><span>Questions, 7 days</span><strong id="sQ">0</strong></div>
@@ -96,7 +99,15 @@
       </div>
       <div class="pills" id="tabs" role="tablist"></div>
 
-      <div id="tab-home" class="tabp">
+      <div id="tab-dashboard" class="tabp" hidden>
+        <div class="dash">
+          <div class="dhead rise"><div><h1 id="dashHello">Welcome</h1><p id="dashSub"></p></div>
+            <div class="dact"><button type="button" class="gbtn lift press" id="dashChat">Open chat</button><button type="button" class="gbtn dark lift press" id="dashNew"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2.5c.4 3.4 2.6 5.6 6 6-3.4.4-5.6 2.6-6 6-.4-3.4-2.6-5.6-6-6 3.4-.4 5.6-2.6 6-6Z" fill="currentColor"/></svg>New SOP with AI</button></div></div>
+          <div id="dashBody" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div id="tab-home" class="tabp" hidden>
         <div id="homeBody"></div>
       </div>
 
@@ -147,10 +158,18 @@
         <p class="foot">In an SOP, type a role in curly brackets, like {AGM} or {Engineer}, and the current person and number appear in its place.</p>
       </div>
 
-      <div id="tab-settings" class="tabp" hidden>
-        <div class="sec"><span>Appearance</span></div>
+      <div id="tab-settings" class="tabp setwrap" hidden>
+        <nav class="setnav" id="setNav" aria-label="Settings sections"></nav>
+        <div class="setbody">
+          <button type="button" class="backbtn press" id="setBack" hidden><svg viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 1.5 1.5 6.5l5 5"/></svg>Settings</button>
+          <section class="spanel" id="sec-color" aria-label="Hotel color" hidden></section>
+          <section class="spanel" id="sec-appearance" aria-label="Appearance" hidden>
+            <h2 class="sh">Appearance</h2><p class="sd">Applies to this device. Each phone at the desk can pick its own.</p>
         <div class="group themeList" role="radiogroup" aria-label="Appearance"></div>
         <div class="foot">Applies to this device. Automatic follows your phone or computer.</div>
+          </section>
+          <section class="spanel" id="sec-ai" aria-label="AI" hidden>
+            <h2 class="sh">AI</h2><p class="sd">The provider, models and key Ask Lotus uses. These apply to every Lotus hotel.</p>
         <div class="sec"><span>AI connection</span></div>
         <div class="group"><div class="conn" id="connRow"></div></div>
         <div class="sec"><span>Provider</span></div>
@@ -167,13 +186,22 @@
         <button type="button" class="bigbtn press" id="saveAi">Save AI Settings</button>
         <button type="button" class="plain press" id="testConn">Test Connection</button>
         <button type="button" class="danger" id="removeKey" hidden>Remove Key</button>
-        <div class="sec"><span>How answers work</span></div>
+          </section>
+          <section class="spanel" id="sec-answers" aria-label="How answers work" hidden>
+            <h2 class="sh">How answers work</h2><p class="sd">What staff see when they ask a question.</p>
         <div class="form">
           <div class="rowline"><span>Expert guidance when no SOP fits<small>Labeled advice with who to call, instead of only sending staff to the manager</small></span><button type="button" class="switch" data-set="expertAdvice" role="switch" aria-label="Expert guidance when no SOP fits"><i></i></button></div>
           <div class="rowline"><span>Show SOP source on answers</span><button type="button" class="switch" data-set="showSource" role="switch" aria-label="Show SOP source"><i></i></button></div>
           <div class="rowline"><span>Keyword fallback<small>Keep answering if the AI provider is down</small></span><button type="button" class="switch" data-set="fallback" role="switch" aria-label="Keyword fallback"><i></i></button></div>
         </div>
         <p class="hint">Escalation contacts are on the Contacts tab. These settings apply to every Lotus hotel. Per-hotel keys can be added later if you want AI costs tracked by property.</p>
+          </section>
+          <section class="spanel" id="sec-account" aria-label="My account" hidden>
+            <h2 class="sh">My account</h2><p class="sd">Your password and sign out.</p>
+            <button type="button" class="gbtn press" id="setPw">Change Password</button>
+            <button type="button" class="gbtn danger2 press" id="setOut">Sign Out</button>
+          </section>
+        </div>
       </div>
       <div style="height:40px"></div>
     </section>
@@ -358,6 +386,7 @@
 
 <script src="/vendor/qrcode.js"></script>
 <script src="/setup.js"></script>
+<script src="/dash.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

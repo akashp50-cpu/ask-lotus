@@ -15,6 +15,7 @@ const { aiConfig, settingsFields } = require("./aiconfig");
 const { tokKey, forModel } = require("./tokens");
 const { ROUTES } = require("./defaults");
 const imp = require("./importer");
+const dash = require("./dashboard");
 const ob = require("./onboard");
 
 const PORT = process.env.PORT || 3000;
@@ -137,7 +138,7 @@ function publicSettings(s, full) {
   };
 }
 
-const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, details, chat_names FROM hotels WHERE id=$1", [id])).rows[0];
+const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, accent, details, chat_names FROM hotels WHERE id=$1", [id])).rows[0];
 // The names staff see for the two WhatsApp chats. Default: "<short hotel name> FD" / "<short hotel name> HK" (Hampton FD, Merriam HK);
 // the short name drops "Hotel Lotus", "Inn" and brand words. A saved name wins; blank means the default.
 const SHORT_NAME = { hop: "Hampton" };
@@ -200,7 +201,7 @@ app.get(
   auth(),
   wrap(async (req, res) => {
     const hotels = (
-      await q("SELECT id, name, ready, brand, system, setup FROM hotels WHERE id = ANY($1) ORDER BY name", [req.user.hotels])
+      await q("SELECT id, name, ready, brand, system, setup, accent FROM hotels WHERE id = ANY($1) ORDER BY name", [req.user.hotels])
     ).rows;
     res.json({ user: req.user, hotels });
   })
@@ -237,7 +238,7 @@ app.get(
     ]);
     res.json({
       hotel: req.hotel,
-      info: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup, ready: h.ready },
+      info: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup, ready: h.ready, accent: h.accent || null },
       details: h.details || {},
       chats: chatNames(h),
       chatDefaults: chatDefaults(h),
@@ -684,6 +685,46 @@ app.put(
     await q(`UPDATE routes SET ${field}=$1 WHERE hotel_id=$2 AND id=$3`, [value, req.hotel, req.params.id]);
     touchSetup(req.hotel);
     res.json({ ok: true });
+  })
+);
+
+// ---------- dashboard (Manager and up) ----------
+// One hotel's numbers for the last 7, 30 or 90 days. Days are the hotel's local days; days with no questions are 0.
+app.get(
+  "/api/dashboard",
+  auth("Manager"),
+  hotel,
+  wrap(async (req, res) => {
+    const range = dash.parseRange(req.query.range);
+    const [{ rows }, t, s] = await Promise.all([
+      q(
+        `SELECT qn.id, qn.user_id AS uid, u.name AS user_name, qn.question AS q, qn.sop_id AS sop, qn.matched_by,
+                qn.convo_id AS convo, qn.kind, qn.escalate_level AS esc_level, qn.escalate_chat AS esc_chat,
+                qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when",
+                to_char(qn.asked_at AT TIME ZONE $2, 'YYYY-MM-DD') AS day
+           FROM questions qn LEFT JOIN users u ON u.id = qn.user_id
+          WHERE qn.hotel_id=$1 AND qn.asked_at > now() - interval '92 days'
+          ORDER BY qn.asked_at DESC LIMIT 20000`,
+        [req.hotel, dash.TZ]
+      ),
+      q("SELECT to_char(now() AT TIME ZONE $1, 'YYYY-MM-DD') AS today", [dash.TZ]),
+      q("SELECT id, title FROM sops WHERE hotel_id=$1", [req.hotel]),
+    ]);
+    const titles = Object.fromEntries(s.rows.map((r) => [r.id, r.title]));
+    res.json({ ...dash.summarize(rows, { range, today: t.rows[0].today, titles }), tz: dash.TZ });
+  })
+);
+
+// The hotel's accent color, shown to everyone at the hotel. null = Lotus gold. GM and Owner only.
+app.put(
+  "/api/hotel/color",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const accent = dash.cleanAccent(req.body ? req.body.accent : undefined);
+    if (accent === undefined) return bad(res, 400, "Pick a color like #1F3A6E.");
+    await q("UPDATE hotels SET accent=$1 WHERE id=$2", [accent, req.hotel]);
+    res.json({ accent });
   })
 );
 
@@ -2439,6 +2480,7 @@ const INDEX = require("fs")
   .replace('href="/style.css"', `href="/style.css?v=${BUILD}"`)
   .replace('src="/app.js"', `src="/app.js?v=${BUILD}"`)
   .replace('src="/theme.js"', `src="/theme.js?v=${BUILD}"`)
+  .replace('src="/dash.js"', `src="/dash.js?v=${BUILD}"`)
   .replace('src="/setup.js"', `src="/setup.js?v=${BUILD}"`)
   .replace('src="/vendor/qrcode.js"', `src="/vendor/qrcode.js?v=${BUILD}"`);
 const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);

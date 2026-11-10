@@ -13,6 +13,7 @@ ALTER TABLE hotels ADD COLUMN IF NOT EXISTS system  TEXT  NOT NULL DEFAULT 'hote
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS setup   TEXT  NOT NULL DEFAULT 'new';          -- 'new' | 'setup' | 'live'
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS answers JSONB NOT NULL DEFAULT '{}';           -- setup answers {breakfast,pool,pets,laundry,market}
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}';           -- hotel details, key -> value
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS accent  TEXT;                                    -- hotel color, '#RRGGBB' (null = Lotus gold #8C6A1F)
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS chat_names JSONB NOT NULL DEFAULT '{}';        -- staff WhatsApp chat names {front_desk, housekeeping}; blank = default ("<short name> FD" / "<short name> HK")
 UPDATE hotels SET chat_names = '{"front_desk":"Hampton FD","housekeeping":"Hampton HK"}'::jsonb WHERE id = 'hop' AND chat_names = '{}'::jsonb;
 

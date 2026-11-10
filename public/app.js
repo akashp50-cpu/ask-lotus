@@ -43,7 +43,7 @@ const fmtDT = (d) => {
   const diff = (day(now) - day(x)) / 864e5;
   return diff === 0 ? "Today " + t : diff === 1 ? "Yesterday " + t : fmtD(d) + ", " + t;
 };
-const COLORS = ["#9A7426", "#5856D6", "#C2410C", "#0A6CBF", "#B4237A", "#6D7A12", "#7C3AED"];
+const COLORS = ["var(--accent)", "#5856D6", "#C2410C", "#0A6CBF", "#B4237A", "#6D7A12", "#7C3AED"];
 const initials = (n) => String(n || "?").split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
 const color = (id) => COLORS[(parseInt(String(id).replace(/\D/g, ""), 10) || 0) % COLORS.length];
 const avatar = (u, size = 32) => `<span class="av" style="background:${color(u.id)};width:${size}px;height:${size}px">${esc(initials(u.name))}</span>`;
@@ -132,6 +132,7 @@ async function start() {
     const me = await api("/api/me", { hotel: false, quiet401: true });
     STATE.me = me.user; STATE.hotels = me.hotels;
   } catch { STATE.me = null; }
+  if (!STATE.me) window.applyAccent(null); // the sign-in screen is always Lotus gold
   showScreen();
   if (STATE.me && !STATE.me.must_change_pw) await enterApp();
 }
@@ -158,10 +159,14 @@ $("pwForm").addEventListener("submit", async (e) => {
     await start();
   } catch (x) { err.textContent = x.message; err.hidden = false; }
 });
-async function signOut() { try { await api("/api/logout", { hotel: false, body: {} }); } catch {} STATE.me = null; newChat(true); closeMenus(); showScreen(); }
+async function signOut() { try { await api("/api/logout", { hotel: false, body: {} }); } catch {} STATE.me = null; newChat(true); closeMenus(); window.applyAccent(null); document.body.classList.remove("shell"); history.replaceState(null, "", location.pathname); showScreen(); }
 $("pwCancel").onclick = signOut;
 $("signOut").onclick = signOut;
+$("setOut").onclick = signOut;
 $("changePw").onclick = () => { closeMenus(); STATE.me.must_change_pw = true; showScreen(); $("pw-cur").focus(); };
+$("setPw").onclick = () => $("changePw").onclick();
+$("dashChat").onclick = () => go("chat");
+$("dashNew").onclick = () => $("newSop").click();
 
 /* ---------- app shell ---------- */
 let mode = null;
@@ -177,13 +182,15 @@ async function enterApp() {
   $("avBtn").style.background = color(u.id); $("avBtn").textContent = initials(u.name);
   $("acctWho").innerHTML = `${avatar(u, 36)}<span><b>${esc(u.name)}</b><small>${esc(u.role)} · @${esc(u.username)}</small></span>`;
   $("hello").textContent = `Hi ${u.name.split(" ")[0]}, how can I help?`;
-  $("modeSeg").hidden = !canManage(); $("appTitle").hidden = canManage();
-  $("adminTitle").textContent = ROLE_TITLE[u.role] || "Manager";
-  tab = isGM() ? "home" : "sops"; STATE.home = null;
-  $("gearBtn").hidden = !isOwner(); $("ownerBtn").hidden = !isOwner();
+  // Managers get the sidebar / tab bar (dash.js) instead of the Front Desk | Manager switch and the gear buttons.
+  $("modeSeg").hidden = true; $("appTitle").hidden = false;
+  $("gearBtn").hidden = true; $("ownerBtn").hidden = true;
+  tab = canManage() ? "dashboard" : "sops"; STATE.home = null;
   await loadHotel();
   if (!canManage() && location.hash === "#admin") location.hash = "chat";
   if (!isOwner() && location.hash === "#owner") location.hash = "chat";
+  // Owner, GM and Manager land on the Dashboard; Front Desk lands on chat.
+  if (canManage() && !location.hash && hotelObj().ready) history.replaceState(null, "", "#admin");
   mode = null; route();
 }
 
@@ -224,6 +231,9 @@ async function selectHotel(id, target) {
 async function loadHotel() {
   const d = await api("/api/bootstrap");
   Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, settings: d.settings, details: d.details || {}, chats: d.chats || {}, chatDefaults: d.chatDefaults || {}, info: d.info || {} });
+  const ho = STATE.hotels.find((h) => h.id === STATE.hotel);
+  if (ho && d.info) ho.accent = d.info.accent || null;
+  Glass.applyHotelAccent();
   const live = hotelObj().ready;
   $("helloSub").textContent = live ? `Answers from ${hotelName(STATE.hotel)} procedures.` : `${hotelName(STATE.hotel)} isn't open to staff yet. Ask your manager.`;
   $("askInput").disabled = !live;
@@ -248,9 +258,10 @@ function route() {
   else if (hash === "#admin" && canManage()) v = "admin";
   if (v === mode) { if (v === "setup") renderSetup(false); return; }
   if (v !== "setup") document.body.classList.remove("wzon");
-  const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat";
+  const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat"; document.body.dataset.mode = v;
   const inEl = $(v); MODE_ORDER.forEach((m) => { if (m !== v) $(m).hidden = true; }); inEl.hidden = false;
   $("ownerBtn").setAttribute("aria-pressed", v === "owner");
+  Glass.renderNav();
   if (v === "admin") {
     if (SU.dirty) { SU.dirty = false; loadHotel().then(() => renderAdmin(true)).catch(fail); } else renderAdmin(true);
   } else $("gearBtn").setAttribute("aria-pressed", false);
@@ -455,8 +466,9 @@ $("ask").addEventListener("submit", (e) => { e.preventDefault(); ask($("askInput
 
 /* ---------- admin ---------- */
 let tab = "sops", cat = "", empFilter = null;
-const TABS = [["home", "Home"], ["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
-// Settings opens from the gear by the account button, not the tab bar.
+const TABS = [["dashboard", "Dashboard"], ["home", "Hotel home"], ["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
+const TAB_TITLE = { dashboard: "Dashboard", home: "Hotel home", sops: "Library", gaps: "Unanswered", activity: "Activity", team: "Team", contacts: "Contacts", settings: "Settings" };
+// The gear buttons are hidden now (the sidebar has Settings); they still work if shown.
 let prevTab = "sops";
 const leaveSettings = () => { tab = prevTab; renderAdmin(true); scrollTo(0, 0); };
 $("gearBtn").onclick = () => {
@@ -493,11 +505,8 @@ const markDismissed = (id) => { const l = STATE.log.find((x) => x.id == id); if 
 const gaps = () => STATE.convos.filter((g) => ((!g.sop && !g.open) || g.fb === "n") && !g.dismissed);
 const weekLog = () => STATE.convos.filter((g) => !g.open && Date.now() - new Date(g.when) < 7 * 864e5);
 
-function renderTabs() {
-  const g = gaps().length;
-  $("tabs").innerHTML = TABS.filter((t) => t[0] !== "settings" && (t[0] !== "home" || isGM())).map(([k, l]) => `<button type="button" role="tab" class="press" data-t="${k}" aria-pressed="${k === tab}">${l}${k === "gaps" && g ? `<span class="badge">${g}</span>` : ""}</button>`).join("");
-  $("tabs").querySelectorAll("button").forEach((b) => (b.onclick = () => { tab = b.dataset.t; renderAdmin(true); }));
-}
+// The sidebar / phone tab bar (dash.js) replaces the old pill tabs.
+const renderTabs = () => Glass.renderNav();
 function renderCatPills() {
   $("cats").innerHTML = [{ name: "All" }, ...STATE.cats].map((c, i) => `<button type="button" class="press" data-c="${i ? esc(c.name) : ""}" aria-pressed="${(i ? c.name : "") === cat}">${esc(c.name)}</button>`).join("");
   $("cats").querySelectorAll("button").forEach((b) => (b.onclick = () => { cat = b.dataset.c; $("cats").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); renderList(); }));
@@ -506,7 +515,7 @@ function renderCatPills() {
 $("filter").oninput = () => renderList();
 
 async function renderAdmin(refresh) {
-  if (tab === "settings" && !isOwner()) tab = "sops";
+  if ((tab === "settings" || tab === "dashboard") && !canManage()) tab = "sops";
   if (tab === "home" && !isGM()) tab = "sops";
   if (refresh) {
     try {
@@ -515,18 +524,20 @@ async function renderAdmin(refresh) {
     } catch (e) { fail(e); }
   }
   renderTabs(); TABS.forEach(([k]) => ($("tab-" + k).hidden = k !== tab));
-  const onSet = tab === "settings";
+  const onSet = tab === "settings", onDash = tab === "dashboard";
   $("gearBtn").setAttribute("aria-pressed", onSet);
-  $("tiles").hidden = onSet || tab === "home"; $("tabs").hidden = onSet; $("backBtn").hidden = !onSet;
+  $("tiles").hidden = onSet || onDash || tab === "home"; $("tabs").hidden = true; $("backBtn").hidden = true;
+  $("adminHead").hidden = onDash;
   $("toSetup").hidden = onSet || hotelObj().ready;
-  $("adminTitle").textContent = onSet ? "Settings" : ROLE_TITLE[STATE.me.role] || "Manager";
-  $("adminHotel").textContent = onSet ? "AI and answer options" : hotelName(STATE.hotel);
+  $("adminTitle").textContent = TAB_TITLE[tab] || "Manager";
+  $("adminHotel").textContent = hotelName(STATE.hotel);
+  if (!onSet) Glass.applyHotelAccent(); // an unsaved color preview never outlives the Settings page
   const wk = weekLog(), ans = wk.filter((l) => l.sop).length;
   $("sLive").textContent = STATE.sops.filter((s) => s.status === "live").length;
   $("sQ").textContent = wk.length;
   $("sRate").textContent = (wk.length ? Math.round((ans / wk.length) * 100) : 0) + "%";
   $("sGap").textContent = gaps().length;
-  ({ home: renderHome, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: renderSettings })[tab]();
+  ({ dashboard: Glass.renderDashboard, home: renderHome, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: Glass.renderSettingsPage })[tab]();
 }
 
 function renderList() {
@@ -1707,5 +1718,6 @@ $("auText").addEventListener("paste", (e) => {
   if (files.length) { e.preventDefault(); authorAttach(files); }
 });
 
+Glass.init();
 start();
 suInit();
