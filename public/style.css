@@ -455,6 +455,9 @@ button.cell:not([disabled]):active{background:var(--fill)}
 .impfile{display:flex;align-items:center;justify-content:space-between;gap:8px;background:var(--bg);border-radius:10px;padding:4px 4px 4px 10px;font-size:.9rem;min-width:0}
 .impfile > span{min-width:0;overflow-wrap:anywhere}
 .impfile small{color:var(--label2)}
+.impfile .impst{display:block;font-size:.8rem;margin-top:1px}
+.impfile .impst.ok{color:var(--green)}
+.impfile .impst.no{color:var(--red)}
 .impsel{background:var(--fill);border:0;border-radius:999px;padding:6px 10px;font-size:.84rem;max-width:100%}
 .pillbtn[disabled]{opacity:.45;pointer-events:none}
 

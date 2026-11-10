@@ -20,6 +20,7 @@ const ob = require("./onboard");
 
 const PORT = process.env.PORT || 3000;
 const PROD = process.env.NODE_ENV === "production";
+const PDFJS_VERSION = require("pdfjs-dist/package.json").version;
 if (!process.env.APP_SECRET || process.env.APP_SECRET.length < 32) {
   console.error("APP_SECRET must be set to a random string of at least 32 characters.");
   process.exit(1);
@@ -43,7 +44,7 @@ app.use(
 // Import uploads carry base64 documents (3 x 10 MB), so only those two routes get a bigger JSON limit, and only after sign-in.
 const jsonSmall = express.json({ limit: "6mb" });
 const jsonBig = express.json({ limit: "42mb" });
-const jsonPdf = express.json({ limit: "15mb" }); // one PDF (10 MB) as base64
+const jsonPdf = express.json({ limit: "2mb" }); // a PDF guide arrives already read by the browser: structure and text only, never the PDF itself
 const pdfsteps = require("./pdfsteps");
 app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet|pdf)|setup\/extract|author\/pdf)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
 app.use(
@@ -205,7 +206,7 @@ app.get(
     const hotels = (
       await q("SELECT id, name, ready, brand, system, setup, accent FROM hotels WHERE id = ANY($1) ORDER BY name", [req.user.hotels])
     ).rows;
-    res.json({ user: req.user, hotels });
+    res.json({ user: req.user, hotels, pdfjs: PDFJS_VERSION });
   })
 );
 
@@ -366,6 +367,72 @@ app.post(
     const id = crypto.randomUUID();
     await q("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", [id, req.hotel, m[1], buf, req.user.id]);
     res.json({ id });
+  })
+);
+
+// Several images in one request (the screenshots a PDF guide was cut into). Same rules as /api/images, per image.
+const imageBatchLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 400, standardHeaders: true, legacyHeaders: false, message: { error: "Too many uploads. Wait a few minutes and try again." } });
+const MAX_BATCH_IMAGES = 12;
+app.post(
+  "/api/images/batch",
+  imageBatchLimiter,
+  auth("Manager"),
+  hotel,
+  wrap(async (req, res) => {
+    const list = Array.isArray(req.body.images) ? req.body.images : [];
+    if (!list.length || list.length > MAX_BATCH_IMAGES) return bad(res, 400, `Send 1 to ${MAX_BATCH_IMAGES} images at a time.`);
+    const rows = [];
+    for (const d of list) {
+      const m = String(d || "").match(/^data:(image\/(?:jpeg|png|webp));base64,(.+)$/);
+      if (!m) return bad(res, 400, "Upload JPG, PNG or WebP images.");
+      const buf = Buffer.from(m[2], "base64");
+      if (buf.length > 3 * 1024 * 1024) return bad(res, 400, "An image is too large (3 MB max).");
+      rows.push([crypto.randomUUID(), req.hotel, m[1], buf, req.user.id]);
+    }
+    await tx(async (c) => { for (const r of rows) await c.query("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", r); });
+    res.json({ ids: rows.map((r) => r[0]) });
+  })
+);
+
+// Screenshots cut from a PDF are ordinary images. The browser uploads them BEFORE it calls the PDF routes, so those routes must
+// (a) only accept ids that are recent uploads by this user into this hotel, and (b) give back the ones nothing ends up using.
+const CROP_WINDOW = "3 hours";
+async function ownedCrops(ids, hotelId, userId) {
+  if (!ids.length) return new Set();
+  const { rows } = await q(`SELECT id FROM images WHERE id = ANY($1) AND hotel_id=$2 AND created_by=$3 AND created_at > now() - interval '${CROP_WINDOW}'`, [ids, hotelId, userId]);
+  return new Set(rows.map((r) => r.id));
+}
+// Which of these image ids appear in a SOP, a master SOP, an author draft or an import batch under review? (ids are hex and dashes: safe in a pattern)
+async function referencedImages(ids) {
+  if (!ids.length) return new Set();
+  const { rows } = await q(
+    `SELECT DISTINCT m[1] AS id FROM (
+       SELECT steps::text t FROM sops UNION ALL SELECT steps::text FROM master_sops UNION ALL SELECT draft::text FROM sop_drafts
+       UNION ALL SELECT result::text FROM imports WHERE status <> 'discarded' AND created_at > now() - interval '30 days') x,
+     LATERAL regexp_matches(x.t, $1, 'g') m`,
+    [`(${ids.join("|")})`]
+  );
+  return new Set(rows.map((r) => r.id));
+}
+// Deletes the screenshots in ids that this user uploaded and nothing references. Safe to call any time and more than once.
+async function dropCrops(ids, userId) {
+  try {
+    ids = [...new Set((ids || []).filter((x) => /^[0-9a-f-]{36}$/i.test(String(x))))].map((x) => String(x).toLowerCase());
+    if (!ids.length) return 0;
+    const used = await referencedImages(ids);
+    const gone = ids.filter((x) => !used.has(x));
+    if (gone.length) await q("DELETE FROM images WHERE id = ANY($1) AND created_by=$2", [gone, userId]);
+    return gone.length;
+  } catch (e) { console.error("Dropping unused screenshots failed:", e.message); return 0; }
+}
+// The browser calls this if something fails after uploading (so the screenshots of a PDF it gave up on don't pile up).
+app.post(
+  "/api/images/discard",
+  auth("Manager"),
+  wrap(async (req, res) => {
+    const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(String).filter((x) => /^[0-9a-f-]{36}$/i.test(x)).slice(0, 200);
+    const mine = ids.length ? (await q(`SELECT id FROM images WHERE id = ANY($1) AND created_by=$2 AND created_at > now() - interval '${CROP_WINDOW}'`, [ids, req.user.id])).rows.map((r) => r.id) : [];
+    res.json({ removed: await dropCrops(mine, req.user.id) });
   })
 );
 
@@ -879,18 +946,6 @@ async function authorContext(user, hotelId, target) {
   };
 }
 
-// Saves the screenshots cropped from a PDF as ordinary images (the same table and URLs photos use). Returns Map(image object -> id).
-async function saveCrops(extracted, hotelId, userId) {
-  const ids = new Map();
-  for (const p of extracted.procedures) for (const it of p.items) {
-    if (!it.image) continue;
-    const id = crypto.randomUUID();
-    await q("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", [id, hotelId, it.image.mime, it.image.buf, userId]);
-    ids.set(it.image, id);
-  }
-  return ids;
-}
-
 // What the AI is told about the SOPs that already exist (so it can say "this matches your SOP ...").
 async function authorCatalog(target, hotelId) {
   const rows = target === "master"
@@ -900,33 +955,41 @@ async function authorCatalog(target, hotelId) {
 }
 const pdfLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many PDFs. Wait a few minutes and try again." } });
 
+// state.crops: the screenshots this request was handed; they are given back unless the request finishes and the draft keeps them.
 const authorHandler = wrap(async (req, res) => {
+  const state = { crops: [], ok: false };
+  try { await authorRun(req, res, state); }
+  finally { if (!state.ok && state.crops.length) await dropCrops(state.crops, req.user.id); }
+});
+
+async function authorRun(req, res, state) {
     const target = req.body.target === "master" ? "master" : "hotel";
     if (target === "master" && !isOwner(req.user)) return bad(res, 403, "Only the Owner can write master library SOPs.");
     const message = String(req.body.message || "").trim().slice(0, 3000);
     const imageIds = [...new Set((Array.isArray(req.body.imageIds) ? req.body.imageIds : []).map(String))].slice(0, MAX_AUTHOR_IMAGES);
-    const pdfFile = req.path === "/api/author/pdf" ? req.body.file : null;
-    if (!message && !imageIds.length && !pdfFile) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
+    const isPdf = req.path === "/api/author/pdf";
+    if (isPdf && req.body.file) return bad(res, 400, "This page is out of date. Reload it, then attach the PDF again.");
+    if (isPdf && !Array.isArray(req.body.procedures)) return bad(res, 400, "That PDF wasn't read. Try attaching it again.");
+    if (!message && !imageIds.length && !isPdf) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
     const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
     if (!cfg) return bad(res, 400, "AI isn't switched on. Use Write it myself.");
     const hotelKey = target === "master" ? null : req.hotel;
 
-    // An attached PDF guide: read its steps and screenshots now; the writing model gets a compact listing.
+    // An attached PDF guide: the browser already read it and uploaded its screenshots. Check everything it says, then the writing model gets a compact listing.
     let pdfTurn = null;
-    if (pdfFile) {
+    if (isPdf) {
       try {
-        const name = String(pdfFile.name || "guide.pdf").replace(/[\\/]/g, "_").slice(0, 120);
-        const buf = imp.decodeUpload(pdfFile.data);
-        imp.checkFile(name, buf, ["pdf"]);
-        const ex = await pdfsteps.extractSteps(buf, { fallbackTitle: imp.titleFromFile(name) });
-        const ids = await saveCrops(ex, req.hotel, req.user.id);
-        const stepCount = ex.procedures.reduce((n, p) => n + p.items.length, 0);
+        const sub0 = pdfsteps.cleanSubmission(req.body);
+        const sub = pdfsteps.applyOwned(sub0, await ownedCrops(sub0.imgIds, req.hotel, req.user.id));
+        state.crops = sub.imgIds;
+        if (!sub.procedures.length) throw new pdfsteps.StepsError("We couldn't find any steps in that PDF.");
+        const stepCount = sub.procedures.reduce((n, p) => n + p.items.length, 0);
         pdfTurn = {
-          name, pages: ex.pages, shots: ex.shots, procedures: ex.procedures.length, steps: stepCount, titles: ex.procedures.map((p) => p.title).slice(0, 12),
-          warnings: ex.warnings, imageIds: [...ids.values()], listing: pdfsteps.listing(ex, (im) => ids.get(im)).slice(0, 30000),
+          name: sub.name, pages: sub.pages, shots: sub.shots, procedures: sub.procedures.length, steps: stepCount, titles: sub.procedures.map((p) => p.title).slice(0, 12),
+          warnings: sub.warnings, imageIds: sub.imgIds, listing: pdfsteps.listing(sub).slice(0, 30000),
         };
       } catch (e) {
-        if (e instanceof imp.ImportError || e instanceof pdfsteps.StepsError) return bad(res, 400, e.message);
+        if (e instanceof pdfsteps.StepsError) return bad(res, 400, e.message);
         throw e;
       }
     }
@@ -1008,6 +1071,7 @@ const authorHandler = wrap(async (req, res) => {
       : { role: "assistant", kind: "draft", notes: out.notes };
     const newDraft = out.action === "draft" ? out.sop : row.draft;
     await q("UPDATE sop_drafts SET turns=$2, draft=$3, updated_at=now() WHERE id=$1", [row.id, JSON.stringify([...turns, bot].slice(-40)), JSON.stringify(newDraft)]);
+    state.ok = true; // the screenshots now belong to the chat; they are given back when it ends
     res.json({
       draftId: row.id,
       kind: out.action,
@@ -1020,7 +1084,7 @@ const authorHandler = wrap(async (req, res) => {
       updateId: out.action === "draft" && out.updateId ? out.updateId : null,
       pdf: pdfTurn ? { name: pdfTurn.name, pages: pdfTurn.pages, shots: pdfTurn.shots, procedures: pdfTurn.procedures, steps: pdfTurn.steps, warnings: pdfTurn.warnings } : null,
     });
-});
+}
 
 app.post("/api/author", authorLimiter, auth("Manager"), hotel, authorHandler);
 app.post("/api/author/pdf", pdfLimiter, authorLimiter, auth("Manager"), jsonPdf, hotel, authorHandler);
@@ -1029,7 +1093,16 @@ app.post(
   "/api/author/:id/discard",
   auth("Manager"),
   wrap(async (req, res) => {
-    await q("DELETE FROM sop_drafts WHERE id=$1 AND user_id=$2", [String(req.params.id).slice(0, 64), req.user.id]);
+    const id = String(req.params.id).slice(0, 64);
+    const row = (await q("SELECT turns, draft FROM sop_drafts WHERE id=$1 AND user_id=$2", [id, req.user.id])).rows[0];
+    await q("DELETE FROM sop_drafts WHERE id=$1 AND user_id=$2", [id, req.user.id]);
+    if (row) {
+      // The chat is over: give back the screenshots cut from its PDFs. keepDraft = the draft is going to the editor, so its pictures stay.
+      // Anything a saved SOP, another draft or an import already uses is left alone (dropCrops checks).
+      const keep = new Set(req.body && req.body.keepDraft && row.draft && Array.isArray(row.draft.steps) ? row.draft.steps.map((x) => x && x.img).filter(Boolean) : []);
+      const crops = (Array.isArray(row.turns) ? row.turns : []).flatMap((t) => (t && t.pdf && Array.isArray(t.pdf.imageIds) ? t.pdf.imageIds : [])).filter((x) => !keep.has(x));
+      await dropCrops(crops, req.user.id);
+    }
     res.json({ ok: true });
   })
 );
@@ -2328,8 +2401,9 @@ app.post(
   })
 );
 
-// One PDF guide at a time (the screen sends several in a row). Guides with a screenshot per step keep their pictures; any other PDF
-// goes through the ordinary text reading. With batchId the result is added to that batch instead of starting a new one.
+// One PDF guide at a time (the screen sends several in a row). The BROWSER reads the PDF and uploads its screenshots first; this route gets
+// the structure (or, for a PDF that is not a step guide, its plain text), checks it, and runs the ordinary AI step. Guides with a screenshot
+// per step keep their pictures; any other PDF goes through the ordinary text reading. With batchId the result is added to that batch.
 const pdfImportLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, message: { error: "Too many imports. Wait a few minutes and try again." } });
 const sameStr = (a, b) => imp.norm(a) === imp.norm(b);
 function mergeIntoResult(result, add) {
@@ -2353,55 +2427,58 @@ app.post(
   jsonPdf,
   importTarget,
   wrap(async (req, res) => {
+    let uploaded = [];
     try {
       const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
       if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings. You can still import with the spreadsheet template.", noAi: true });
-      const [file] = loadFiles(req.body.file ? [req.body.file] : []);
-      imp.checkFile(file.name, file.buf, ["pdf"]);
+      if (req.body.file) throw new imp.ImportError("This page is out of date. Reload it, then choose the PDFs again.");
+      let sub0;
+      try { sub0 = pdfsteps.cleanSubmission(req.body); } catch (e) { if (e instanceof pdfsteps.StepsError) throw new imp.ImportError(`${String(req.body.name || "That PDF").slice(0, 120)}: ${e.message}`); throw e; }
+      const name = sub0.name;
+      const imgHotel = req.target || req.user.hotels[0];
+      const sub = pdfsteps.applyOwned(sub0, await ownedCrops(sub0.imgIds, imgHotel, req.user.id));
+      uploaded = sub.imgIds; // only pictures this user just uploaded into this hotel are ever given back
       const complete = (system, user, opts) => ai.complete(cfg, system, user, opts);
       const ctx = await importCtx(req.target);
       let result, meta = { warnings: [] };
-      let ex = null;
-      try { ex = await pdfsteps.extractSteps(file.buf, { fallbackTitle: imp.titleFromFile(file.name) }); }
-      catch (e) { if (e instanceof pdfsteps.StepsError) throw new imp.ImportError(`${file.name}: ${e.message}`); throw e; }
-      const imgHotel = req.target || req.user.hotels[0];
-      const ids = new Map();
-      if (pdfsteps.isStepGuide(ex)) {
-        for (const p of ex.procedures) for (const it of p.items) if (it.image) ids.set(it.image, crypto.randomUUID());
-        const listing = pdfsteps.listing(ex, (im) => ids.get(im)).slice(0, 40000);
-        result = await imp.analyzePdf(complete, listing, [...ids.values()], ctx);
-        // Only the pictures the result actually uses are saved.
+      if (sub.procedures.length && pdfsteps.isStepGuide(sub)) {
+        const listing = pdfsteps.listing(sub).slice(0, 40000);
+        result = await imp.analyzePdf(complete, listing, sub.imgIds, ctx);
         const used = new Set([...result.matches, ...result.new].flatMap((x) => x.imgs || []).filter(Boolean));
-        for (const [im, id] of ids) if (used.has(id)) await q("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", [id, imgHotel, im.mime, im.buf, req.user.id]);
         meta.shots = used.size;
-        meta.warnings = ex.warnings.map((w) => `${file.name}: ${w}`);
+        meta.warnings = sub.warnings.map((w) => `${name}: ${w}`);
       } else {
-        const { text, truncated, empty } = await imp.extractAll([file]);
-        if (!text) throw new imp.ImportError(`We couldn't find any text in ${file.name}.`);
+        // Not a step guide: plain text, read by the browser (or the steps written out as text if that is all it sent).
+        const { text, truncated } = await imp.extractAll([{ name, text: sub.text || pdfsteps.guideText(sub) }]);
+        if (!text) throw new imp.ImportError(`We couldn't find any text in ${name}.`);
         const a = await imp.analyzeText(complete, text, ctx);
         result = a.result;
-        if (truncated) meta.warnings.push(`${file.name}: longer than we can read at once, so only the first part was used.`);
-        if (a.failedParts) meta.warnings.push(`${file.name}: ${a.failedParts} of ${a.parts} parts couldn't be read.`);
-        meta.warnings.push(`${file.name}: no step-by-step screenshots found, read as plain text.`);
+        if (truncated) meta.warnings.push(`${name}: longer than we can read at once, so only the first part was used.`);
+        if (a.failedParts) meta.warnings.push(`${name}: ${a.failedParts} of ${a.parts} parts couldn't be read.`);
+        meta.warnings.push(`${name}: no step-by-step screenshots found, read as plain text.`);
       }
-      if (!result.matches.length && !result.new.length && !(result.details || []).length) throw new imp.ImportError(`We didn't find any procedures in ${file.name}.`);
+      if (!result.matches.length && !result.new.length && !(result.details || []).length) throw new imp.ImportError(`We didn't find any procedures in ${name}.`);
 
+      let out = null;
       const batchId = Number.isInteger(+req.body.batchId) && req.body.batchId ? +req.body.batchId : null;
       if (batchId) {
-        const out = await tx(async (c) => {
+        out = await tx(async (c) => {
           const row = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [batchId])).rows[0];
           if (!row || !canUseBatch(req.user, row) || row.status === "discarded" || (row.hotel_id || null) !== (req.target || null)) return null;
           const r = row.result;
           mergeIntoResult(r, withStates(result));
           r.meta = { ...(r.meta || {}), pdfShots: ((r.meta && r.meta.pdfShots) || 0) + (meta.shots || 0), warnings: [...((r.meta && r.meta.warnings) || []), ...meta.warnings] };
-          await c.query("UPDATE imports SET result=$2, status='review', filenames = array_append(filenames, $3) WHERE id=$1", [row.id, JSON.stringify(r), file.name]);
+          await c.query("UPDATE imports SET result=$2, status='review', filenames = array_append(filenames, $3) WHERE id=$1", [row.id, JSON.stringify(r), name]);
           return (await c.query("SELECT * FROM imports WHERE id=$1", [row.id])).rows[0];
         });
-        if (out) return res.json(await batchView(out));
       }
-      const row = await newImportRow(req.user, req.target, "ai", [file.name], { ...withStates(result), meta: { pdfShots: meta.shots || 0, warnings: meta.warnings } });
-      res.json(await batchView(row));
+      if (!out) out = await newImportRow(req.user, req.target, "ai", [name], { ...withStates(result), meta: { pdfShots: meta.shots || 0, warnings: meta.warnings } });
+      // The pictures were uploaded before the AI read the guide: now give back the ones no draft or match uses (the saved batch holds the rest).
+      await dropCrops(uploaded, req.user.id);
+      uploaded = [];
+      res.json(await batchView(out));
     } catch (e) {
+      if (uploaded.length) await dropCrops(uploaded, req.user.id);
       importFail(res, e);
     }
   })
@@ -2605,6 +2682,17 @@ app.get("/healthz", wrap(async (req, res) => {
 // index.html is never cached, and points at versioned app.js/style.css, so a new
 // deploy reaches every browser on the next page load.
 const BUILD = String(Date.now());
+// pdf.js for the browser (PDF guides are read on the device, never on this server). Straight from node_modules, nothing copied into git.
+// The version is in the URL, so every file can be cached for good and an upgrade can never mix old and new files.
+{
+  const root = path.dirname(require.resolve("pdfjs-dist/package.json"));
+  const opts = { index: false, dotfiles: "ignore", maxAge: "365d", immutable: true };
+  const mount = `/vendor/pdfjs/${PDFJS_VERSION}`;
+  app.use(`${mount}/legacy`, express.static(path.join(root, "legacy", "build"), opts));
+  for (const d of ["standard_fonts", "cmaps", "wasm", "iccs"]) app.use(`${mount}/${d}`, express.static(path.join(root, d), opts));
+  app.use(mount, express.static(path.join(root, "build"), opts));
+  app.use("/vendor/pdfjs", (req, res) => res.status(404).end()); // never fall through to the app page for a missing pdf.js file
+}
 const INDEX = require("fs")
   .readFileSync(path.join(__dirname, "..", "public", "index.html"), "utf8")
   .replace('href="/style.css"', `href="/style.css?v=${BUILD}"`)

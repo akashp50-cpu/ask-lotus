@@ -1,5 +1,6 @@
 "use strict";
 /* Ask Lotus client. Talks to the API in src/server.js. */
+const APP_V = (() => { try { return new URL(document.currentScript.src).searchParams.get("v") || ""; } catch { return ""; } })(); // cache-busting build id of this file
 
 /* ---------- spring engine (damping ratio + response) ---------- */
 const RM = matchMedia("(prefers-reduced-motion: reduce)");
@@ -130,7 +131,7 @@ function showScreen() {
 async function start() {
   try {
     const me = await api("/api/me", { hotel: false, quiet401: true });
-    STATE.me = me.user; STATE.hotels = me.hotels;
+    STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs;
   } catch { STATE.me = null; }
   if (!STATE.me) window.applyAccent(null); // the sign-in screen is always Lotus gold
   showScreen();
@@ -199,7 +200,7 @@ const go = (h) => (location.hash === "#" + h ? route() : (location.hash = h));
 
 async function refreshMe() {
   const me = await api("/api/me", { hotel: false });
-  STATE.me = me.user; STATE.hotels = me.hotels; renderPropMenu();
+  STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs; renderPropMenu();
 }
 
 function renderPropMenu() {
@@ -1413,15 +1414,53 @@ $("masterEd").addEventListener("submit", async (e) => {
   mSaving = false;
 });
 
+/* ---------- PDF guides: read on this device, screenshots uploaded, then only the structure goes to the server ---------- */
+// The server has little memory, so it never opens a PDF. pdf.js is loaded from the app the first time a PDF is attached.
+let pdfReaderP = null;
+const pdfReader = () => (pdfReaderP ||= import(`/pdf/read.js?v=${APP_V}`).catch(() => { pdfReaderP = null; throw new Error("Couldn't load the PDF reader. Check your connection and try again."); }));
+const titleFromFile = (name) => String(name || "").replace(/\.[a-z0-9]+$/i, "").replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim().replace(/\b([a-z])/g, (m) => m.toUpperCase()).slice(0, 120);
+const blobDataUrl = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("Couldn't prepare a screenshot.")); r.readAsDataURL(b); });
+const discardShots = (ids) => (ids.length ? api("/api/images/discard", { hotel: false, body: { ids } }).catch(() => {}) : Promise.resolve());
+
+// Reads the PDF, uploads its screenshots a few at a time, and returns the body for /api/author/pdf or /api/import/pdf.
+// hotelId: the hotel the screenshots belong to (omitted: the one that is open). steps: always return steps, even for a non-guide.
+// onStatus(text) is called with what to show. On any failure the screenshots already uploaded are given back.
+async function prepPdf(file, { hotelId, steps, onStatus }) {
+  const { readPdf } = await pdfReader();
+  onStatus(`Opening ${file.name}…`);
+  const r = await readPdf(file, {
+    version: STATE.pdfjs, v: APP_V, steps, fallbackTitle: titleFromFile(file.name),
+    onProgress: (p) => onStatus(p.phase === "read" ? `Reading ${file.name} · page ${p.page} of ${p.of}` : `Cutting out screenshots · page ${p.page} of ${p.of}`),
+  });
+  const items = r.procedures.flatMap((p) => p.items).filter((it) => it.blob);
+  const ids = [];
+  try {
+    for (let i = 0; i < items.length;) {
+      const group = []; let bytes = 0;
+      while (i < items.length && group.length < 10 && (!group.length || bytes + items[i].blob.size < 2.2 * 1048576)) { bytes += items[i].blob.size; group.push(items[i++]); }
+      onStatus(`Uploading screenshots ${Math.min(i, items.length)}/${items.length}`);
+      const urls = await Promise.all(group.map((it) => blobDataUrl(it.blob)));
+      const out = await api("/api/images/batch", { ...(hotelId ? { hotel: false } : {}), body: { ...(hotelId ? { hotel: hotelId } : {}), images: urls } });
+      group.forEach((it, k) => { it.img = out.ids[k]; ids.push(out.ids[k]); it.blob = null; });
+    }
+  } catch (e) { await discardShots(ids); throw e; }
+  const body = {
+    name: file.name, pages: r.pages, warnings: r.warnings,
+    procedures: r.procedures.map((p) => ({ title: p.title, intro: p.intro, pages: p.pages, items: p.items.map((it) => ({ text: it.text, page: it.page, n: it.n, img: it.img || null })) })),
+    ...(r.text ? { text: r.text } : {}),
+  };
+  return { body, ids, isGuide: r.isGuide, shots: ids.length };
+}
+
 /* ---------- import: documents and spreadsheet -> review -> drafts ---------- */
-const IMP = { target: null, info: null, batch: null, list: [], files: [], busy: "", group: "matches", open: new Set(), pick: {} };
+const IMP = { target: null, info: null, batch: null, list: [], files: [], st: {}, busy: "", group: "matches", open: new Set(), pick: {} };
 const IMP_TYPES = [".pdf", ".docx", ".xlsx", ".csv", ".txt", ".md"];
 const impEl = () => (isOwner() ? $("ownerImport") : $("impBody"));
 const impTargetName = (t) => (t === "master" ? "the master library" : hotelName(t));
 
 // Opens Import for a hotel (GM, or the Owner coming from a hotel's setup or home).
 function openImport(hotelId) {
-  IMP.target = hotelId; IMP.batch = null; IMP.files = [];
+  IMP.target = hotelId; IMP.batch = null; IMP.files = []; IMP.st = {};
   if (isOwner()) ownerTab = "import";
   go("import");
 }
@@ -1431,7 +1470,7 @@ async function renderImport() {
   if (!isGM()) return;
   const box = impEl();
   const t = isOwner() ? IMP.target || "master" : STATE.hotel;
-  if (IMP.target !== t) { IMP.target = t; IMP.batch = null; IMP.files = []; }
+  if (IMP.target !== t) { IMP.target = t; IMP.batch = null; IMP.files = []; IMP.st = {}; }
   $("impBack").lastElementChild.textContent = hotelObj().ready ? "Home" : "Setup";
   $("impSub").textContent = isOwner() ? "" : `${hotelName(STATE.hotel)} only`;
   if (!IMP.info) box.innerHTML = `<div class="group"><div class="empty">Loading…</div></div>`;
@@ -1456,10 +1495,10 @@ function paintImpStart() {
     <div class="sec"><span>Upload documents</span></div>
     <div class="group"><div class="cell imp">
       <span class="body"><span class="t wrap">Read my binder, SOP files or checklists</span><span class="m wrapm">PDF, Word, Excel, CSV or text, ${I.maxMb} MB each. We sort what we find into what you already have, new procedures and hotel details. You review everything first.</span><span class="m wrapm"><b>PDF guides with a screenshot under each step</b> keep their screenshots on the steps. Choose up to ${I.maxPdfs} PDFs at once. Other files: up to ${I.maxFiles} at a time.</span></span>
-      ${files.length ? `<div class="impfiles">${files.map((f, i) => `<span class="impfile"><span>${esc(f.name)} <small>${fmtSize(f.size)}</small></span><button type="button" class="iconbtn del" data-rm="${i}" aria-label="Remove ${esc(f.name)}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></span>`).join("")}</div>` : ""}
+      ${files.length ? `<div class="impfiles">${files.map((f, i) => `<span class="impfile"><span>${esc(f.name)} <small>${fmtSize(f.size)}</small>${IMP.st[i] ? `<small class="impst ${IMP.st[i].cls}" data-st="${i}" role="status">${esc(IMP.st[i].text)}</small>` : ""}</span><button type="button" class="iconbtn del" data-rm="${i}" aria-label="Remove ${esc(f.name)}" ${IMP.busy ? "disabled" : ""}><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></span>`).join("")}</div>` : ""}
       <div class="acts"><button type="button" class="pillbtn press" id="impPick" ${IMP.busy ? "disabled" : ""}>${files.length ? "Change files" : "Choose files"}</button>
       <button type="button" class="pillbtn tint press" id="impRead" ${!files.length || IMP.busy || !I.aiOn ? "disabled" : ""}>${IMP.busy === "ai" ? "Reading…" : "Read documents"}</button></div>
-      ${IMP.busy === "ai" ? `<span class="m wrapm" role="status"><span class="spin"></span> ${esc(IMP.progress || "Reading your files. This can take a minute.")}</span>` : ""}
+      ${IMP.busy === "ai" ? `<span class="m wrapm" role="status" id="impProg"><span class="spin"></span> ${esc(IMP.progress || "Reading your files. This can take a minute.")}</span>` : ""}
       ${!I.aiOn ? `<span class="m wrapm no">Reading documents needs an AI key, and none is set up yet. ${isOwner() ? "Add one in Settings, or" : "Ask the Owner to add one, or"} use the spreadsheet below.</span>` : ""}
       <input type="file" id="impFile" multiple accept="${IMP_TYPES.join(",")}" hidden>
     </div></div>
@@ -1484,9 +1523,9 @@ function paintImpStart() {
     if (picked.length - nPdf > I.maxFiles) return toast(`Choose up to ${I.maxFiles} files besides PDFs`);
     if (nPdf > I.maxPdfs) return toast(`Choose up to ${I.maxPdfs} PDFs at a time`);
     if (bad) return toast(`${bad.name}: use PDF, Word, Excel, CSV or text under ${I.maxMb} MB`);
-    IMP.files = picked; paintImpStart();
+    IMP.files = picked; IMP.st = {}; paintImpStart();
   };
-  box.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { IMP.files.splice(+b.dataset.rm, 1); paintImpStart(); }));
+  box.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = () => { IMP.files.splice(+b.dataset.rm, 1); IMP.st = {}; paintImpStart(); }));
   $("impRead").onclick = () => impSend("ai");
   $("impSheet").onclick = () => $("impSheetFile").click();
   $("impSheetFile").onchange = (e) => { if (e.target.files[0]) impSend("sheet", e.target.files[0]); };
@@ -1497,35 +1536,61 @@ function paintImpStart() {
 
 const readDataUrl = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error(`Couldn't read ${f.name}`)); r.readAsDataURL(f); });
 
+// A line under a file in the list: what is happening to it now. Updates the screen in place (a full repaint for every page would flicker).
+function impStatus(i, text, cls = "") {
+  IMP.st[i] = { text, cls };
+  const el = document.querySelector(`[data-st="${i}"]`);
+  if (el) { el.textContent = text; el.className = "impst " + cls; } else if (IMP.busy) paintImpStart();
+}
+
 async function impSend(kind, one) {
   if (IMP.busy) return;
   const target = IMP.target;
-  IMP.busy = kind; paintImpStart();
+  IMP.busy = kind; IMP.st = {}; paintImpStart();
   try {
     let batch;
     if (kind === "ai") {
-      // Other documents go in one request. PDFs go one at a time (each is read for its step screenshots) into the same batch.
+      // Other documents go in one request. PDFs are read here on this device, one after another (screenshots uploaded, then the
+      // structure sent), into the same batch.
       const isPdf = (f) => /\.pdf$/i.test(f.name);
-      const others = IMP.files.filter((f) => !isPdf(f)), pdfs = IMP.files.filter(isPdf), problems = [];
+      const idx = IMP.files.map((f, i) => i);
+      const others = idx.filter((i) => !isPdf(IMP.files[i])), pdfs = idx.filter((i) => isPdf(IMP.files[i])), problems = [];
+      pdfs.forEach((i) => impStatus(i, "Waiting", ""));
       if (others.length) {
         IMP.progress = "Reading your documents. This can take a minute."; paintImpStart();
-        const files = await Promise.all(others.map(async (f) => ({ name: f.name, data: await readDataUrl(f) })));
+        others.forEach((i) => impStatus(i, "Reading…", ""));
+        const files = await Promise.all(others.map(async (i) => ({ name: IMP.files[i].name, data: await readDataUrl(IMP.files[i]) })));
         batch = await api("/api/import/upload", { hotel: false, body: { target, files } });
+        others.forEach((i) => impStatus(i, "Done", "ok"));
       }
-      for (let i = 0; i < pdfs.length; i++) {
-        IMP.progress = `Reading PDF ${i + 1} of ${pdfs.length}: ${pdfs[i].name}`; paintImpStart();
+      let lastErr = null;
+      for (let k = 0; k < pdfs.length; k++) {
+        const i = pdfs[k], f = IMP.files[i];
+        IMP.progress = `PDF ${k + 1} of ${pdfs.length}: ${f.name}`;
+        const line = $("impProg"); if (line) line.lastChild.textContent = " " + IMP.progress;
         try {
-          batch = await api("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, file: { name: pdfs[i].name, data: await readDataUrl(pdfs[i]) } } });
-        } catch (e) { if (!batch && i === pdfs.length - 1) throw e; problems.push(`${pdfs[i].name}: ${e.message}`); }
+          if (f.size > I_MAX_BYTES()) throw new Error("That PDF is over 10 MB.");
+          const prep = await prepPdf(f, { hotelId: target === "master" ? undefined : target, onStatus: (t) => impStatus(i, t, "") });
+          impStatus(i, prep.isGuide ? `Sorting ${prep.shots} screenshots into steps…` : "Reading the text…", "");
+          try {
+            batch = await api("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, ...prep.body } });
+          } catch (e) { await discardShots(prep.ids); throw e; }
+          impStatus(i, prep.isGuide ? `Done · ${prep.shots} screenshot${prep.shots === 1 ? "" : "s"}` : "Done · read as text", "ok");
+        } catch (e) {
+          lastErr = e; problems.push(`${f.name}: ${e.message}`);
+          impStatus(i, e.message || "Couldn't read this PDF.", "no");
+        }
       }
+      if (!batch && lastErr) throw lastErr;
       if (batch && problems.length) batch.meta = { ...batch.meta, failedFiles: problems };
     } else {
       batch = await api("/api/import/sheet", { hotel: false, body: { target, file: { name: one.name, data: await readDataUrl(one) } } });
     }
-    IMP.busy = ""; IMP.progress = ""; IMP.files = []; IMP.batch = batch; IMP.open = new Set(); IMP.group = firstOpenGroup();
+    IMP.busy = ""; IMP.progress = ""; IMP.files = []; IMP.st = {}; IMP.batch = batch; IMP.open = new Set(); IMP.group = firstOpenGroup();
     paintImpReview(); scrollTo(0, 0);
   } catch (e) { IMP.busy = ""; IMP.progress = ""; if (IMP.target === target) paintImpStart(); fail(e); }
 }
+const I_MAX_BYTES = () => ((IMP.info && IMP.info.maxMb) || 10) * 1048576;
 
 const firstOpenGroup = () => ["matches", "new", "details"].find((g) => IMP.batch[g].some((x) => !x.state)) || ["matches", "new", "details"].find((g) => IMP.batch[g].length) || "new";
 const STATE_TEXT = { kept: "Kept ours", used: "Used theirs", added: "Added as a draft", applied: "Saved", skipped: "Skipped" };
@@ -1640,9 +1705,10 @@ function authorOpen({ target, from, sopId, seed }) {
   $("auText").value = ""; $("auText").style.height = "auto";
   showSheet("authorEd"); authorRender(); setTimeout(() => $("auText").focus(), 380);
 }
-function authorDiscard() {
+// keepDraft: the draft is going to the editor, so the pictures on its steps stay. Everything else cut from the chat's PDFs is deleted.
+function authorDiscard(keepDraft) {
   const id = AU.draftId; AU.active = false; AU.draftId = null; AU.queue = []; AUQ = null;
-  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: {} }).catch(() => {});
+  if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: { keepDraft: !!keepDraft } }).catch(() => {});
 }
 function authorBack() { // leave the chat without a draft: back to the editor it came from, or close
   const from = AU.from, target = AU.target; authorDiscard();
@@ -1660,7 +1726,7 @@ function authorHandoff() {
   if (AU.queue.length && AU.draftId) { // more SOPs to write from the same PDF: keep the chat, come back after this one is saved
     AUQ = { draftId: AU.draftId, queue: AU.queue.slice(), target, thread: AU.thread.slice() };
     AU.active = false; AU.draftId = null; AU.queue = [];
-  } else authorDiscard();
+  } else authorDiscard(true);
   if (from === "editor") {
     if (target === "master") { fillMasterEditor(d); showSheet("masterEd"); }
     else { fillEditor(d); showSheet("editor"); }
@@ -1713,7 +1779,7 @@ function authorRender(scrollTo) {
         ? `<button type="button" class="chip press" data-pick="${esc(o)}" aria-pressed="${AU.picks.has(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`
         : `<button type="button" class="chip press" data-opt="${esc(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`).join("")}${m.multi ? `<button type="button" class="chip press auGo" data-go="1" ${live && AU.picks.size ? "" : "disabled"}>${AU.picks.size ? `Continue with ${AU.picks.size}` : "Tap the ones you want"}</button>` : ""}</div>` : "";
     return `<div class="auMsg bot">${esc(m.text)}</div>${chips}`;
-  }).join("") + (AU.busy ? `<div class="auTyping"><span class="spin"></span> Writing…</div>` : "") + authorCard();
+  }).join("") + (AU.busy ? `<div class="auTyping"><span class="spin"></span> <span class="pt">${esc(AU.progress || "Writing…")}</span></div>` : "") + authorCard();
   body.querySelectorAll("[data-opt]").forEach((b) => (b.onclick = () => { AU.thread[lastIdx].answered = true; authorSend(b.dataset.opt, []); }));
   body.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { const o = b.dataset.pick; AU.picks.has(o) ? AU.picks.delete(o) : AU.picks.add(o); authorRender(); }));
   body.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
@@ -1736,16 +1802,23 @@ function authorRender(scrollTo) {
   else body.scrollTop = body.scrollHeight;
 }
 
+// pdf: a File (a PDF guide). It is read in this browser; only its steps and screenshots go to the server.
+const auProgress = (t) => { AU.progress = t; const el = $("auBody").querySelector(".auTyping .pt"); if (el) el.textContent = t; };
 async function authorSend(text, imageIds, pdf, extra) {
   text = String(text || "").trim();
   if (AU.busy || (!text && !imageIds.length && !pdf)) return;
   const mine = { role: "me", text, imgs: imageIds, pdf: pdf ? { name: pdf.name } : null };
   AU.thread.push(mine);
-  AU.busy = true; authorRender();
+  AU.busy = true; AU.progress = pdf ? `Opening ${pdf.name}…` : ""; authorRender();
+  let shots = [];
   try {
     const body = { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined, ...(extra || {}) };
-    if (pdf) body.file = pdf;
+    if (pdf) {
+      const prep = await prepPdf(pdf, { steps: true, onStatus: auProgress });
+      Object.assign(body, prep.body); shots = prep.ids; auProgress("Writing…");
+    }
     const r = await api(pdf ? "/api/author/pdf" : "/api/author", { body });
+    shots = [];
     AU.draftId = r.draftId; AU.last = r;
     if (r.pdf) { mine.pdf = r.pdf; if (r.pdf.warnings && r.pdf.warnings.length) AU.thread.push({ role: "bot", text: r.pdf.warnings.join(" ") }); }
     if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options, multi: !!r.multi }); AU.cardOpen = false; AU.picks = new Set(); }
@@ -1753,6 +1826,7 @@ async function authorSend(text, imageIds, pdf, extra) {
     AU.busy = false; authorRender("last");
   } catch (e) {
     AU.busy = false;
+    discardShots(shots); // the PDF's screenshots were uploaded before the failure; the server also gives them back
     AU.thread.pop(); // take the unsent message back so it can be edited and retried
     if (/expired/i.test(e.message)) { AU.draftId = null; }
     AU.thread.push({ role: "err", text: e.message });
@@ -1791,9 +1865,8 @@ $("auPdf").onchange = async () => {
   if (f.size > 10 * 1048576) return toast("That PDF is over 10 MB");
   const text = $("auText").value, ids = AU.pending.map((p) => p.id).filter(Boolean);
   if (AU.pending.some((p) => p.up)) return toast("Wait for the photo to finish uploading");
-  try { var data = await readDataUrl(f); } catch (e) { return fail(e); }
   $("auText").value = ""; $("auText").style.height = "auto"; AU.pending = [];
-  authorSend(text, ids, { name: f.name, data });
+  authorSend(text, ids, f);
 };
 $("auAttach").onclick = () => { $("auPick").value = ""; $("auPick").click(); };
 $("auPick").onchange = () => authorAttach($("auPick").files);

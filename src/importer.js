@@ -59,6 +59,7 @@ async function pdfText(buf) {
       }
       out.push(line.replace(/[ \t]+\n/g, "\n"));
       len += line.length;
+      page.cleanup();
     }
   } finally {
     await doc.destroy().catch(() => {});
@@ -127,15 +128,18 @@ async function fileText(name, buf) {
   else if (ext === "docx") text = await docxText(buf);
   else if (ext === "xlsx") text = sheetsToText(await xlsxSheets(buf));
   else text = buf.toString("utf8").replace(/^﻿/, "");
-  return text.replace(/\r/g, "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  return cleanText(text);
 }
+
+// Text that was already read elsewhere (the browser reads PDFs) gets the same tidy-up as every other document.
+const cleanText = (text) => String(text || "").replace(/\r/g, "").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
 
 // Joins the files' text under headers and caps the total. Returns { text, truncated, empty: [names with no text] }.
 async function extractAll(files) {
   const parts = [], empty = [];
   for (const f of files) {
     let t;
-    try { t = await fileText(f.name, f.buf); } catch (e) {
+    try { t = f.text != null ? cleanText(f.text) : await fileText(f.name, f.buf); } catch (e) {
       if (e instanceof ImportError) throw e;
       throw new ImportError(`We couldn't read "${f.name}". If it's a scan or a photo, try a text version.`);
     }
