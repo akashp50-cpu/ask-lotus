@@ -62,7 +62,7 @@ async function api(path, opts = {}) {
   let data = null;
   try { data = await r.json(); } catch { /* empty */ }
   if (r.status === 401 && !opts.quiet401) { STATE.me = null; showScreen(); }
-  if (!r.ok) throw new Error((data && data.error) || "Something went wrong. Try again.");
+  if (!r.ok) throw Object.assign(new Error((data && data.error) || "Something went wrong. Try again."), { status: r.status });
   return data;
 }
 
@@ -1420,6 +1420,26 @@ let pdfReaderP = null;
 const pdfReader = () => (pdfReaderP ||= import(`/pdf/read.js?v=${APP_V}`).catch(() => { pdfReaderP = null; throw new Error("Couldn't load the PDF reader. Check your connection and try again."); }));
 const titleFromFile = (name) => String(name || "").replace(/\.[a-z0-9]+$/i, "").replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim().replace(/\b([a-z])/g, (m) => m.toUpperCase()).slice(0, 120);
 const blobDataUrl = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("Couldn't prepare a screenshot.")); r.readAsDataURL(b); });
+// A PDF route answers at once with a job id and works in the background (the AI can take longer than a proxy waits for one request).
+// Poll until it is done. A lost connection while polling is retried; once the server has the screenshots they are the server's to keep or
+// delete, so nothing here ever discards them after the hand-over.
+async function runJob(path, opts) {
+  const start = await api(path, opts);
+  if (!start || !start.jobId) return start; // an older server answered directly
+  let blips = 0;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2500));
+    let r;
+    try { r = await api(`/api/jobs/${encodeURIComponent(start.jobId)}`, { hotel: false }); blips = 0; }
+    catch (e) {
+      if (e.status === 404 || /gone/.test(e.message) || ++blips > 12) throw e; // gone: the server restarted
+      continue;
+    }
+    if (r.status === "working") continue;
+    if (r.code >= 400) throw new Error((r.body && r.body.error) || "Something went wrong. Try again.");
+    return r.body;
+  }
+}
 const discardShots = (ids) => (ids.length ? api("/api/images/discard", { hotel: false, body: { ids } }).catch(() => {}) : Promise.resolve());
 
 // Reads the PDF, uploads its screenshots a few at a time, and returns the body for /api/author/pdf or /api/import/pdf.
@@ -1572,9 +1592,8 @@ async function impSend(kind, one) {
           if (f.size > I_MAX_BYTES()) throw new Error("That PDF is over 10 MB.");
           const prep = await prepPdf(f, { hotelId: target === "master" ? undefined : target, onStatus: (t) => impStatus(i, t, "") });
           impStatus(i, prep.isGuide ? `Sorting ${prep.shots} screenshots into steps…` : "Reading the text…", "");
-          try {
-            batch = await api("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, ...prep.body } });
-          } catch (e) { await discardShots(prep.ids); throw e; }
+          // the screenshots are the server's from here on: it keeps the ones the drafts use and deletes the rest, also when this fails
+          batch = await runJob("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, ...prep.body } });
           impStatus(i, prep.isGuide ? `Done · ${prep.shots} screenshot${prep.shots === 1 ? "" : "s"}` : "Done · read as text", "ok");
         } catch (e) {
           lastErr = e; problems.push(`${f.name}: ${e.message}`);
@@ -1810,15 +1829,13 @@ async function authorSend(text, imageIds, pdf, extra) {
   const mine = { role: "me", text, imgs: imageIds, pdf: pdf ? { name: pdf.name } : null };
   AU.thread.push(mine);
   AU.busy = true; AU.progress = pdf ? `Opening ${pdf.name}…` : ""; authorRender();
-  let shots = [];
   try {
     const body = { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined, ...(extra || {}) };
     if (pdf) {
       const prep = await prepPdf(pdf, { steps: true, onStatus: auProgress });
-      Object.assign(body, prep.body); shots = prep.ids; auProgress("Writing…");
+      Object.assign(body, prep.body); auProgress("Writing…");
     }
-    const r = await api(pdf ? "/api/author/pdf" : "/api/author", { body });
-    shots = [];
+    const r = pdf ? await runJob("/api/author/pdf", { body }) : await api("/api/author", { body });
     AU.draftId = r.draftId; AU.last = r;
     if (r.pdf) { mine.pdf = r.pdf; if (r.pdf.warnings && r.pdf.warnings.length) AU.thread.push({ role: "bot", text: r.pdf.warnings.join(" ") }); }
     if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options, multi: !!r.multi }); AU.cardOpen = false; AU.picks = new Set(); }
@@ -1826,7 +1843,6 @@ async function authorSend(text, imageIds, pdf, extra) {
     AU.busy = false; authorRender("last");
   } catch (e) {
     AU.busy = false;
-    discardShots(shots); // the PDF's screenshots were uploaded before the failure; the server also gives them back
     AU.thread.pop(); // take the unsent message back so it can be edited and retried
     if (/expired/i.test(e.message)) { AU.draftId = null; }
     AU.thread.push({ role: "err", text: e.message });

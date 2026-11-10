@@ -24,8 +24,19 @@ async function call(user, method, url, body) {
   const r = await fetch(base + url, { method, headers: { "content-type": "application/json", ...(jar[user] ? { cookie: jar[user] } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
   const sc = r.headers.get("set-cookie");
   if (sc) jar[user] = sc.split(";")[0];
-  return { status: r.status, body: await r.json().catch(() => null) };
+  const out = { status: r.status, body: await r.json().catch(() => null) };
+  // The PDF routes answer 202 + a job id and work in the background: wait for the job and hand back what the route would have said.
+  if (out.status === 202 && out.body && out.body.jobId) {
+    for (let i = 0; i < 200; i++) {
+      const j = await call(user, "GET", `/api/jobs/${out.body.jobId}`);
+      if (j.body && j.body.status === "done") return { status: j.body.code, body: j.body.body, jobId: out.body.jobId };
+      await new Promise((res) => setTimeout(res, 50));
+    }
+    throw new Error("job never finished");
+  }
+  return out;
 }
+const rawCall = async (user, method, url, body) => { const r = await fetch(base + url, { method, headers: { "content-type": "application/json", cookie: jar[user] }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, body: await r.json().catch(() => null) }; };
 const upload = async (user, n, hotel = HID) => (await call(user, "POST", `/api/images/batch?hotel=${hotel}`, { images: Array(n).fill(IMG) })).body.ids;
 const exists = async (ids) => (await pool.query("SELECT id FROM images WHERE id = ANY($1)", [ids])).rows.map((r) => r.id).sort();
 const step = (text, img, page = 1) => ({ text, page, img });
@@ -221,7 +232,6 @@ test("author/pdf: validated the same way, then the chat; discarding gives back t
   const fail = await upload("tpdf_mgr", 2);
   mock([{ error: "boom" }]);
   assert.strictEqual((await call("tpdf_mgr", "POST", `/api/author/pdf?hotel=${HID}`, turn(guide([step("Open", fail[0]), step("Two", fail[1])])))).status, 502);
-  for (let i = 0; i < 20 && (await exists(fail)).length; i++) await new Promise((r) => setTimeout(r, 50)); // the author route answers first, then gives the crops back
   assert.deepStrictEqual(await exists(fail), []);
 });
 
@@ -234,4 +244,68 @@ test("images/discard: gives back only this user's recent, unreferenced uploads",
   await pool.query("UPDATE images SET created_at = now() - interval '5 hours' WHERE id = $1", [theirs[0]]);
   assert.strictEqual((await call("tpdf_mgr2", "POST", "/api/images/discard", { ids: theirs })).body.removed, 0); // too old to count as a fresh crop
   assert.strictEqual((await call("tpdf_fd", "POST", "/api/images/discard", { ids: theirs })).status, 403);
+});
+
+test("import/pdf is a background job: the request returns at once, a slow model no longer matters, only the owner can ask about the job", { skip }, async () => {
+  const ids = await upload("tpdf_gm", 3);
+  mock([{ delayMs: 2500, reply: { matches: [], new: [{ title: "Slow model", category: CAT, steps: [{ t: "One", img: "@img:1" }, { t: "Two", img: "@img:2" }] }] } }]);
+  const t0 = Date.now();
+  const start = await rawCall("tpdf_gm", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", ids[0]), step("b", ids[1]), step("c", ids[2])]) });
+  assert.strictEqual(start.status, 202); assert.ok(Date.now() - t0 < 1500, "answered before the model did");
+  const jobId = start.body.jobId;
+  assert.deepStrictEqual((await rawCall("tpdf_gm", "GET", `/api/jobs/${jobId}`)).body, { status: "working" });
+  assert.deepStrictEqual(await exists(ids), [...ids].sort()); // while the model works nothing is deleted
+  assert.strictEqual((await rawCall("tpdf_mgr", "GET", `/api/jobs/${jobId}`)).status, 404); // someone else's job
+  assert.strictEqual((await rawCall("tpdf_gm", "GET", `/api/jobs/11111111-1111-4111-8111-111111111111`)).status, 404); // unknown (e.g. after a restart)
+  let done;
+  for (let i = 0; i < 100 && !done; i++) { await new Promise((r) => setTimeout(r, 100)); const j = (await rawCall("tpdf_gm", "GET", `/api/jobs/${jobId}`)).body; if (j.status === "done") done = j; }
+  assert.ok(done && done.code === 200, JSON.stringify(done));
+  assert.deepStrictEqual(done.body.new.find((x) => x.title === "Slow model").imgs, [ids[0], ids[1]]);
+  assert.deepStrictEqual(await exists(ids), [ids[0], ids[1]].sort()); // the unused crop went when the job finished
+  // a failure inside the job: the user reads the message, the job gave back its crops
+  const more = await upload("tpdf_gm", 2);
+  mock([{ delayMs: 300, error: "provider down" }]);
+  const bad = await call("tpdf_gm", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", more[0]), step("b", more[1])]) });
+  assert.strictEqual(bad.status, 400); assert.ok(bad.body.error);
+  assert.deepStrictEqual(await exists(more), []);
+  // validation problems and "no AI" are answered straight away and give the crops back too
+  const v = await upload("tpdf_gm", 2);
+  assert.strictEqual((await rawCall("tpdf_gm", "POST", "/api/import/pdf", { target: HID, name: "x.pdf", procedures: [{ title: "T", items: [{ text: "ok", img: v[0] }] }], file: {} })).status, 400);
+});
+
+test("save-time filter: a picture deleted before the batch is saved, or before 'Add as draft' / 'Use theirs', becomes no picture", { skip }, async () => {
+  const ids = await upload("tpdf_gm", 3);
+  mock([{ delayMs: 1500, reply: { matches: [], new: [{ title: "Vanishing picture", category: CAT, steps: [{ t: "One", img: "@img:1" }, { t: "Two", img: "@img:2" }, { t: "Three", img: "@img:3" }] }] } }]);
+  const start = await rawCall("tpdf_gm", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", ids[0]), step("b", ids[1]), step("c", ids[2])]) });
+  await pool.query("DELETE FROM images WHERE id = $1", [ids[1]]); // gone while the model works
+  let done;
+  for (let i = 0; i < 100 && !done; i++) { await new Promise((r) => setTimeout(r, 100)); const j = (await rawCall("tpdf_gm", "GET", `/api/jobs/${start.body.jobId}`)).body; if (j.status === "done") done = j; }
+  assert.strictEqual(done.code, 200);
+  const item = done.body.new.find((x) => x.title === "Vanishing picture");
+  assert.deepStrictEqual(item.imgs, [ids[0], null, ids[2]]);
+  // and later, between the import and "Add as draft"
+  await pool.query("DELETE FROM images WHERE id = $1", [ids[2]]);
+  const add = await call("tpdf_gm", "POST", `/api/import/${done.body.id}/act`, { group: "new", action: "add", index: done.body.new.findIndex((x) => x.title === "Vanishing picture"), hotel: HID });
+  assert.strictEqual(add.status, 200, JSON.stringify(add.body));
+  const sopId = add.body.new.find((x) => x.title === "Vanishing picture").sop_id;
+  const sop = (await pool.query("SELECT steps FROM sops WHERE hotel_id=$1 AND id=$2", [HID, sopId])).rows[0];
+  assert.deepStrictEqual(sop.steps.map((x) => x.img), [ids[0], null, null]);
+  // "Use theirs" on an existing SOP
+  await pool.query("INSERT INTO sops (hotel_id, id, category, title, steps, status) VALUES ($1,'TP-95',$2,'Existing',$3,'draft')", [HID, CAT, JSON.stringify([{ t: "old", img: null }])]);
+  const [a, b] = await upload("tpdf_gm", 2);
+  mock([{ matches: [{ sop_id: "TP-95", title: "Existing", steps: [{ t: "New one", img: "@img:1" }, { t: "New two", img: "@img:2" }], difference: "pictures" }], new: [] }]);
+  const m = await call("tpdf_gm", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", a), step("b", b)]) });
+  assert.strictEqual(m.status, 200, JSON.stringify(m.body));
+  await pool.query("DELETE FROM images WHERE id = $1", [b]);
+  const use = await call("tpdf_gm", "POST", `/api/import/${m.body.id}/act`, { group: "matches", action: "use", index: m.body.matches.findIndex((x) => x.sop_id === "TP-95") });
+  assert.strictEqual(use.status, 200, JSON.stringify(use.body));
+  assert.deepStrictEqual((await pool.query("SELECT steps FROM sops WHERE hotel_id=$1 AND id='TP-95'", [HID])).rows[0].steps.map((x) => x.img), [a, null]);
+});
+
+test("images/discard keeps pictures that an old version of a SOP still shows", { skip }, async () => {
+  const [p] = await upload("tpdf_mgr", 1);
+  await pool.query("INSERT INTO sop_history (hotel_id, sop_id, version, snapshot) VALUES ($1,'TP-93',1,$2)", [HID, JSON.stringify({ id: "TP-93", steps: [{ t: "x", img: p }] })]);
+  const r = await call("tpdf_mgr", "POST", "/api/images/discard", { ids: [p] });
+  assert.strictEqual(r.body.removed, 0); assert.deepStrictEqual(await exists([p]), [p]);
+  await pool.query("DELETE FROM sop_history WHERE sop_id='TP-93' AND hotel_id=$1", [HID]);
 });

@@ -20,7 +20,7 @@ const mockFile = () => (process.env.NODE_ENV !== "production" && process.env.AI_
 const mockEnabled = () => !!mockFile();
 // The file may hold a JSON array: its entries (strings, or {"error": "msg"} to simulate a provider failure) are
 // returned one per call, in order, and the list starts over whenever the file's content changes. Past the end it fails.
-const mockState = { content: null, i: 0 };
+const mockState = { content: null, i: 0, delay: 0 };
 function mockNext() {
   const content = fs.readFileSync(mockFile(), "utf8");
   if (mockState.content !== content) { mockState.content = content; mockState.i = 0; }
@@ -28,7 +28,8 @@ function mockNext() {
   if (content.trim().startsWith("[")) { try { const a = JSON.parse(content); if (Array.isArray(a)) arr = a; } catch { /* plain text */ } }
   if (!arr) return content;
   if (mockState.i >= arr.length) throw new Error("mock AI: no more scripted responses");
-  const v = arr[mockState.i++];
+  let v = arr[mockState.i++];
+  if (v && typeof v === "object" && v.delayMs) { mockState.delay = +v.delayMs; v = v.reply; } // {"delayMs": N, "reply": ...}: answer after N ms (tests of slow models)
   if (v && typeof v === "object" && v.error) throw new Error(String(v.error));
   return typeof v === "string" ? v : JSON.stringify(v);
 }
@@ -116,7 +117,7 @@ const MIN_OUTPUT_TOKENS = 4000;
 
 async function complete(cfg, system, user, opts = {}) {
   // Test hook only: "@img:N" in a scripted reply becomes the Nth "[img:ID]" of the prompt (ids from a PDF are made at request time).
-  if (mockEnabled()) { const ids = [...String(user).matchAll(/\[img:([0-9a-f-]{36})\]/g)].map((m) => m[1]); return mockNext().replace(/@img:(\d+)/g, (m, n) => ids[+n - 1] || ""); }
+  if (mockEnabled()) { const ids = [...String(user).matchAll(/\[img:([0-9a-f-]{36})\]/g)].map((m) => m[1]); const txt = mockNext(); if (mockState.delay) { const d = mockState.delay; mockState.delay = 0; await new Promise((r) => setTimeout(r, d)); } return txt.replace(/@img:(\d+)/g, (m, n) => ids[+n - 1] || ""); }
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
   const req = buildRequest(cfg, system, user, opts);
   return req.read(await post(req.url, req.headers, req.body, timeoutMs));

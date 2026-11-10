@@ -394,6 +394,48 @@ app.post(
   })
 );
 
+// Image ids from this list that still exist (a draft must never point at a picture that was deleted).
+async function existingImages(ids, c) {
+  ids = [...new Set((ids || []).filter((x) => /^[0-9a-f-]{36}$/i.test(String(x))))];
+  if (!ids.length) return new Set();
+  return new Set((await (c || { query: q }).query("SELECT id FROM images WHERE id = ANY($1)", [ids])).rows.map((r) => r.id));
+}
+// A step picture that no longer exists means no picture. Works on an import item ({imgs:[id|null]}), in place.
+async function dropMissingImgs(items, c) {
+  const list = (Array.isArray(items) ? items : [items]).filter((x) => x && Array.isArray(x.imgs));
+  const have = await existingImages(list.flatMap((x) => x.imgs), c);
+  for (const x of list) {
+    x.imgs = x.imgs.map((id) => (id && have.has(id) ? id : null));
+    if (!x.imgs.some(Boolean)) delete x.imgs;
+  }
+}
+
+// ---------- background jobs ----------
+// The AI step of a PDF can take longer than a proxy waits for one request (about 100 s), so those routes answer at once with a job id and the
+// work goes on here; the browser asks /api/jobs/:id until it is done. Jobs live in memory: after a restart the id is unknown, which the
+// browser shows as a clear failure for that file. A job cleans up its own screenshots (the browser never deletes them once handed over).
+const jobs = new Map();
+const JOB_KEEP_MS = 15 * 60 * 1000;
+function startJob(userId, work) {
+  const job = { id: crypto.randomUUID(), userId, status: "working", at: Date.now() };
+  jobs.set(job.id, job);
+  (async () => {
+    try { const out = await work(); job.code = out.code; job.body = out.body; }
+    catch (e) { console.error("Job failed:", e); job.code = 500; job.body = { error: "Something went wrong on our side. Try again." }; }
+    job.status = "done"; job.at = Date.now();
+  })();
+  return job.id;
+}
+setInterval(() => { for (const [id, j] of jobs) if (Date.now() - j.at > JOB_KEEP_MS) jobs.delete(id); }, 60 * 1000).unref();
+app.get("/api/jobs/:id", auth(), (req, res) => {
+  const j = jobs.get(String(req.params.id));
+  if (!j || j.userId !== req.user.id) return bad(res, 404, "That job is gone (the server restarted). Try the file again.");
+  if (j.status !== "done") return res.json({ status: "working" });
+  res.json({ status: "done", code: j.code, body: j.body });
+});
+// A stand-in for the response object, so a route's handler can run in a job and its answer be collected.
+const captureRes = () => ({ code: 200, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } });
+
 // Screenshots cut from a PDF are ordinary images. The browser uploads them BEFORE it calls the PDF routes, so those routes must
 // (a) only accept ids that are recent uploads by this user into this hotel, and (b) give back the ones nothing ends up using.
 const CROP_WINDOW = "3 hours";
@@ -402,12 +444,13 @@ async function ownedCrops(ids, hotelId, userId) {
   const { rows } = await q(`SELECT id FROM images WHERE id = ANY($1) AND hotel_id=$2 AND created_by=$3 AND created_at > now() - interval '${CROP_WINDOW}'`, [ids, hotelId, userId]);
   return new Set(rows.map((r) => r.id));
 }
-// Which of these image ids appear in a SOP, a master SOP, an author draft or an import batch under review? (ids are hex and dashes: safe in a pattern)
+// Which of these image ids appear in a SOP, a master SOP, an old version of one, an author draft or an import batch under review? (ids are hex and dashes: safe in a pattern)
 async function referencedImages(ids) {
   if (!ids.length) return new Set();
   const { rows } = await q(
     `SELECT DISTINCT m[1] AS id FROM (
        SELECT steps::text t FROM sops UNION ALL SELECT steps::text FROM master_sops UNION ALL SELECT draft::text FROM sop_drafts
+       UNION ALL SELECT snapshot::text FROM sop_history UNION ALL SELECT snapshot::text FROM master_history
        UNION ALL SELECT result::text FROM imports WHERE status <> 'discarded' AND created_at > now() - interval '30 days') x,
      LATERAL regexp_matches(x.t, $1, 'g') m`,
     [`(${ids.join("|")})`]
@@ -956,10 +999,15 @@ async function authorCatalog(target, hotelId) {
 const pdfLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many PDFs. Wait a few minutes and try again." } });
 
 // state.crops: the screenshots this request was handed; they are given back unless the request finishes and the draft keeps them.
+// A PDF turn runs as a background job (the AI can take longer than a proxy waits); the browser polls /api/jobs/:id.
 const authorHandler = wrap(async (req, res) => {
-  const state = { crops: [], ok: false };
-  try { await authorRun(req, res, state); }
-  finally { if (!state.ok && state.crops.length) await dropCrops(state.crops, req.user.id); }
+  const run = async (out) => {
+    const state = { crops: [], ok: false };
+    try { await authorRun(req, out, state); }
+    finally { if (!state.ok && state.crops.length) await dropCrops(state.crops, req.user.id); }
+  };
+  if (req.path !== "/api/author/pdf") return run(res);
+  res.status(202).json({ jobId: startJob(req.user.id, async () => { const cap = captureRes(); await run(cap); return { code: cap.code, body: cap.body }; }) });
 });
 
 async function authorRun(req, res, state) {
@@ -2429,60 +2477,77 @@ app.post(
   wrap(async (req, res) => {
     let uploaded = [];
     try {
-      const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
-      if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings. You can still import with the spreadsheet template.", noAi: true });
       if (req.body.file) throw new imp.ImportError("This page is out of date. Reload it, then choose the PDFs again.");
       let sub0;
       try { sub0 = pdfsteps.cleanSubmission(req.body); } catch (e) { if (e instanceof pdfsteps.StepsError) throw new imp.ImportError(`${String(req.body.name || "That PDF").slice(0, 120)}: ${e.message}`); throw e; }
-      const name = sub0.name;
       const imgHotel = req.target || req.user.hotels[0];
       const sub = pdfsteps.applyOwned(sub0, await ownedCrops(sub0.imgIds, imgHotel, req.user.id));
       uploaded = sub.imgIds; // only pictures this user just uploaded into this hotel are ever given back
-      const complete = (system, user, opts) => ai.complete(cfg, system, user, opts);
-      const ctx = await importCtx(req.target);
-      let result, meta = { warnings: [] };
-      if (sub.procedures.length && pdfsteps.isStepGuide(sub)) {
-        const listing = pdfsteps.listing(sub).slice(0, 40000);
-        result = await imp.analyzePdf(complete, listing, sub.imgIds, ctx);
-        const used = new Set([...result.matches, ...result.new].flatMap((x) => x.imgs || []).filter(Boolean));
-        meta.shots = used.size;
-        meta.warnings = sub.warnings.map((w) => `${name}: ${w}`);
-      } else {
-        // Not a step guide: plain text, read by the browser (or the steps written out as text if that is all it sent).
-        const { text, truncated } = await imp.extractAll([{ name, text: sub.text || pdfsteps.guideText(sub) }]);
-        if (!text) throw new imp.ImportError(`We couldn't find any text in ${name}.`);
-        const a = await imp.analyzeText(complete, text, ctx);
-        result = a.result;
-        if (truncated) meta.warnings.push(`${name}: longer than we can read at once, so only the first part was used.`);
-        if (a.failedParts) meta.warnings.push(`${name}: ${a.failedParts} of ${a.parts} parts couldn't be read.`);
-        meta.warnings.push(`${name}: no step-by-step screenshots found, read as plain text.`);
-      }
-      if (!result.matches.length && !result.new.length && !(result.details || []).length) throw new imp.ImportError(`We didn't find any procedures in ${name}.`);
-
-      let out = null;
+      const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
+      if (!cfg) { await dropCrops(uploaded, req.user.id); return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings. You can still import with the spreadsheet template.", noAi: true }); }
       const batchId = Number.isInteger(+req.body.batchId) && req.body.batchId ? +req.body.batchId : null;
-      if (batchId) {
-        out = await tx(async (c) => {
-          const row = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [batchId])).rows[0];
-          if (!row || !canUseBatch(req.user, row) || row.status === "discarded" || (row.hotel_id || null) !== (req.target || null)) return null;
-          const r = row.result;
-          mergeIntoResult(r, withStates(result));
-          r.meta = { ...(r.meta || {}), pdfShots: ((r.meta && r.meta.pdfShots) || 0) + (meta.shots || 0), warnings: [...((r.meta && r.meta.warnings) || []), ...meta.warnings] };
-          await c.query("UPDATE imports SET result=$2, status='review', filenames = array_append(filenames, $3) WHERE id=$1", [row.id, JSON.stringify(r), name]);
-          return (await c.query("SELECT * FROM imports WHERE id=$1", [row.id])).rows[0];
-        });
-      }
-      if (!out) out = await newImportRow(req.user, req.target, "ai", [name], { ...withStates(result), meta: { pdfShots: meta.shots || 0, warnings: meta.warnings } });
-      // The pictures were uploaded before the AI read the guide: now give back the ones no draft or match uses (the saved batch holds the rest).
-      await dropCrops(uploaded, req.user.id);
-      uploaded = [];
-      res.json(await batchView(out));
+      const ctx0 = { user: req.user, target: req.target, sub, cfg, batchId };
+      // The AI step and the save run in the background; the browser polls /api/jobs/:id. From here on the job owns the screenshots.
+      res.status(202).json({ jobId: startJob(req.user.id, async () => {
+        try { return { code: 200, body: await importPdfJob(ctx0) }; }
+        catch (e) {
+          await dropCrops(uploaded, req.user.id);
+          if (e instanceof imp.ImportError) return { code: 400, body: { error: e.message } };
+          throw e;
+        }
+      }) });
     } catch (e) {
       if (uploaded.length) await dropCrops(uploaded, req.user.id);
       importFail(res, e);
     }
   })
 );
+
+// The AI step and the save of one PDF. Returns the batch view; throws ImportError for anything the user should read.
+async function importPdfJob({ user, target, sub, cfg, batchId }) {
+  const name = sub.name;
+  const complete = (system, u, opts) => ai.complete(cfg, system, u, opts);
+  const ctx = await importCtx(target);
+  let result, meta = { warnings: [] };
+  if (sub.procedures.length && pdfsteps.isStepGuide(sub)) {
+    const listing = pdfsteps.listing(sub).slice(0, 40000);
+    result = await imp.analyzePdf(complete, listing, sub.imgIds, ctx);
+    const used = new Set([...result.matches, ...result.new].flatMap((x) => x.imgs || []).filter(Boolean));
+    meta.shots = used.size;
+    meta.warnings = sub.warnings.map((w) => `${name}: ${w}`);
+  } else {
+    // Not a step guide: plain text, read by the browser (or the steps written out as text if that is all it sent).
+    const { text, truncated } = await imp.extractAll([{ name, text: sub.text || pdfsteps.guideText(sub) }]);
+    if (!text) throw new imp.ImportError(`We couldn't find any text in ${name}.`);
+    const a = await imp.analyzeText(complete, text, ctx);
+    result = a.result;
+    if (truncated) meta.warnings.push(`${name}: longer than we can read at once, so only the first part was used.`);
+    if (a.failedParts) meta.warnings.push(`${name}: ${a.failedParts} of ${a.parts} parts couldn't be read.`);
+    meta.warnings.push(`${name}: no step-by-step screenshots found, read as plain text.`);
+  }
+  if (!result.matches.length && !result.new.length && !(result.details || []).length) throw new imp.ImportError(`We didn't find any procedures in ${name}.`);
+
+  // Belt and braces: a picture that has vanished since the upload means no picture, never a broken one.
+  await dropMissingImgs([...result.matches, ...result.new]);
+  const withStatesR = withStates(result);
+  let out = null;
+  if (batchId) {
+    out = await tx(async (c) => {
+      const row = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [batchId])).rows[0];
+      if (!row || !canUseBatch(user, row) || row.status === "discarded" || (row.hotel_id || null) !== (target || null)) return null;
+      const r = row.result;
+      mergeIntoResult(r, withStatesR);
+      r.meta = { ...(r.meta || {}), pdfShots: ((r.meta && r.meta.pdfShots) || 0) + (meta.shots || 0), warnings: [...((r.meta && r.meta.warnings) || []), ...meta.warnings] };
+      await dropMissingImgs([...r.matches, ...r.new], c);
+      await c.query("UPDATE imports SET result=$2, status='review', filenames = array_append(filenames, $3) WHERE id=$1", [row.id, JSON.stringify(r), name]);
+      return (await c.query("SELECT * FROM imports WHERE id=$1", [row.id])).rows[0];
+    });
+  }
+  if (!out) out = await newImportRow(user, target, "ai", [name], { ...withStatesR, meta: { pdfShots: meta.shots || 0, warnings: meta.warnings } });
+  // The pictures were uploaded before the AI read the guide: now give back the ones no draft or match uses (the saved batch holds the rest).
+  await dropCrops(sub.imgIds, user.id);
+  return batchView(out);
+}
 
 app.post(
   "/api/import/sheet",
@@ -2628,6 +2693,7 @@ app.post(
 
       if (group === "new" && action === "addAll") {
         let added = 0, needCat = 0;
+        await dropMissingImgs(list.filter((x) => !x.state), c);
         for (const item of list) {
           if (item.state) continue;
           const cat = allowedCat(item.category);
@@ -2644,6 +2710,7 @@ app.post(
       const item = list[idx];
       if (!item) return { err: [404, "That item is gone."] };
       if (item.state) return { err: [400, "That one is already handled."] };
+      await dropMissingImgs(item, c); // a picture deleted since the import means no picture
       let note = "";
       if (action === "skip") item.state = "skipped";
       else if (group === "matches" && action === "keep") { item.state = "kept"; note = "Kept ours"; }
