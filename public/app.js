@@ -166,7 +166,6 @@ $("signOut").onclick = signOut;
 $("setOut").onclick = signOut;
 $("changePw").onclick = () => { closeMenus(); STATE.me.must_change_pw = true; showScreen(); $("pw-cur").focus(); };
 $("setPw").onclick = () => $("changePw").onclick();
-$("dashChat").onclick = () => go("chat");
 $("dashNew").onclick = () => $("newSop").click();
 
 /* ---------- app shell ---------- */
