@@ -1050,3 +1050,11 @@ body.wzon #setup:not([hidden]) ~ * .toast,body.wzon .toast{bottom:calc(96px + en
 .stepThumb{display:block;margin:4px 0 6px;max-width:100%;width:240px;border-radius:8px;border:.5px solid var(--sep);cursor:zoom-in}
 .thumbStrip{display:flex;gap:6px;overflow-x:auto;padding:2px 0 6px}
 .thumbStrip img{flex:none;height:56px;width:auto;border-radius:6px;border:.5px solid var(--sep);cursor:zoom-in}
+
+/* Printing (desk card, team sheet): none of the app's navigation, and the page uses the full width. */
+@media print{
+  body.shell .side,body.shell .tabbar,.side,.tabbar,.moremenu,.menu,.orb{display:none!important}
+  body.shell #app,#app{padding-left:0!important;padding-bottom:0!important}
+  body.shell main{padding-bottom:0!important}
+  body.shell .col{max-width:none!important}
+}
