@@ -1461,7 +1461,7 @@ app.post(
   })
 );
 
-// ---------- setup, hotel home and SOP switches (GM and up) ----------
+// ---------- setup and SOP switches (GM and up) ----------
 const NOT_OFFERED = "not offered at this hotel";
 // Yes/no setup questions that only fill in hotel details (they never switch SOPs on or off). Their wording comes from setup_defaults.
 const DETAIL_QS = ["cash", "rollaways", "pack_and_plays", "connecting_rooms"];
@@ -1482,6 +1482,8 @@ const DETAIL_SECTION = {};
 
 // The plan's rule: a master SOP is suggested ON when (applies all, or the hotel is Hilton) and (no amenity needed, or the hotel has it).
 const fitsBrand = (m, brand) => m.applies === "all" || brand === "hilton";
+// Where a master SOP can be at all: right brand, and not an amenity the hotel said it doesn't have. (Unanswered amenities still count.)
+const appliesAt = (m, brand, amen) => fitsBrand(m, brand) && (!m.requires || amen[m.requires] !== false);
 const suggestedOn = (m, brand, amen) => fitsBrand(m, brand) && (!m.requires || !!amen[m.requires]);
 // Suggestion plus the GM's own switches (answers.selection = {on:[ids], off:[ids]}). Hilton-only SOPs never turn on at an independent hotel.
 function selectedIds(masters, brand, amen, sel) {
@@ -1899,7 +1901,7 @@ app.put(
   wrap(async (req, res) => {
     const out = await tx(async (c) => {
       const h = (await c.query("SELECT id, brand, system, setup, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
-      if (h.setup === "live") return { err: "This hotel is already live. Change details from Hotel home." };
+      if (h.setup === "live") return { err: "This hotel is already live. Change details from the Dashboard." };
       const old = readSetup(h);
       const given = req.body.answers && typeof req.body.answers === "object" ? req.body.answers : {};
       const amen = { ...old.amen };
@@ -1953,7 +1955,7 @@ app.put(
   hotel,
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
-    if (h.setup === "live") return bad(res, 400, "This hotel is already live. Use the SOP switches on Hotel home.");
+    if (h.setup === "live") return bad(res, 400, "This hotel is already live. Use the SOP switches in Library.");
     const valid = new Set((await q("SELECT id FROM master_sops WHERE status='live'")).rows.map((r) => r.id));
     const pick = (x) => [...new Set((Array.isArray(x) ? x : []).map(String).filter((id) => valid.has(id)))];
     const on = pick(req.body.on), onSet = new Set(on);
@@ -2025,7 +2027,26 @@ app.post(
   })
 );
 
-// Switch master SOPs on or off at a live hotel. A master SOP the hotel doesn't have yet is added on demand.
+// Switch master SOPs on or off at a hotel. A master SOP the hotel doesn't have yet is added on demand (live when switching on, an Off copy otherwise).
+async function toggleMasters(hotelId, ids, on, userId) {
+  return tx(async (c) => {
+    const h = (await c.query("SELECT id, brand, system FROM hotels WHERE id=$1 FOR UPDATE", [hotelId])).rows[0];
+    const masters = (await c.query("SELECT * FROM master_sops WHERE id = ANY($1) AND status='live'", [ids])).rows;
+    const mine = new Map((await c.query("SELECT id, master_id FROM sops WHERE hotel_id=$1 AND id = ANY($2)", [hotelId, ids])).rows.map((r) => [r.id, r.master_id]));
+    let changed = 0, skipped = 0;
+    const missing = [];
+    for (const m of masters) {
+      if (on && !fitsBrand(m, h.brand)) { skipped++; continue; } // Hilton-only SOPs stay off at an independent hotel
+      if (!mine.has(m.id)) { missing.push(m); continue; }
+      if (mine.get(m.id) !== m.id) { skipped++; continue; } // a hotel-only SOP that reuses the id
+      const r = await c.query("UPDATE sops SET status=$3, updated_by=$4 WHERE hotel_id=$1 AND id=$2 AND status <> $3", [hotelId, m.id, on ? "live" : "off", userId]);
+      changed += r.rowCount;
+    }
+    for (const m of missing) await ensureCategory(c, hotelId, m.category);
+    if (missing.length) changed += await insertMasterCopies(c, hotelId, h.system, missing, () => (on ? "live" : "off"), userId);
+    return { changed, skipped };
+  });
+}
 app.post(
   "/api/hotel/sops-toggle",
   auth("GM"),
@@ -2034,24 +2055,7 @@ app.post(
     const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String))].slice(0, 400);
     const on = req.body.on === true;
     if (!ids.length) return bad(res, 400, "Pick at least one SOP.");
-    const out = await tx(async (c) => {
-      const h = (await c.query("SELECT id, brand, system FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
-      const masters = (await c.query("SELECT * FROM master_sops WHERE id = ANY($1) AND status='live'", [ids])).rows;
-      const mine = new Map((await c.query("SELECT id, master_id FROM sops WHERE hotel_id=$1 AND id = ANY($2)", [req.hotel, ids])).rows.map((r) => [r.id, r.master_id]));
-      let changed = 0, skipped = 0;
-      const missing = [];
-      for (const m of masters) {
-        if (on && !fitsBrand(m, h.brand)) { skipped++; continue; } // Hilton-only SOPs stay off at an independent hotel
-        if (!mine.has(m.id)) { missing.push(m); continue; }
-        if (mine.get(m.id) !== m.id) { skipped++; continue; } // a hotel-only SOP that reuses the id
-        const r = await c.query("UPDATE sops SET status=$3, updated_by=$4 WHERE hotel_id=$1 AND id=$2 AND status <> $3", [req.hotel, m.id, on ? "live" : "off", req.user.id]);
-        changed += r.rowCount;
-      }
-      for (const m of missing) await ensureCategory(c, req.hotel, m.category);
-      if (missing.length) changed += await insertMasterCopies(c, req.hotel, h.system, missing, () => (on ? "live" : "off"), req.user.id);
-      return { changed, skipped };
-    });
-    res.json(out);
+    res.json(await toggleMasters(req.hotel, ids, on, req.user.id));
   })
 );
 
@@ -2065,7 +2069,7 @@ async function freshMasters(hotelId) {
     [hotelId]
   );
   return rows
-    .filter((m) => fitsBrand(m, h.brand) && (!m.requires || amen[m.requires] !== false))
+    .filter((m) => appliesAt(m, h.brand, amen))
     .map((m) => ({ id: m.id, title: m.title, cat: m.category, version: m.version, updated: m.updated_at }));
 }
 
@@ -2094,14 +2098,14 @@ for (const [verb, status] of [["add", "live"], ["skip", "off"]]) {
   );
 }
 
-// Everything Hotel home shows in one call.
+// Everything the Dashboard's Needs you card shows in one call.
 app.get(
   "/api/home",
   auth("GM"),
   hotel,
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
-    const [updates, fresh, counts, defs, cc] = await Promise.all([
+    const [updates, fresh, counts, defs, cc, imps, texts] = await Promise.all([
       pendingUpdates(req.hotel),
       freshMasters(req.hotel),
       q(
@@ -2112,10 +2116,20 @@ app.get(
       ),
       detailDefs(),
       q("SELECT count(*)::int AS n FROM contacts WHERE hotel_id=$1", [req.hotel]),
+      q("SELECT id, filenames, result FROM imports WHERE hotel_id=$1 AND status='review' ORDER BY id DESC", [req.hotel]),
+      q("SELECT title, steps, script, flag FROM sops WHERE hotel_id=$1 AND status='live'", [req.hotel]),
     ]);
     const det = h.details || {};
     const filled = defs.filter((d) => String(det[d.key] ?? "").trim()).length;
-    res.json({ updates, fresh, counts: counts.rows[0], details: { filled, total: defs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
+    // What waits on the GM besides updates: drafts, import batches with undecided matches or new SOPs, and blanks the live SOPs use.
+    const undecided = (r) => ["matches", "new"].reduce((n, g) => n + ((r || {})[g] || []).filter((x) => !x.state).length, 0);
+    const imports = imps.rows.map((r) => ({ id: r.id, open: undecided(r.result), files: r.filenames || [] })).filter((r) => r.open > 0);
+    const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
+    const used = new Set();
+    for (const s of texts.rows) for (const mt of JSON.stringify([s.title, s.steps, s.script, s.flag]).matchAll(/\{([^{}"\\]+)\}/g)) { const k = byKey.get(tokKey(mt[1])); if (k) used.add(k); }
+    const blank = (k) => { const v = String(det[Object.keys(det).find((x) => tokKey(x) === tokKey(k))] ?? "").trim(); return !v || /\[FILL/.test(v); };
+    const missing = defs.filter((d) => used.has(d.key) && blank(d.key)).map((d) => d.key);
+    res.json({ updates, fresh, counts: counts.rows[0], drafts: counts.rows[0].draft, imports, missing, details: { filled, total: defs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
   })
 );
 
@@ -2186,6 +2200,71 @@ app.put(
     if ((await q("SELECT 1 FROM hotels WHERE lower(name)=lower($1) AND id<>$2", [name, h.id])).rows.length) return bad(res, 400, "A hotel with that name already exists.");
     await q("UPDATE hotels SET name=$2, brand=$3, system=$4 WHERE id=$1", [h.id, name, brand, system]);
     res.json({ id: h.id, name, brand, system, setup: h.setup, ready: h.ready });
+  })
+);
+
+// A column heading for the chart: "Hampton Inn Overland Park" -> "Hampton OP", "Hotel Lotus Merriam" -> "Lotus Merriam".
+const matrixShort = (name) => {
+  let w = String(name || "").replace(/^hotel /i, "").replace(/\b(inn|suites?|&)\b/gi, " ").split(/\s+/).filter(Boolean);
+  if (w.join(" ").length > 14 && w.length > 1) w = [w[0], w.slice(1).map((x) => x[0].toUpperCase()).join("")];
+  return w.join(" ") || String(name || "Hotel");
+};
+// The whole master library against every hotel in two queries: one cell per SOP and hotel.
+// States (the first that applies wins): na (doesn't apply there), hk (HotelKey wording awaits review), upd (copy is behind and not kept),
+// own (the hotel keeps its own wording), on / off (copy is live / off, draft or missing). lv is "1" where the hotel's copy is live.
+app.get(
+  "/api/owner/matrix",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const [hs, ms, cs, cats] = await Promise.all([
+      q("SELECT id, name, brand, system, setup, ready, answers FROM hotels ORDER BY name"),
+      q("SELECT id, category, title, status, applies, requires, hk_status, version, keywords FROM master_sops ORDER BY id"),
+      q("SELECT hotel_id, master_id, status, master_version, kept FROM sops WHERE master_id IS NOT NULL AND master_id = id"),
+      q("SELECT name FROM master_categories ORDER BY sort"),
+    ]);
+    const copy = new Map(cs.rows.map((r) => [r.hotel_id + "\u0000" + r.master_id, r]));
+    const hotels = hs.rows.map((h) => ({ ...h, amen: readSetup(h).amen }));
+    const masters = ms.rows.map((m) => {
+      const st = [];
+      let lv = "";
+      for (const h of hotels) {
+        const c = copy.get(h.id + "\u0000" + m.id);
+        const live = !!c && c.status === "live";
+        lv += live ? "1" : "0";
+        st.push(
+          !appliesAt(m, h.brand, h.amen) ? "na"
+            : h.system === "hotelkey" && m.hk_status === "draft" ? "hk"
+            : c && c.master_version < m.version && !c.kept ? "upd"
+            : c && c.kept ? "own"
+            : live ? "on" : "off"
+        );
+      }
+      return { id: m.id, t: m.title, c: m.category, v: m.version, s: m.status, hk: m.hk_status, ap: m.applies, rq: m.requires, kw: m.keywords, st, lv };
+    });
+    res.json({
+      hotels: hotels.map((h) => ({ id: h.id, name: h.name, short: matrixShort(h.name), brand: h.brand, system: h.system, live: h.setup === "live" })),
+      cats: cats.rows.map((c) => c.name),
+      masters,
+    });
+  })
+);
+
+// Owner: switch one master SOP on or off at one hotel, from the Portfolio chart. Same code as the GM's switches, so a missing copy is added from the master.
+app.put(
+  "/api/owner/hotels/:hotelId/sops/:masterId",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    if (typeof req.body.on !== "boolean") return bad(res, 400, "Say whether to turn it on or off.");
+    const h = (await q("SELECT id, name, brand, setup FROM hotels WHERE id=$1", [req.params.hotelId])).rows[0];
+    if (!h) return bad(res, 404, "That hotel no longer exists.");
+    if (h.setup !== "live") return bad(res, 400, `${h.name} isn't live yet. Its GM picks the SOPs during setup.`);
+    const m = (await q("SELECT id, status, applies FROM master_sops WHERE id=$1", [req.params.masterId])).rows[0];
+    if (!m) return bad(res, 404, "That master SOP no longer exists.");
+    if (m.status !== "live") return bad(res, 400, "That master SOP is a draft. Publish it first.");
+    if (req.body.on && !fitsBrand(m, h.brand)) return bad(res, 400, "That SOP is for Hilton hotels only.");
+    const out = await toggleMasters(h.id, [m.id], req.body.on, req.user.id);
+    if (!out.changed && out.skipped) return bad(res, 400, "That hotel has its own SOP with the same number, so it can't be switched here.");
+    res.json({ ok: true, on: req.body.on, ...out });
   })
 );
 

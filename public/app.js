@@ -67,7 +67,7 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- state ---------- */
-const STATE = { me: null, hotels: [], hotel: null, convos: [], cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null }, home: null };
+const STATE = { me: null, hotels: [], hotel: null, convos: [], cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null, matrix: null } };
 const sop = (id) => STATE.sops.find((s) => s.id === id);
 const RANKS = { "Front Desk": 0, Manager: 1, GM: 2, Owner: 3 };
 const canManage = () => STATE.me && RANKS[STATE.me.role] >= 1;
@@ -185,7 +185,7 @@ async function enterApp() {
   // Managers get the sidebar / tab bar (dash.js) instead of the Front Desk | Manager switch and the gear buttons.
   $("modeSeg").hidden = true; $("appTitle").hidden = false;
   $("gearBtn").hidden = true; $("ownerBtn").hidden = true;
-  tab = canManage() ? "dashboard" : "sops"; STATE.home = null;
+  tab = canManage() ? "dashboard" : "sops";
   await loadHotel();
   if (!canManage() && location.hash === "#admin") location.hash = "chat";
   if (!isOwner() && location.hash === "#owner") location.hash = "chat";
@@ -219,7 +219,7 @@ function renderPropMenu() {
 }
 
 async function selectHotel(id, target) {
-  STATE.hotel = id; STATE.home = null;
+  STATE.hotel = id;
   if (hotelObj(id).ready) { try { localStorage.setItem("asklotus.hotel", id); } catch {} }
   newChat(true); renderPropMenu();
   try { await loadHotel(); } catch (e) { fail(e); }
@@ -250,13 +250,13 @@ function route() {
   if (!STATE.me || STATE.me.must_change_pw) return;
   let v = "chat";
   const ready = hotelObj().ready, hash = location.hash;
-  if (hash === "#owner" && isOwner()) v = "owner";
+  if (hash === "#owner" && isOwner()) { ownerTab = "portfolio"; v = "owner"; }
   else if (hash === "#import" && isOwner()) { ownerTab = "import"; v = "owner"; } // the Owner's Import lives under the Owner tabs
   else if (hash === "#import" && isGM()) v = "import";
   else if (isGM() && !ready && hash !== "#admin") v = "setup"; // a hotel that isn't live opens its setup
   else if (isGM() && ready && (hash === "#manage" || hash === "#details" || hash === "#kit")) v = "setup";
   else if (hash === "#admin" && canManage()) v = "admin";
-  if (v === mode) { if (v === "setup") renderSetup(false); return; }
+  if (v === mode) { if (v === "setup") renderSetup(false); else if (v === "owner") { renderOwner(); Glass.renderNav(); } return; }
   if (v !== "setup") document.body.classList.remove("wzon");
   const prev = mode; mode = v; modeSeg(v, !!prev); $("composer").hidden = v !== "chat"; document.body.dataset.mode = v;
   const inEl = $(v); MODE_ORDER.forEach((m) => { if (m !== v) $(m).hidden = true; }); inEl.hidden = false;
@@ -465,9 +465,9 @@ async function ask(text) {
 $("ask").addEventListener("submit", (e) => { e.preventDefault(); ask($("askInput").value); $("askInput").value = ""; });
 
 /* ---------- admin ---------- */
-let tab = "sops", cat = "", empFilter = null;
-const TABS = [["dashboard", "Dashboard"], ["home", "Hotel home"], ["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
-const TAB_TITLE = { dashboard: "Dashboard", home: "Hotel home", sops: "Library", gaps: "Unanswered", activity: "Activity", team: "Team", contacts: "Contacts", settings: "Settings" };
+let tab = "sops", cat = "", empFilter = null, libDraft = false;
+const TABS = [["dashboard", "Dashboard"], ["sops", "Library"], ["gaps", "Unanswered"], ["activity", "Activity"], ["team", "Team"], ["contacts", "Contacts"], ["settings", "Settings"]];
+const TAB_TITLE = { dashboard: "Dashboard", sops: "Library", gaps: "Unanswered", activity: "Activity", team: "Team", contacts: "Contacts", settings: "Settings" };
 // The gear buttons are hidden now (the sidebar has Settings); they still work if shown.
 let prevTab = "sops";
 const leaveSettings = () => { tab = prevTab; renderAdmin(true); scrollTo(0, 0); };
@@ -508,8 +508,10 @@ const weekLog = () => STATE.convos.filter((g) => !g.open && Date.now() - new Dat
 // The sidebar / phone tab bar (dash.js) replaces the old pill tabs.
 const renderTabs = () => Glass.renderNav();
 function renderCatPills() {
-  $("cats").innerHTML = [{ name: "All" }, ...STATE.cats].map((c, i) => `<button type="button" class="press" data-c="${i ? esc(c.name) : ""}" aria-pressed="${(i ? c.name : "") === cat}">${esc(c.name)}</button>`).join("");
-  $("cats").querySelectorAll("button").forEach((b) => (b.onclick = () => { cat = b.dataset.c; $("cats").querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", x === b)); renderList(); }));
+  const nd = STATE.sops.filter((s) => s.status === "draft").length;
+  const pills = [{ name: "All", all: true }, ...(nd || libDraft ? [{ name: "Drafts", draft: true, n: nd }] : []), ...STATE.cats];
+  $("cats").innerHTML = pills.map((c) => `<button type="button" class="press" data-c="${c.all || c.draft ? "" : esc(c.name)}" ${c.draft ? 'data-draft="1"' : ""} aria-pressed="${c.all ? !cat && !libDraft : c.draft ? libDraft : !libDraft && c.name === cat}">${esc(c.name)}${c.draft ? `<span class="cnt">${c.n}</span>` : ""}</button>`).join("");
+  $("cats").querySelectorAll("button").forEach((b) => (b.onclick = () => { libDraft = !!b.dataset.draft; cat = b.dataset.c; renderCatPills(); renderList(); }));
   $("f-cat").innerHTML = STATE.cats.map((c) => `<option>${esc(c.name)}</option>`).join("");
 }
 $("filter").oninput = () => renderList();
@@ -533,7 +535,6 @@ setInterval(quietSync, 5 * 60e3);
 
 async function renderAdmin(refresh) {
   if ((tab === "settings" || tab === "dashboard") && !canManage()) tab = "sops";
-  if (tab === "home" && !isGM()) tab = "sops";
   if (refresh) {
     try {
       const [log, users] = await Promise.all([api("/api/activity"), api("/api/users", { hotel: false })]);
@@ -543,7 +544,7 @@ async function renderAdmin(refresh) {
   renderTabs(); TABS.forEach(([k]) => ($("tab-" + k).hidden = k !== tab));
   const onSet = tab === "settings", onDash = tab === "dashboard";
   $("gearBtn").setAttribute("aria-pressed", onSet);
-  $("tiles").hidden = onSet || onDash || tab === "home"; $("tabs").hidden = true; $("backBtn").hidden = true;
+  $("tiles").hidden = onSet || onDash; $("tabs").hidden = true; $("backBtn").hidden = true;
   $("adminHead").hidden = onDash;
   $("toSetup").hidden = onSet || hotelObj().ready;
   $("adminTitle").textContent = TAB_TITLE[tab] || "Manager";
@@ -554,12 +555,13 @@ async function renderAdmin(refresh) {
   $("sQ").textContent = wk.length;
   $("sRate").textContent = (wk.length ? Math.round((ans / wk.length) * 100) : 0) + "%";
   $("sGap").textContent = gaps().length;
-  ({ dashboard: Glass.renderDashboard, home: renderHome, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: Glass.renderSettingsPage })[tab]();
+  $("libManage").hidden = $("libImport").hidden = !isGM();
+  ({ dashboard: Glass.renderDashboard, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: Glass.renderSettingsPage })[tab]();
 }
 
 function renderList() {
   const f = norm($("filter").value);
-  const rows = STATE.sops.filter((s) => (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id).includes(f)))
+  const rows = STATE.sops.filter((s) => (!libDraft || s.status === "draft") && (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id).includes(f)))
     .sort((a, b) => ({ draft: 0, live: 1, off: 2 }[a.status] - { draft: 0, live: 1, off: 2 }[b.status]) || a.id.localeCompare(b.id, "en", { numeric: true }));
   $("libCount").textContent = rows.length + " SOP" + (rows.length === 1 ? "" : "s");
   $("sopList").innerHTML = rows.length ? rows.map((s) => { const ph = s.steps.filter((x) => x.img).length;
@@ -718,7 +720,7 @@ const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 6
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });
 function showSheet(which) {
   const open = !sheet.hidden && sheetS.target === 0; // already on screen: just swap the form, no slide
-  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "authorEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "authorEd", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
   if (open) { sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0)); return; }
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));
@@ -743,6 +745,8 @@ const IC = {
   img: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="6" cy="7" r="1.3"/><path d="M14 11l-3.5-3.5L4 13"/></svg>',
   del: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
 };
+$("libManage").onclick = () => { SU.step = 0; WZ.celebrate = false; SU.backTab = "sops"; go("manage"); };
+$("libImport").onclick = () => openImport(STATE.hotel);
 $("newSop").onclick = () => (STATE.settings.aiOn ? authorOpen({ target: "hotel", from: "list" }) : openSop(null));
 function fillEditor(p) {
   $("f-title").value = p.title || "";
@@ -909,11 +913,11 @@ $("userEd").addEventListener("submit", async (e) => {
     if (eu) { await api(`/api/users/${eu.id}`, { hotel: false, method: "PUT", body }); toast("Saved " + body.name); hideSheet(); }
     else { const r = await api("/api/users", { hotel: false, body }); showTemp(r.tempPassword); $("u-hint").textContent = `${body.name} is set up. Sign-in: username ${body.username} with the temporary password above.`; $("uSave").textContent = "Done"; eu = { id: r.id, ...body }; }
     STATE.users = await api("/api/users", { hotel: false }); renderAdmin();
-    if (mode === "owner") { await loadOwnerHotels(); renderOwner(); }
+    if (mode === "owner") { portfolioStale(); renderOwner(true); }
   } catch (x) { fail(x); }
 });
 
-/* ---------- setup flow, SOP switches, hotel details and hotel home ---------- */
+/* ---------- setup flow, SOP switches and hotel details ---------- */
 const NOT_OFFERED = "not offered at this hotel";
 const AMEN_LIST = ["breakfast", "pool", "pets", "laundry", "market"];
 const AMEN_Q = {
@@ -956,12 +960,12 @@ function setupHeader() {
   const h = hotelObj(), view = suView();
   $("setupTitle").textContent = view === "manage" ? "SOPs on and off" : view === "details" ? "Hotel details" : view === "kit" ? "Welcome kit" : h.name || "Set up";
   $("setupSub").textContent = view === "wizard" ? `Setting up · ${brandName(h)} · ${sysName(h)}` : `${h.name || ""} · ${brandName(h)} · ${sysName(h)}`;
-  $("setupBack").lastChild.textContent = view === "wizard" ? "Hotels" : "Home";
+  $("setupBack").lastChild.textContent = view === "wizard" ? "Portfolio" : TAB_TITLE[SU.backTab || "dashboard"];
   $("setupBack").hidden = view === "wizard" && !isOwner();
 }
 $("setupBack").onclick = async () => {
   if (suView() === "wizard") return go("owner");
-  tab = "home";
+  tab = SU.backTab || "dashboard";
   if (SU.dirty) { SU.dirty = false; try { await loadHotel(); } catch {} }
   go("admin");
 };
@@ -1120,7 +1124,7 @@ function bindCatRows(body) {
   body.querySelectorAll("[data-sopsw]").forEach((b) => (b.onclick = () => { const m = suById(b.dataset.sopsw); SU.focus = "sop-" + m.id; suSet([m.id], !suOn(m)); }));
 }
 
-// "SOPs on and off" on Hotel home (the setup review lives in setup.js).
+// "SOPs on and off" (the setup review lives in setup.js).
 function paintReview() {
   const d = SU.data, h = d.hotel, sops = d.sops, on = sops.filter(suOn).length;
   $("suBody").innerHTML = `<div class="sumbar" aria-live="polite"><b>${on}</b><span>of ${sops.length} SOPs are on</span></div>
@@ -1142,106 +1146,53 @@ function paintDetails() {
   $("suBody").querySelectorAll("[data-yn]").forEach((b) => (b.onclick = () => setAnswer(b.closest("[data-amen]").dataset.amen, b.dataset.yn === "yes")));
 }
 
-/* ----- Hotel home ----- */
-const CHANGED = { title: "title", category: "category", steps: "steps", script: "what to say", flag: "when to call a manager", keywords: "search words" };
-async function renderHome() {
-  const box = $("homeBody");
-  if (!hotelObj().ready) {
-    box.innerHTML = `<div class="group"><div class="empty"><b>${esc(hotelName(STATE.hotel))} is still being set up</b><br>Finish setup to open it to staff.</div></div><button type="button" class="bigbtn press" id="homeSetup">Continue setup</button>`;
-    $("homeSetup").onclick = () => go("chat");
-    return;
-  }
-  if (!STATE.home) box.innerHTML = `<div class="group"><div class="empty">Loading…</div></div>`;
-  const hid = STATE.hotel;
-  try { const h = await api("/api/home"); if (hid !== STATE.hotel || tab !== "home") return; STATE.home = h; } catch (e) { fail(e); return; }
-  paintHome();
-}
-function paintHome() {
-  const H = STATE.home, box = $("homeBody");
-  const ups = H.updates, fresh = H.fresh, pending = ups.filter((u) => !u.kept);
-  const sys = H.system === "pep" ? "PEP" : "HotelKey";
-  const upRows = ups.map((u) => `<div class="cell upd" data-sop="${esc(u.sopId)}"><span class="body"><span class="t wrap">${esc(u.title)}</span><span class="m wrapm">${esc(u.sopId)} · v${u.have} to v${u.latest} · ${u.relevant ? (u.changed.length ? "Changed: " + esc(u.changed.map((k) => CHANGED[k] || k).join(", ")) : "Updated") : "No change to what your staff see"}${u.kept ? " · You edited this one" : ""}${u.status === "off" ? " · Off at your hotel" : ""}</span></span>
-      <span class="acts"><button type="button" class="pillbtn press" data-keep="${esc(u.sopId)}">Keep mine</button><button type="button" class="pillbtn tint press" data-accept="${esc(u.sopId)}">Accept</button></span></div>`).join("");
-  const newRows = fresh.map((m) => `<div class="cell upd" data-new="${esc(m.id)}"><span class="body"><span class="t wrap">New from Lotus: ${esc(m.title)}</span><span class="m wrapm">${esc(m.id)} · ${esc(m.cat)}</span></span>
-      <span class="acts"><button type="button" class="pillbtn press" data-skip="${esc(m.id)}">Skip</button><button type="button" class="pillbtn tint press" data-add="${esc(m.id)}">Add</button></span></div>`).join("");
-  box.innerHTML = `<div class="statusline"><span class="status ok">Live</span><span><b>${plural(H.counts.live, "SOP")} on</b> · ${H.counts.off} off · ${sys}</span></div>
-    <div class="sec"><span>Updates from Lotus</span>${pending.length > 1 ? `<button type="button" id="acceptAll">Accept all (${pending.length})</button>` : ""}</div>
-    <div class="group">${upRows || `<div class="empty">You're up to date with Lotus.</div>`}</div>
-    ${fresh.length ? `<div class="sec"><span>New from Lotus</span></div><div class="group">${newRows}</div>` : ""}
-    <div class="sec"><span>Manage this hotel</span></div>
-    <div class="htiles">
-      <button type="button" class="htile press" data-go="manage"><span class="hl">SOPs on and off</span><strong>${H.counts.live} <small>on</small> · ${H.counts.off} <small>off</small></strong><span class="hs">Switch categories or single SOPs</span></button>
-      <button type="button" class="htile press" data-go="details"><span class="hl">Hotel details</span><strong>${H.details.filled} <small>of ${H.details.total} filled</small></strong><span class="hs">Hours, fees, locations used in SOPs</span></button>
-      <button type="button" class="htile press" data-go="contacts"><span class="hl">Contacts</span><strong>${H.contacts} <small>${H.contacts === 1 ? "person" : "people"}</small></strong><span class="hs">Who staff call</span></button>
-      <button type="button" class="htile press" data-go="newsop"><span class="hl">Add a hotel-only SOP</span><strong>New</strong><span class="hs">Write a procedure only this hotel uses</span></button>
-      <button type="button" class="htile press" data-go="kit"><span class="hl">Welcome kit</span><strong>Print</strong><span class="hs">Desk card, QR code, Home Screen steps, staff logins</span></button>
-      <button type="button" class="htile press" data-go="import"><span class="hl">Import SOPs</span><strong>Import</strong><span class="hs">From a PDF, Word, Excel or text file, as drafts</span></button>
-    </div>
-    <p class="foot">Accept replaces your copy with Lotus's latest wording. Keep mine leaves your copy as it is.</p>`;
-  const done = async (fn, msg) => { try { await fn(); toast(msg); STATE.home = null; await loadHotel(); renderAdmin(); } catch (e) { fail(e); } };
-  box.querySelectorAll("[data-accept]").forEach((b) => (b.onclick = () => done(() => api(`/api/updates/${encodeURIComponent(b.dataset.accept)}/accept`, { body: {} }), "Accepted the update")));
-  box.querySelectorAll("[data-keep]").forEach((b) => (b.onclick = () => done(() => api(`/api/updates/${encodeURIComponent(b.dataset.keep)}/keep`, { body: {} }), "Kept yours")));
-  box.querySelectorAll("[data-add]").forEach((b) => (b.onclick = () => done(() => api(`/api/updates/new/${encodeURIComponent(b.dataset.add)}/add`, { body: {} }), "Added. Staff can ask about it now")));
-  box.querySelectorAll("[data-skip]").forEach((b) => (b.onclick = () => done(() => api(`/api/updates/new/${encodeURIComponent(b.dataset.skip)}/skip`, { body: {} }), "Skipped. It's in your Off list if you change your mind")));
-  const aa = $("acceptAll");
-  if (aa) aa.onclick = () => done(async () => { for (const u of pending) await api(`/api/updates/${encodeURIComponent(u.sopId)}/accept`, { body: {} }); }, "Accepted all updates");
-  box.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
-    const g = b.dataset.go;
-    if (g === "manage" || g === "details" || g === "kit") { SU.step = 0; WZ.celebrate = false; go(g); }
-    else if (g === "contacts") { tab = "contacts"; renderAdmin(true); }
-    else if (g === "import") openImport(STATE.hotel);
-    else openSop(null);
-  }));
-}
-
 $("toSetup").onclick = () => go("chat");
 
-/* ---------- owner: hotels and master library ---------- */
-let ownerTab = "hotels", mFilter = "all";
-const OTABS = [["hotels", "Hotels"], ["master", "Master library"], ["import", "Import"]];
+/* ---------- owner: Portfolio (hotels, and the master library by hotel) and Import ---------- */
+let ownerTab = "portfolio", mFilter = "all";
 $("ownerBtn").onclick = () => { closeMenus(); go(mode === "owner" ? "admin" : "owner"); };
 
 async function loadOwnerHotels() { STATE.owner.hotels = await api("/api/owner/hotels", { hotel: false }); }
 async function loadMaster() { STATE.owner.master = await api("/api/master", { hotel: false }); }
+async function loadMatrix() { STATE.owner.matrix = await api("/api/owner/matrix", { hotel: false }); }
+// The full master SOPs (steps, scripts) are only needed to open one, so they load on first use.
+async function openMasterLoaded(id) { try { if (!STATE.owner.master) await loadMaster(); openMaster(id); } catch (e) { fail(e); } }
 
 async function renderOwner(refresh) {
   if (!isOwner()) return;
-  $("ownerTabs").innerHTML = OTABS.map(([k, l]) => `<button type="button" role="tab" class="press" data-t="${k}" aria-pressed="${k === ownerTab}">${l}</button>`).join("");
-  $("ownerTabs").querySelectorAll("button").forEach((b) => (b.onclick = () => { ownerTab = b.dataset.t; renderOwner(); }));
-  $("ownerHotels").hidden = ownerTab !== "hotels"; $("ownerMaster").hidden = ownerTab !== "master"; $("ownerImport").hidden = ownerTab !== "import";
-  $("ownerTitle").textContent = { hotels: "Hotels", master: "Master library", import: "Import" }[ownerTab];
-  $("ownerSub").textContent = { hotels: "Every Lotus hotel in one place", master: "The source every hotel's procedures start from", import: "Bring in procedures from your own documents" }[ownerTab];
-  if (ownerTab === "import") { renderImport(); return; }
-  try {
-    if (ownerTab === "hotels" && (refresh || !STATE.owner.hotels)) await loadOwnerHotels();
-    if (ownerTab === "master" && (refresh || !STATE.owner.master)) await loadMaster();
-  } catch (e) { fail(e); }
-  if (ownerTab === "hotels") renderHotelCards(); else renderMasterList();
+  const imp = ownerTab === "import";
+  $("ownerPortfolio").hidden = imp; $("ownerImportHead").hidden = !imp; $("ownerImport").hidden = !imp;
+  if (imp) { renderImport(); return; }
+  if (refresh || !STATE.owner.hotels) $("ownerSub").textContent = STATE.owner.hotels ? $("ownerSub").textContent : "Loading…";
+  try { await Promise.all([refresh || !STATE.owner.hotels ? loadOwnerHotels() : null, refresh || !STATE.owner.matrix ? loadMatrix() : null]); } catch (e) { fail(e); }
+  if (mode !== "owner" || ownerTab !== "portfolio") return;
+  const hs = STATE.owner.hotels, X = STATE.owner.matrix;
+  if (hs && X) $("ownerSub").textContent = `${hs.length} hotel${hs.length === 1 ? "" : "s"} · ${X.masters.length} master SOP${X.masters.length === 1 ? "" : "s"}`;
+  renderHotelCards(); renderMatrix();
+  $("masterDetailsSec").hidden = false;
 }
+// A change to the master library (saved, published, imported) or to the hotels: the chart reloads next time it is drawn.
+const portfolioStale = () => { STATE.owner.matrix = null; STATE.owner.hotels = null; };
 
 /* ----- hotels ----- */
 function renderHotelCards() {
   const hs = STATE.owner.hotels;
   if (!hs) { $("hotelCards").innerHTML = ""; return; }
-  const pill = (h) => h.setup === "live" ? `<span class="status ok">Live</span>` : h.setup === "setup" ? `<span class="status invited">Setting up</span>` : `<span class="status off">Not started</span>`;
-  $("hotelCount").textContent = `${hs.length} hotel${hs.length === 1 ? "" : "s"}`;
-  $("hotelCards").innerHTML = hs.map((h) => {
-    const gms = h.gms.filter((g) => g.status === "active");
-    return `<div class="hcard" data-id="${esc(h.id)}">
-      <div class="hhead"><span class="hname">${esc(h.name)}</span>${pill(h)}</div>
-      <div class="hsub">${brandName(h)} · ${sysName(h)}</div>
-      <dl class="hstats">
-        <div><dt>SOPs live</dt><dd>${h.live} <small>of ${h.total}</small></dd></div>
-        <div><dt>${gms.length === 1 ? "GM" : "GMs"}</dt><dd class="gm">${gms.length ? gms.map((g) => esc(g.name) + (g.must_change_pw ? ' <small>invited</small>' : "")).join(", ") : '<small>None yet</small>'}</dd></div>
-        ${h.pending ? `<div><dt>Updates</dt><dd>${h.pending} <small>waiting</small></dd></div>` : ""}
-      </dl>
-      ${h.setup === "live" ? "" : `<div data-prog="${esc(h.id)}">${ownerProgressHtml(h)}</div>`}
-      <div class="acts"><button type="button" class="pillbtn press" data-open="${esc(h.id)}">Open hotel</button><button type="button" class="pillbtn tint press" data-gm="${esc(h.id)}">Invite GM</button>${h.setup === "live" ? "" : `<button type="button" class="pillbtn press" data-remind="${esc(h.id)}">Copy reminder</button>`}</div>
-    </div>`;
+  const pill = (h) => h.setup === "live" ? `<span class="ppill ok">Live</span>` : h.setup === "setup" ? `<span class="ppill warn">Setting up</span>` : `<span class="ppill">Not started</span>`;
+  $("hotelCards").innerHTML = hs.map((h, i) => {
+    const gms = h.gms.filter((g) => g.status === "active"), live = h.setup === "live";
+    const gm = gms.length ? `${gms.length === 1 ? "GM" : "GMs"}: ${gms.map((g) => esc(g.name) + (g.must_change_pw ? ' <small>(invited)</small>' : "")).join(", ")}` : "No GM yet";
+    return `<article class="dcard pcard lift rise" style="--d:${(0.05 + i * 0.05).toFixed(2)}s" data-id="${esc(h.id)}" aria-label="${esc(h.name)}">
+      <div class="pc-top"><div class="pc-id"><h2>${esc(h.name)}</h2><div class="pc-meta">${brandName(h)} · ${sysName(h)}</div></div>${pill(h)}</div>
+      ${live ? `<div class="pc-nums"><div><b data-live="${esc(h.id)}">${h.live}</b><span>SOPs on</span></div><div><b>${h.pending}</b><span>updates waiting</span></div></div>` : `<div data-prog="${esc(h.id)}">${ownerProgressHtml(h)}</div>`}
+      <div class="pc-gm">${gm}</div>
+      <div class="pc-acts"><button type="button" class="gbtn dark press" data-open="${esc(h.id)}" aria-label="Open ${esc(h.name)} as GM">Open as GM</button>${!gms.length ? `<button type="button" class="gbtn press" data-gm="${esc(h.id)}">Invite GM</button>` : live ? "" : `<button type="button" class="gbtn press" data-remind="${esc(h.id)}">Copy reminder</button>`}</div>
+    </article>`;
   }).join("");
-  $("hotelCards").querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => selectHotel(b.dataset.open, "admin")));
-  $("hotelCards").querySelectorAll("[data-gm]").forEach((b) => (b.onclick = () => openUser(null, { role: "GM", hotels: [b.dataset.gm] })));
-  $("hotelCards").querySelectorAll(".hcard").forEach(wzBindCopy);
+  const box = $("hotelCards");
+  box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => selectHotel(b.dataset.open, "admin")));
+  box.querySelectorAll("[data-gm]").forEach((b) => (b.onclick = () => openUser(null, { role: "GM", hotels: [b.dataset.gm] })));
+  box.querySelectorAll(".pcard").forEach(wzBindCopy);
   loadOwnerProgress();
 }
 
@@ -1261,45 +1212,115 @@ $("hotelEd").addEventListener("submit", async (e) => {
   if (!body.name) { $("h-name").focus(); toast("Add the hotel's name"); return; }
   try {
     await api("/api/owner/hotels", { hotel: false, body });
-    hideSheet(); await Promise.all([loadOwnerHotels(), refreshMe()]); renderOwner(); toast(`Added ${body.name}`);
+    hideSheet(); portfolioStale(); await refreshMe(); renderOwner(true); toast(`Added ${body.name}`);
   } catch (x) { fail(x); }
 });
 
-/* ----- master library ----- */
+/* ----- master library by hotel (the chart) ----- */
 const AMEN = { breakfast: "Breakfast", pool: "Pool", pets: "Pets", laundry: "Laundry", market: "Market" };
-const M_FILTERS = [
+// One state per cell; the first that applies wins (the server decides, see /api/owner/matrix).
+const MX = {
+  on: ["On", "On at this hotel"],
+  off: ["Off", "Off at this hotel"],
+  na: ["N/A", "Doesn't apply to this hotel"],
+  upd: ["Update", "A newer Lotus version is waiting at this hotel"],
+  own: ["Own", "The hotel uses its own wording"],
+  hk: ["Review", "HotelKey wording needs your review before it can go out"],
+};
+const MX_FILTERS = [
   ["all", "All", () => true],
-  ["every", "Every hotel", (m) => m.applies === "all" && !m.requires],
-  ["hilton", "Hilton and PEP only", (m) => m.applies === "hilton"],
-  ["amen", "Depends on amenities", (m) => !!m.requires],
-  ["hk", "PEP and HotelKey versions", (m) => m.hk_status !== "same"],
-  ["review", "HotelKey needs review", (m) => m.hk_status === "draft"],
-  ["draft", "Drafts", (m) => m.status === "draft"],
+  ["diff", "Differs between hotels", (m) => new Set(m.st.map((s, i) => (s === "na" ? null : s + m.lv[i])).filter(Boolean)).size > 1],
+  ["upd", "Updates waiting", (m) => m.st.includes("upd")],
+  ["hk", "HotelKey to review", (m) => m.st.includes("hk")],
+  ["own", "Hotels' own wording", (m) => m.st.includes("own")],
+  ["draft", "Master drafts", (m) => m.s === "draft"],
 ];
-const mTags = (m) => [
-  m.status === "draft" ? `<span class="mtag warn">Draft</span>` : "",
-  m.applies === "hilton" ? `<span class="mtag">Hilton only</span>` : "",
-  m.requires ? `<span class="mtag">${AMEN[m.requires]}</span>` : "",
-  m.hk_status === "draft" ? `<span class="mtag warn">HotelKey to review</span>` : m.hk_status === "approved" ? `<span class="mtag hk">HotelKey approved</span>` : "",
-].join("");
-function renderMasterList() {
-  const M = STATE.owner.master;
-  if (!M) { $("masterList").innerHTML = `<div class="empty">Loading…</div>`; return; }
-  $("masterFilters").innerHTML = M_FILTERS.map(([k, l, fn]) => `<button type="button" class="press" data-f="${k}" aria-pressed="${k === mFilter}">${l}<span class="cnt">${M.sops.filter(fn).length}</span></button>`).join("");
-  $("masterFilters").querySelectorAll("button").forEach((b) => (b.onclick = () => { mFilter = b.dataset.f; renderMasterList(); }));
-  const fn = M_FILTERS.find((f) => f[0] === mFilter)[2], f = norm($("mFilter").value);
-  const rows = M.sops.filter((m) => fn(m) && (!f || norm(m.title + " " + m.kw + " " + m.id + " " + m.cat).includes(f)))
-    .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true }));
-  $("masterCount").textContent = rows.length + " SOP" + (rows.length === 1 ? "" : "s");
-  $("masterList").innerHTML = rows.length ? rows.map((m) => `<button type="button" class="cell" data-m="${esc(m.id)}"><span class="dot ${m.status === "draft" || m.hk_status === "draft" ? "draft" : "live"}"></span>
-    <span class="body"><span class="t">${esc(m.title)}</span><span class="m">${esc(m.id)} · v${m.ver} · ${esc(m.cat)}</span>${mTags(m) ? `<span class="mtags">${mTags(m)}</span>` : ""}</span>${chev}</button>`).join("") : `<div class="empty">No SOPs match.</div>`;
-  $("masterList").querySelectorAll("[data-m]").forEach((b) => (b.onclick = () => openMaster(b.dataset.m)));
-  const det = M.details;
-  $("masterDetailsSec").hidden = !det.length;
-  $("masterDetails").innerHTML = det.map((d) => `<div class="cell"><span class="body"><span class="t"><span class="tokchip">${esc(d.key)}</span></span><span class="m">${d.example ? "e.g. " + esc(d.example) + " · " : ""}Used in ${d.uses} SOP${d.uses === 1 ? "" : "s"}</span></span></div>`).join("");
+const mxBusy = new Set();
+const mxHotel = (hi) => STATE.owner.matrix.hotels[hi];
+// Words for one cell: what it is, why, and what a tap does.
+function mxWords(m, hi) {
+  const H = mxHotel(hi), s = m.st[hi], on = m.lv[hi] === "1";
+  let why = MX[s][1];
+  if (s === "na") why = m.ap === "hilton" && H.brand !== "hilton" ? `Hilton hotels only, and ${H.short} isn't one` : `${H.short} has no ${(AMEN[m.rq] || "amenity").toLowerCase()}`;
+  else if (s === "upd" || s === "own") why += on ? "" : ", and it is turned off";
+  const lock = s === "na" ? "" : s === "hk" ? "" : !H.live ? `${H.name} isn't live yet. Its GM picks SOPs during setup.` : m.s === "draft" ? "This master SOP is a draft. Publish it before hotels can use it." : "";
+  const act = s === "na" ? "" : s === "hk" ? "Tap to open the HotelKey review" : lock ? "" : `Tap to turn ${on ? "off" : "on"}`;
+  return { why, lock, act, title: [why, lock, act].filter(Boolean).join(". ") };
 }
-$("mFilter").oninput = () => renderMasterList();
-$("newMaster").onclick = () => (STATE.settings.aiOn ? authorOpen({ target: "master", from: "list" }) : openMaster(null));
+function mxCellHtml(m, hi) {
+  const s = m.st[hi], w = mxWords(m, hi), H = mxHotel(hi), dead = s === "na" || (s !== "hk" && !!w.lock), live = m.lv[hi] === "1";
+  return `<div role="cell" class="mx-cell"><button type="button" class="mxc ${s}${(s === "upd" || s === "own") && !live ? " dim" : ""}${mxBusy.has(m.id + "|" + hi) ? " busy" : ""}" data-m="${esc(m.id)}" data-h="${hi}" ${dead ? 'aria-disabled="true"' : ""} title="${esc(w.title)}" aria-label="${esc(`${m.t} at ${H.name}: ${w.title}`)}">${MX[s][0]}</button></div>`;
+}
+function mxRowHtml(m) {
+  const X = STATE.owner.matrix, ok = m.st.map((s) => s !== "na"), y = ok.filter(Boolean).length, x = [...m.lv].filter((c, i) => c === "1" && ok[i]).length;
+  const meta = `${esc(m.id)} · v${m.v}${m.ap === "hilton" ? " · Hilton only" : ""}${m.rq ? " · needs " + esc((AMEN[m.rq] || m.rq).toLowerCase()) : ""}${m.s === "draft" ? " · Draft" : ""}`;
+  return `<div role="row" class="mx-row" data-row="${esc(m.id)}"><div role="rowheader" class="mx-sop"><button type="button" class="mx-t" data-open="${esc(m.id)}" aria-label="Open ${esc(m.t)}, ${esc(m.id)}">${esc(m.t)}</button><span class="mx-m">${meta}</span></div>${X.hotels.map((_, hi) => mxCellHtml(m, hi)).join("")}<div role="cell" class="mx-on"><b>${y ? `${x} of ${y}` : "–"}</b></div></div>`;
+}
+function mxChips() {
+  const X = STATE.owner.matrix;
+  $("masterFilters").innerHTML = MX_FILTERS.map(([k, l, fn]) => `<button type="button" class="mxchip press" data-f="${k}" aria-pressed="${k === mFilter}">${l}<span class="cnt">${X.masters.filter(fn).length}</span></button>`).join("");
+  $("masterFilters").querySelectorAll("button").forEach((b) => (b.onclick = () => { mFilter = b.dataset.f; renderMatrix(); }));
+}
+function renderMatrix() {
+  const X = STATE.owner.matrix, root = $("mxBody");
+  if (!X) { root.innerHTML = `<div class="empty">Loading…</div>`; return; }
+  $("mxLegend").innerHTML = Object.entries(MX).map(([k, [l, d]]) => `<li><span class="mxc sw ${k}" aria-hidden="true">${l}</span>${d}</li>`).join("");
+  mxChips();
+  const fn = MX_FILTERS.find((f) => f[0] === mFilter)[2], f = norm($("mFilter").value);
+  const rows = X.masters.filter((m) => fn(m) && (!f || norm(m.t + " " + m.kw + " " + m.id + " " + m.c).includes(f)));
+  const cats = [...X.cats, ...new Set(rows.map((m) => m.c).filter((c) => !X.cats.includes(c)))];
+  const byId = (a, b) => a.id.localeCompare(b.id, "en", { numeric: true });
+  const body = cats.map((c) => { const l = rows.filter((m) => m.c === c).sort(byId); return l.length ? `<div role="row" class="mx-g"><div role="rowheader" class="mx-gh">${esc(c)}</div></div>${l.map(mxRowHtml).join("")}` : ""; }).join("");
+  root.style.setProperty("--n", X.hotels.length);
+  root.setAttribute("role", "table"); root.setAttribute("aria-label", "Master SOPs by hotel");
+  root.innerHTML = `<div role="row" class="mx-row mx-hd"><div role="columnheader" class="mx-sop">SOP</div>${X.hotels.map((h) => `<div role="columnheader" class="mx-col" title="${esc(h.name)}"><span>${esc(h.short)}</span><small>${h.live ? (h.system === "pep" ? "PEP" : "HotelKey") : "Setting up"}</small></div>`).join("")}<div role="columnheader" class="mx-on">On at</div></div>${body || `<div class="empty">No SOPs match.</div>`}`;
+  $("masterCount").textContent = `${rows.length} of ${X.masters.length} SOP${X.masters.length === 1 ? "" : "s"}`;
+}
+// Redraws one row in place (keeps scroll position and puts focus back on the tapped cell).
+function mxPatch(m, hi) {
+  const el = $("mxBody").querySelector(`[data-row="${CSS.escape(m.id)}"]`);
+  if (!el) return;
+  const had = document.activeElement && document.activeElement.dataset.h === String(hi) && el.contains(document.activeElement);
+  const t = document.createElement("template"); t.innerHTML = mxRowHtml(m); el.replaceWith(t.content.firstElementChild);
+  if (had) { const b = $("mxBody").querySelector(`[data-row="${CSS.escape(m.id)}"] [data-h="${hi}"]`); if (b) b.focus({ preventScroll: true }); }
+  mxChips();
+}
+async function mxToggle(mid, hi) {
+  const X = STATE.owner.matrix, m = X.masters.find((x) => x.id === mid), H = X.hotels[hi], key = mid + "|" + hi;
+  if (!m || mxBusy.has(key)) return;
+  const was = m.lv[hi] === "1", on = !was, before = m.st[hi];
+  const set = (live, st) => { m.lv = m.lv.slice(0, hi) + (live ? "1" : "0") + m.lv.slice(hi + 1); m.st[hi] = st; };
+  const stFor = (live) => (before === "on" || before === "off" ? (live ? "on" : "off") : before);
+  set(on, stFor(on)); mxBusy.add(key); mxPatch(m, hi);
+  const card = (d) => { const h = (STATE.owner.hotels || []).find((x) => x.id === H.id); if (h) { h.live += d; const el = document.querySelector(`[data-live="${CSS.escape(H.id)}"]`); if (el) el.textContent = h.live; } };
+  try {
+    await api(`/api/owner/hotels/${encodeURIComponent(H.id)}/sops/${encodeURIComponent(mid)}`, { hotel: false, method: "PUT", body: { on } });
+    card(on ? 1 : -1);
+    toast(`${m.t} is ${on ? "on" : "off"} at ${H.short}`);
+  } catch (e) { set(was, before); fail(e); }
+  mxBusy.delete(key); mxPatch(m, hi);
+}
+$("mxScroll").addEventListener("scroll", (e) => e.currentTarget.classList.toggle("mxsl", e.currentTarget.scrollLeft > 4), { passive: true });
+$("mxBody").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-open]");
+  if (t) return openMasterLoaded(t.dataset.open);
+  const c = e.target.closest(".mxc[data-m]");
+  if (!c || c.getAttribute("aria-disabled") === "true" || c.classList.contains("sw")) { if (c && c.getAttribute("aria-disabled") === "true") toast(c.title.split(". ")[0]); return; }
+  const m = STATE.owner.matrix.masters.find((x) => x.id === c.dataset.m);
+  if (m.st[+c.dataset.h] === "hk") return openMasterLoaded(m.id);
+  mxToggle(m.id, +c.dataset.h);
+});
+$("mFilter").oninput = () => renderMatrix();
+$("masterDetailsSec").addEventListener("toggle", async (e) => {
+  if (!e.target.open) return;
+  try { if (!STATE.owner.master) await loadMaster(); } catch (x) { return fail(x); }
+  const det = STATE.owner.master.details;
+  $("masterDetails").innerHTML = det.map((d) => `<div class="cell"><span class="body"><span class="t"><span class="tokchip">${esc(d.key)}</span></span><span class="m">${d.example ? "e.g. " + esc(d.example) + " · " : ""}Used in ${d.uses} SOP${d.uses === 1 ? "" : "s"}</span></span></div>`).join("") || `<div class="empty">No details yet.</div>`;
+});
+$("newMaster").onclick = async () => {
+  try { if (!STATE.owner.master) await loadMaster(); } catch (e) { return fail(e); }
+  STATE.settings.aiOn ? authorOpen({ target: "master", from: "list" }) : openMaster(null);
+};
 
 let em = null, mDraft = null, mView = "pep", mSaving = false;
 const mSeg = Seg($("mView"), (v) => { mView = v; mSeg(v); renderMasterView(); });
@@ -1381,14 +1402,14 @@ $("mPublish").onclick = async () => {
   if (!confirm(`Publish ${em.id} to hotels? Every hotel it fits will see it as New from Lotus.`)) return;
   try {
     const out = await api(`/api/master/${encodeURIComponent(em.id)}/publish`, { hotel: false, body: {} });
-    Object.assign(em, out); paintMasterStatus(); renderMasterList(); loadOwnerHotels().catch(() => {}); toast(`${em.id} published to hotels`);
+    Object.assign(em, out); paintMasterStatus(); portfolioStale(); renderOwner(true); toast(`${em.id} published to hotels`);
   } catch (e) { fail(e); }
 };
 $("mApprove").onclick = async () => {
   if (!em) return;
   try {
     const out = await api(`/api/master/${encodeURIComponent(em.id)}/approve-hk`, { hotel: false, body: {} });
-    Object.assign(em, out); renderMasterView(); renderMasterList(); toast("HotelKey wording approved");
+    Object.assign(em, out); renderMasterView(); portfolioStale(); renderOwner(true); toast("HotelKey wording approved");
   } catch (e) { fail(e); }
 };
 $("masterEd").addEventListener("submit", async (e) => {
@@ -1408,7 +1429,7 @@ $("masterEd").addEventListener("submit", async (e) => {
     const M = STATE.owner.master;
     if (em) Object.assign(em, out); else M.sops.push(out);
     toast(`Saved ${out.id}${out.status === "draft" ? " as a draft" : ` v${out.ver}`}${out.hotelsWithUpdate ? ` · ${out.hotelsWithUpdate} hotel${out.hotelsWithUpdate === 1 ? " has" : "s have"} an update` : ""}`);
-    hideSheet(); renderMasterList(); loadOwnerHotels().catch(() => {});
+    hideSheet(); portfolioStale(); renderOwner(true);
   } catch (x) { fail(x); }
   mSaving = false;
 });
@@ -1483,6 +1504,15 @@ function openImport(hotelId) {
   if (isOwner()) ownerTab = "import";
   go("import");
 }
+// Opens one waiting import batch for this hotel straight at its review (from the Dashboard's Needs you).
+async function openImportBatch(id) {
+  try {
+    const b = await api(`/api/import/${id}`, { hotel: false });
+    IMP.target = STATE.hotel; IMP.files = []; IMP.st = {}; IMP.batch = b; IMP.open = new Set(); IMP.group = firstOpenGroup();
+    if (isOwner()) ownerTab = "import";
+    go("import");
+  } catch (e) { fail(e); }
+}
 $("impBack").onclick = () => go(hotelObj().ready ? "admin" : "chat");
 
 async function renderImport() {
@@ -1490,7 +1520,7 @@ async function renderImport() {
   const box = impEl();
   const t = isOwner() ? IMP.target || "master" : STATE.hotel;
   if (IMP.target !== t) { IMP.target = t; IMP.batch = null; IMP.files = []; IMP.st = {}; }
-  $("impBack").lastElementChild.textContent = hotelObj().ready ? "Home" : "Setup";
+  $("impBack").lastElementChild.textContent = hotelObj().ready ? TAB_TITLE[tab] || "Dashboard" : "Setup";
   $("impSub").textContent = isOwner() ? "" : `${hotelName(STATE.hotel)} only`;
   if (!IMP.info) box.innerHTML = `<div class="group"><div class="empty">Loading…</div></div>`;
   try {
@@ -1698,8 +1728,8 @@ async function impAct(body) {
     const nb = await api(`/api/import/${IMP.batch.id}/act`, { hotel: false, body });
     const note = nb.note; delete nb.note;
     IMP.batch = nb;
-    if (nb.target === "master") { STATE.owner.master = null; STATE.owner.hotels = null; }
-    else { STATE.home = null; SU.dirty = true; if (nb.target === STATE.hotel) loadHotel().catch(() => {}); }
+    if (nb.target === "master") { STATE.owner.master = null; portfolioStale(); }
+    else { SU.dirty = true; if (nb.target === STATE.hotel) loadHotel().catch(() => {}); }
     paintImpReview(); toast(note || "Done");
   } catch (e) { fail(e); }
   impActing = false;

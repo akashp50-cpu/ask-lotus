@@ -66,7 +66,7 @@
     </div>
     <div class="navright">
       <button class="propbtn press" id="propBtn" aria-haspopup="menu" aria-label="Property"><span class="lbl">Hampton OP</span><svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 4.5 6 7.5 9 4.5"/></svg></button>
-      <button class="gearbtn press" id="ownerBtn" aria-label="Hotels and master library" title="Hotels and master library" aria-pressed="false" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V6.5a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 15 6.5V21"/><path d="M15 10h3.5A1.5 1.5 0 0 1 20 11.5V21"/><path d="M2.5 21h19"/><path d="M8 9h3M8 13h3M8 17h3"/></svg></button>
+      <button class="gearbtn press" id="ownerBtn" aria-label="Portfolio" title="Portfolio" aria-pressed="false" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21V6.5a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 15 6.5V21"/><path d="M15 10h3.5A1.5 1.5 0 0 1 20 11.5V21"/><path d="M2.5 21h19"/><path d="M8 9h3M8 13h3M8 17h3"/></svg></button>
       <button class="gearbtn press" id="gearBtn" aria-label="Settings" title="Settings" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>
       <button class="av press" id="avBtn" aria-haspopup="menu" aria-label="Account"></button>
     </div>
@@ -103,18 +103,15 @@
         <div class="dash">
           <div class="dhead rise"><div><h1 id="dashHello">Welcome</h1><p id="dashSub"></p></div>
             <div class="dact"><button type="button" class="gbtn dark lift press" id="dashNew"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M8 2.5c.4 3.4 2.6 5.6 6 6-3.4.4-5.6 2.6-6 6-.4-3.4-2.6-5.6-6-6 3.4-.4 5.6-2.6 6-6Z" fill="currentColor"/></svg>New SOP with AI</button></div></div>
+          <section class="dcard needs" id="needsBody" aria-label="Needs you" hidden></section>
           <div id="dashBody" aria-live="polite"></div>
         </div>
-      </div>
-
-      <div id="tab-home" class="tabp" hidden>
-        <div id="homeBody"></div>
       </div>
 
       <div id="tab-sops" class="tabp" hidden>
         <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="filter" placeholder="Search SOPs" aria-label="Search SOPs"></div>
         <div class="pills small" id="cats" style="padding-top:10px"></div>
-        <div class="sec"><span id="libCount">SOPs</span><button id="newSop">New SOP</button></div>
+        <div class="sec"><span id="libCount">SOPs</span><span class="secb"><button id="libManage" hidden>SOPs on and off</button><button id="libImport" hidden>Import</button><button id="newSop">New SOP</button></span></div>
         <div class="group" id="sopList"></div>
         <p class="foot">Saving publishes to the front desk chat and bumps the version number.</p>
       </div>
@@ -207,24 +204,25 @@
     </section>
 
     <section id="owner" hidden>
-      <div class="large"><h1 id="ownerTitle">Hotels</h1><p id="ownerSub"></p></div>
-      <div class="pills" id="ownerTabs" role="tablist"></div>
-
-      <div id="ownerHotels">
-        <div class="sec"><span id="hotelCount">Hotels</span><button id="newHotel">Add a hotel</button></div>
-        <div class="hcards" id="hotelCards"></div>
-        <p class="foot">Open a hotel to work in it like its manager. Invite a GM and they get a temporary password and only see their own hotel.</p>
-      </div>
-
-      <div id="ownerMaster" hidden>
-        <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="mFilter" placeholder="Search the master library" aria-label="Search the master library"></div>
-        <div class="pills small" id="masterFilters" style="padding-top:10px"></div>
-        <div class="sec"><span id="masterCount">SOPs</span><button id="newMaster">New SOP</button></div>
-        <div class="group" id="masterList"></div>
+      <div id="ownerPortfolio">
+        <div class="dhead rise"><div><h1>Portfolio</h1><p id="ownerSub"></p></div>
+          <div class="dact"><button type="button" class="gbtn press" id="newHotel">Add hotel</button><button type="button" class="gbtn dark press" id="newMaster">New master SOP</button></div></div>
+        <div class="pgrid" id="hotelCards" aria-label="Hotels"></div>
+        <section class="dcard pmat" id="matrixCard" aria-labelledby="mxHead">
+          <div class="dhd"><div><h2 id="mxHead">Master library by hotel</h2><div class="dsub">Each SOP across your hotels. Tap a cell to turn it on or off there.</div></div>
+            <label class="mxsearch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="mFilter" type="search" placeholder="Search SOPs" aria-label="Search master SOPs by title, number, keyword or category" autocomplete="off"></label></div>
+          <div class="mxchips" id="masterFilters" role="group" aria-label="Show"></div>
+          <ul class="mxleg" id="mxLegend" aria-label="Key"></ul>
+          <div class="mxscroll" id="mxScroll" tabindex="0" role="region" aria-label="Master SOPs by hotel. Scrolls sideways on small screens."><div id="mxBody"></div></div>
+          <p class="mxfoot" id="masterCount" aria-live="polite"></p>
+        </section>
+        <details class="dcard pdet" id="masterDetailsSec" hidden>
+          <summary>Hotel details used in SOPs</summary>
+          <div class="group" id="masterDetails"></div>
+        </details>
         <p class="foot">Editing a master SOP bumps its version. Each hotel then sees it as an update to accept or keep their own. New and imported SOPs start as drafts: hotels only see them once you publish.</p>
-        <div class="sec" id="masterDetailsSec" hidden><span>Hotel details used in SOPs</span></div>
-        <div class="group" id="masterDetails"></div>
       </div>
+      <div id="ownerImportHead" class="large" hidden><h1>Import</h1><p>Bring in procedures from your own documents</p></div>
       <div id="ownerImport" hidden></div>
       <div style="height:40px"></div>
     </section>
@@ -301,6 +299,11 @@
         <input type="file" id="auPick" accept="image/*" multiple hidden>
         <input type="file" id="auPdf" accept="application/pdf,.pdf" hidden>
       </div>
+    </form>
+
+    <form id="needsEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Close</button><h2 id="needsTitle">Updates from Lotus</h2><span style="min-width:68px"></span></div>
+      <div class="sbody"><div id="needsList"></div><p class="foot" id="needsFoot"></p></div>
     </form>
 
     <form id="hotelEd" hidden>

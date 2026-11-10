@@ -10,7 +10,13 @@ const Glass = (function () {
     sops: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5zM4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5",
     gaps: "M12 8v5M12 16h.01M10.3 3.9 2.6 17.5A2 2 0 0 0 4.3 20.5h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z",
     activity: "M22 12h-4l-3 9L9 3l-3 9H2",
-    home: "M3 11 12 3l9 8M5 9.5V21h14V9.5M10 21v-6h4v6",
+    import: "M12 3v12M7 10l5 5 5-5M5 21h14",
+    upd: "M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5",
+    add: "M12 5v14M5 12h14",
+    draft: "M4 4h11l5 5v11H4zM14 4v6h6",
+    info: "M12 16v-4M12 8h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
+    lib: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z",
+    kit: "M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z",
     team: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
     contacts: "M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2Z",
     owner: "M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6",
@@ -120,17 +126,18 @@ const Glass = (function () {
     ["sops", "Library", "hotel", () => canManage()],
     ["gaps", "Unanswered", "hotel", () => canManage()],
     ["activity", "Activity", "hotel", () => canManage()],
-    ["home", "Hotel home", "hotel", () => isGM()],
     ["team", "Team", "people", () => canManage()],
     ["contacts", "Contacts", "people", () => canManage()],
-    ["owner", "Hotels and library", "lotus", () => isOwner()],
+    ["owner", "Portfolio", "lotus", () => isOwner()],
+    ["import", "Import", "lotus", () => isOwner()],
   ];
   const GROUPS = { hotel: "Hotel", people: "People", lotus: "Lotus" };
   const PHONE_BAR = ["dashboard", "chat", "sops", "gaps"];
-  const current = () => (mode === "chat" ? "chat" : mode === "owner" ? "owner" : mode === "admin" ? tab : null);
+  const current = () => (mode === "chat" ? "chat" : mode === "owner" ? (ownerTab === "import" ? "import" : "owner") : mode === "admin" ? tab : null);
   function navTo(k) {
     closeMenus();
     if (k === "chat" || k === "owner") return go(k);
+    if (k === "import") return go("import");
     tab = k; if (k === "settings") setSec = null;
     if (mode === "admin") { renderAdmin(true); scrollTo(0, 0); } else go("admin");
   }
@@ -165,6 +172,9 @@ const Glass = (function () {
     m._close = () => moreSet(false); menus.push(m);
     $("setBack").onclick = () => { setSec = null; renderSettingsPage(); scrollTo(0, 0); };
     $("dashBody").addEventListener("click", dashClick);
+    $("needsBody").addEventListener("click", needsClick);
+    $("needsList").addEventListener("click", sheetClick);
+    $("needsEd").addEventListener("submit", (e) => e.preventDefault());
     PHONE.addEventListener("change", () => { closeMenus(); if (mode === "admin" && tab === "settings") renderSettingsPage(); });
   }
 
@@ -258,11 +268,101 @@ const Glass = (function () {
       dash = d; range = d.range; paintDash(enter);
     } catch (e) { if (mine === token) { $("dashBody").innerHTML = `<div class="dcard dempty"><h2>Couldn't load the dashboard</h2><p>${esc(e.message)}</p></div>`; } }
   }
+  /* ---------- Needs you: what waits on the GM at this hotel (GM and Owner) ---------- */
+  const CHANGED = { title: "title", category: "category", steps: "steps", script: "what to say", flag: "when to call a manager", keywords: "search words" };
+  let needs = null, needsTok = 0, needsBusy = false, nsKind = null;
+  const canNeeds = () => isGM() && hotelObj().ready;
+  const some = (list, max) => list.slice(0, max).join(", ") + (list.length > max ? ` and ${list.length - max} more` : "");
+  function needRows(H) {
+    const rows = [], pend = H.updates.filter((u) => !u.kept), kept = H.updates.filter((u) => u.kept);
+    if (pend.length) rows.push({ k: "upd", icon: "upd", title: `${plural(pend.length, "update")} from Lotus`, sub: some(pend.map((u) => u.title), 3) + (kept.length ? `. ${kept.length} more on SOPs you edited.` : ""), btns: [["Review", "review-upd"], ["Accept all", "accept-all", 1]] });
+    else if (kept.length) rows.push({ k: "upd", icon: "upd", title: `Lotus changed ${plural(kept.length, "SOP")} you edited`, sub: some(kept.map((u) => u.title), 3), btns: [["Review", "review-upd", 1]] });
+    if (H.fresh.length === 1) { const m = H.fresh[0]; rows.push({ k: "new", icon: "add", title: `New from Lotus: ${m.title}`, sub: `${m.cat} · not at your hotel yet`, btns: [["Skip", "skip", 0, m.id], ["Add", "add", 1, m.id]] }); }
+    else if (H.fresh.length) rows.push({ k: "new", icon: "add", title: `${H.fresh.length} new SOPs from Lotus`, sub: some(H.fresh.map((m) => m.title), 3), btns: [["Review", "review-new", 1]] });
+    if (H.drafts) rows.push({ k: "drafts", icon: "draft", title: `${plural(H.drafts, "draft")} to review`, sub: "Staff can't see drafts until you turn them on.", btns: [["Review drafts", "drafts", 1]] });
+    for (const b of H.imports) rows.push({ k: "imp" + b.id, icon: "lib", title: `Import waiting: ${some(b.files, 2) || "your upload"}`, sub: `${plural(b.open, "procedure")} to decide: use the guide's steps or keep yours.`, btns: [["Decide", "import", 1, b.id]] });
+    if (H.missing.length) rows.push({ k: "missing", icon: "info", title: `${plural(H.missing.length, "hotel detail")} missing`, sub: `${some(H.missing, 4)}. Staff see "ask a manager" until they are filled in.`, btns: [["Fill in", "details", 1]] });
+    return rows;
+  }
+  function paintNeeds(enter) {
+    const box = $("needsBody");
+    if (!needs || !canNeeds()) { box.hidden = true; box.innerHTML = ""; return; }
+    const rows = needRows(needs), focus = document.activeElement && box.contains(document.activeElement) ? document.activeElement.dataset.a : null;
+    box.hidden = false; box.classList.toggle("rise", !!enter);
+    box.innerHTML = html`<div class="nhd"><div class="nt"><h2>Needs you</h2>${rows.length ? `<span class="nbadge" role="status" aria-label="${rows.length} waiting">${rows.length}</span>` : ""}</div>
+      <div class="nq"><button type="button" class="gbtn sm press" data-a="details">${ic("info", 2)}Hotel details</button><button type="button" class="gbtn sm press" data-a="kit">${ic("kit", 2)}Welcome kit</button></div></div>
+      ${rows.length ? `<ul class="nrows">${rows.map((r) => `<li class="nrow"><span class="nico" aria-hidden="true">${ic(r.icon, 2)}</span><div class="nbody"><div class="nrt">${esc(r.title)}</div><div class="nrs">${esc(r.sub)}</div>
+        <div class="nacts">${r.btns.map(([label, a, main, id]) => `<button type="button" class="nbtn press${main ? " main" : ""}" data-a="${a}" ${id !== undefined ? `data-id="${esc(id)}"` : ""}>${label}</button>`).join("")}</div></div></li>`).join("")}</ul>`
+      : `<p class="nclear" role="status">All caught up. Nothing is waiting on you at this hotel.</p>`}`;
+    if (focus) { const b = box.querySelector(`[data-a="${focus}"]`); if (b) b.focus({ preventScroll: true }); }
+  }
+  async function loadNeeds(enter) {
+    if (!canNeeds()) { needs = null; paintNeeds(); return; }
+    const mine = ++needsTok, hid = STATE.hotel;
+    try {
+      const H = await api("/api/home");
+      if (mine !== needsTok || hid !== STATE.hotel || tab !== "dashboard" || mode !== "admin") return;
+      needs = H; paintNeeds(enter);
+    } catch (e) { if (mine === needsTok) { needs = null; paintNeeds(); } }
+  }
+  // After anything is handled: the SOPs may have changed, so reload them, then the card.
+  async function handled(msg) {
+    if (msg) toast(msg);
+    try { await loadHotel(); } catch { /* the card still refreshes */ }
+    renderNav();
+    const mine = ++needsTok;
+    try { const H = await api("/api/home"); if (mine === needsTok) { needs = H; paintNeeds(); if (nsKind) paintSheet(); } } catch (e) { fail(e); }
+  }
+  const post = (path) => api(path, { body: {} });
+  const enc = encodeURIComponent;
+  async function needsRun(fn, msg) {
+    if (needsBusy) return;
+    needsBusy = true; document.querySelectorAll("#needsBody .nbtn,#needsList .pillbtn").forEach((x) => (x.disabled = true));
+    try { await fn(); await handled(msg); } catch (e) { fail(e); await handled(); }
+    needsBusy = false;
+  }
+  const goSetup = (view) => { SU.step = 0; WZ.celebrate = false; SU.backTab = "dashboard"; go(view); };
+  function needsClick(e) {
+    const b = e.target.closest("[data-a]"); if (!b || needsBusy) return;
+    const a = b.dataset.a, id = b.dataset.id;
+    if (a === "details" || a === "kit") goSetup(a);
+    else if (a === "review-upd") openSheet("upd");
+    else if (a === "review-new") openSheet("new");
+    else if (a === "drafts") { libDraft = true; cat = ""; renderCatPills(); navTo("sops"); }
+    else if (a === "import") openImportBatch(+id);
+    else if (a === "accept-all") needsRun(async () => { for (const u of needs.updates.filter((x) => !x.kept)) await post(`/api/updates/${enc(u.sopId)}/accept`); }, "Accepted all updates");
+    else if (a === "add") needsRun(() => post(`/api/updates/new/${enc(id)}/add`), "Added. Staff can ask about it now");
+    else if (a === "skip") needsRun(() => post(`/api/updates/new/${enc(id)}/skip`), "Skipped. It's in your Off list if you change your mind");
+  }
+  // The review sheets: every update (Keep mine / Accept), or every new SOP (Add / Skip).
+  function openSheet(kind) { nsKind = kind; paintSheet(); showSheet("needsEd"); }
+  function paintSheet() {
+    const H = needs, up = nsKind === "upd", list = H ? (up ? H.updates : H.fresh) : [];
+    if (!list.length) { nsKind = null; if (!sheet.hidden) hideSheet(); return; }
+    $("needsTitle").textContent = up ? "Updates from Lotus" : "New from Lotus";
+    $("needsList").innerHTML = `<div class="group">${up ? list.map((u) => `<div class="cell upd"><span class="body"><span class="t wrap">${esc(u.title)}</span><span class="m wrapm">${esc(u.sopId)} · v${u.have} to v${u.latest} · ${u.relevant ? (u.changed.length ? "Changed: " + esc(u.changed.map((k) => CHANGED[k] || k).join(", ")) : "Updated") : "No change to what your staff see"}${u.kept ? " · You edited this one" : ""}${u.status === "off" ? " · Off at your hotel" : ""}</span></span>
+        <span class="acts"><button type="button" class="pillbtn press" data-keep="${esc(u.sopId)}">Keep mine</button><button type="button" class="pillbtn tint press" data-accept="${esc(u.sopId)}">Accept</button></span></div>`).join("")
+      : list.map((m) => `<div class="cell upd"><span class="body"><span class="t wrap">${esc(m.title)}</span><span class="m wrapm">${esc(m.id)} · ${esc(m.cat)}</span></span>
+        <span class="acts"><button type="button" class="pillbtn press" data-skip="${esc(m.id)}">Skip</button><button type="button" class="pillbtn tint press" data-add="${esc(m.id)}">Add</button></span></div>`).join("")}</div>`;
+    $("needsFoot").textContent = up ? "Accept replaces your copy with Lotus's latest wording. Keep mine leaves your copy as it is." : "Add turns the SOP on for your staff. Skip leaves it in your Off list.";
+  }
+  function sheetClick(e) {
+    const b = e.target.closest("button"); if (!b || needsBusy) return;
+    const d = b.dataset;
+    if (d.accept) needsRun(() => post(`/api/updates/${enc(d.accept)}/accept`), "Accepted the update");
+    else if (d.keep) needsRun(() => post(`/api/updates/${enc(d.keep)}/keep`), "Kept yours");
+    else if (d.add) needsRun(() => post(`/api/updates/new/${enc(d.add)}/add`), "Added. Staff can ask about it now");
+    else if (d.skip) needsRun(() => post(`/api/updates/new/${enc(d.skip)}/skip`), "Skipped. It's in your Off list if you change your mind");
+  }
+  new MutationObserver(() => { if (sheet.hidden) nsKind = null; }).observe(sheet, { attributes: true, attributeFilter: ["hidden"] });
+
   function renderDashboard() {
     const u = STATE.me;
     $("dashHello").textContent = `${greeting()}, ${u.name.split(" ")[0]}`;
     $("dashSub").textContent = `${hotelName(STATE.hotel)} · the desk at a glance`;
     $("dashBody").innerHTML = "";
+    needs = null; paintNeeds();
+    loadNeeds(true);
     loadDash(true);
   }
   return { init, renderNav, renderDashboard, renderSettingsPage, applyHotelAccent, current };

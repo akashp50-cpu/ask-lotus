@@ -541,7 +541,7 @@ function wzTeam() {
     <p class="hint">Front Desk can chat. Managers can also edit SOPs and see activity. Each person sets their own password the first time they sign in.</p>
     <div class="sec"><span>${users.length} ${users.length === 1 ? "person" : "people"} at ${esc(d.hotel.name)}</span></div><div class="group" id="wzUsers">${list}</div>
     ${Object.keys(WZ.pw).length ? `<p class="hint">Temporary passwords are only kept in this browser tab and go on your Welcome kit at the end. They aren't saved anywhere else.</p>` : ""}
-    <div class="group wzlater"><div class="rowline"><span>I'll add staff later<small>You can go live without a front desk login and add people from Hotel home.</small></span>${sw(later, "I'll add staff later", 'id="wzLater"')}</div></div>`;
+    <div class="group wzlater"><div class="rowline"><span>I'll add staff later<small>You can go live without a front desk login and add people from Team.</small></span>${sw(later, "I'll add staff later", 'id="wzLater"')}</div></div>`;
 }
 function wzBindTeam(root) {
   const nu = WZ.newUser, name = $("wzUName"), user = $("wzUUser");
@@ -583,7 +583,7 @@ function wzReview() {
   return `<div id="wzRev">${wzReviewInner(r, on)}</div>
     <button type="button" class="morebtn press" id="wzSopsBtn" aria-expanded="${WZ.sopsOpen}"><span class="body"><span class="t">SOPs that will be on: ${on}</span><span class="m">of ${d.sops.length}. Tap to switch categories or single SOPs.</span></span>${chev.replace('class="chev"', `class="chev ${WZ.sopsOpen ? "dn" : ""}"`)}</button>
     <div class="wzmore" id="wzSops" ${WZ.sopsOpen ? "" : "hidden"}><div class="group" id="catList">${catRowsHtml()}</div><p class="foot">${d.hotel.brand === "hilton" ? "" : "Hilton-only SOPs stay off for independent hotels."}</p></div>
-    <p class="hint">${esc(d.hotel.name)} opens to staff right away. You can switch SOPs, details and contacts any time from Hotel home.</p>`;
+    <p class="hint">${esc(d.hotel.name)} opens to staff right away. You can switch SOPs, details and contacts any time from the Dashboard.</p>`;
 }
 function wzReviewInner(r, on) {
   const ess = r.items.filter((i) => i.essential), rec = r.items.filter((i) => !i.essential);
@@ -607,7 +607,7 @@ async function wzGoLive() {
     const r = await api("/api/setup/go-live", { body: {} });
     await refreshMe(); await loadHotel();
     WZ.celebrate = true; WZ.kitUsers = null; wzLoadPw();
-    SU.data = null; SU.step = 0; SU.busy = false; STATE.home = null; tab = "home";
+    SU.data = null; SU.step = 0; SU.busy = false; tab = "dashboard"; SU.backTab = "dashboard";
     WZ.liveCount = r.on;
     go("kit");
   } catch (e) { SU.busy = false; paintWizard(false); fail(e); try { SU.data.readiness = await api("/api/setup/readiness"); paintWizard(false); } catch { /* keep */ } }
@@ -652,7 +652,7 @@ async function renderKit() {
   const rows = users.map((u) => {
     const pw = WZ.pw[u.id];
     return `<tr data-uid="${u.id}"><td><b>${esc(u.name)}</b><small>${esc(u.role)}</small></td><td><code>${esc(u.username)}</code></td><td class="pwc">${pw ? `<code>${esc(pw.pw)}</code>` : `<span class="noprint dim">Already set</span>${u.id === STATE.me.id ? "" : `<button type="button" class="pillbtn noprint press" data-reset="${u.id}">Reset password</button>`}`}</td></tr>`;
-  }).join("") || `<tr><td colspan="3" class="dim">No staff added yet. Add people from Team in Hotel home.</td></tr>`;
+  }).join("") || `<tr><td colspan="3" class="dim">No staff added yet. Add people from Team.</td></tr>`;
   const anyPw = users.some((u) => WZ.pw[u.id]);
   box.innerHTML = `<div class="wz kit">${hero}
     <div class="kitactions noprint"><button type="button" class="bigbtn press" id="kitPrintDesk">Print desk card</button><button type="button" class="bigbtn ghost press" id="kitPrintTeam">Print team sheet</button></div>
@@ -665,11 +665,11 @@ async function renderKit() {
       ${anyPw ? `<div class="banner noprint"><b>Heads up</b><span>The temporary passwords below are shown only now, in this browser tab. Print them or copy them before you leave this page. Each person sets their own password when they first sign in.</span></div><p class="printonly warn">Keep this sheet private. Temporary passwords work once; each person sets their own at first sign-in.</p>` : ""}
       <table class="kt"><thead><tr><th>Name</th><th>Username</th><th>Temporary password</th></tr></thead><tbody>${rows}</tbody></table>
       <p class="foot noprint">Sign in at <b>${esc(url)}</b>. "Reset password" makes a new temporary password for that person.</p></section>
-    <button type="button" class="bigbtn press noprint" id="kitDone">${live ? "Go to Hotel home" : "Back to Hotel home"}</button></div>`;
+    <button type="button" class="bigbtn press noprint" id="kitDone">${live ? "Go to the Dashboard" : "Back to the Dashboard"}</button></div>`;
   if (live && !RM.matches) { const b = $("wzBadge"); b.style.transform = "scale(.4)"; b.style.opacity = 0; Spring(0, (p) => { b.style.opacity = Math.min(1, p * 1.6); b.style.transform = `scale(${0.4 + 0.6 * p})`; }).to(1, { damping: 0.55, response: 0.7 }); }
   $("kitPrintDesk").onclick = () => wzPrint("desk");
   $("kitPrintTeam").onclick = () => wzPrint("team");
-  $("kitDone").onclick = () => { WZ.celebrate = false; WZ.pw = {}; try { sessionStorage.removeItem("asklotus.kit." + STATE.hotel); } catch { /* ok */ } tab = "home"; go("admin"); };
+  $("kitDone").onclick = () => { WZ.celebrate = false; WZ.pw = {}; try { sessionStorage.removeItem("asklotus.kit." + STATE.hotel); } catch { /* ok */ } tab = "dashboard"; go("admin"); };
   box.querySelectorAll("[data-reset]").forEach((b) => (b.onclick = async () => {
     try { const r = await api(`/api/users/${b.dataset.reset}/reset`, { hotel: false, body: {} }); const u = users.find((x) => String(x.id) === b.dataset.reset); WZ.pw[u.id] = { pw: r.tempPassword, name: u.name, username: u.username, role: u.role }; wzKeepPw(); toast(`New password for ${u.name}`); renderKit(); } catch (e) { fail(e); }
   }));
@@ -685,13 +685,13 @@ function wzPrint(what) {
 function ownerProgressHtml(h) {
   const p = (STATE.owner.prog || {})[h.id];
   if (h.setup === "live") return "";
-  if (!p) return `<div class="oprog"><div class="obar"><i style="width:0"></i></div><small class="dim">Checking progress…</small></div>`;
-  const top = p.missing.slice(0, 2);
-  const act = p.lastActivity ? `Last activity ${wzAgo(p.lastActivity)}` : "No activity yet";
-  return `<div class="oprog"><div class="orow"><b>${p.score}% ready</b><span class="ostep">${h.setup === "new" ? "Not started" : "On: " + esc(p.stepName)}</span></div>
+  if (!p) return `<div class="oprog"><div class="orow"><b>Setup</b><span class="ostep">Checking…</span></div><div class="obar"><i style="width:0"></i></div></div>`;
+  const left = p.missing.map((m) => wzLower(m.label));
+  const todo = left.length ? `Still to do: ${esc(left.slice(0, 3).join("; "))}${left.length > 3 ? ` and ${left.length - 3} more` : ""}` : "Everything needed is in. Ready to go live.";
+  const act = h.setup === "new" ? "Not started" : p.lastActivity ? `Last activity ${wzAgo(p.lastActivity)}` : "No activity yet";
+  return `<div class="oprog"><div class="orow"><b>Setup</b><b>${p.score}%</b></div>
     <div class="obar" role="progressbar" aria-valuenow="${p.score}" aria-valuemin="0" aria-valuemax="100" aria-label="Setup ${p.score}% ready"><i style="width:${p.score}%"></i></div>
-    ${top.length ? `<ul class="omiss">${top.map((m) => `<li>${esc(m.label)}</li>`).join("")}</ul>` : `<p class="omiss ok">Everything needed is in. Ready to go live.</p>`}
-    <small class="dim">${act}</small></div>`;
+    <p class="omiss${left.length ? "" : " ok"}">${todo}</p><small class="dim">${act}${p.stepName && h.setup !== "new" ? " · step: " + esc(p.stepName) : ""}</small></div>`;
 }
 async function loadOwnerProgress() {
   STATE.owner.prog = STATE.owner.prog || {};
@@ -699,7 +699,7 @@ async function loadOwnerProgress() {
   await Promise.all(todo.map(async (h) => {
     try { STATE.owner.prog[h.id] = await api(`/api/setup/readiness?hotel=${encodeURIComponent(h.id)}`, { hotel: false }); } catch { /* the card shows "Checking" */ }
   }));
-  todo.forEach((h) => { const slot = document.querySelector(`[data-prog="${CSS.escape(h.id)}"]`); if (slot) { slot.innerHTML = ownerProgressHtml(h); wzBindCopy(slot.closest(".hcard")); } });
+  todo.forEach((h) => { const slot = document.querySelector(`[data-prog="${CSS.escape(h.id)}"]`); if (slot) { slot.innerHTML = ownerProgressHtml(h); wzBindCopy(slot.closest(".pcard")); } });
 }
 function reminderText(h) {
   const p = (STATE.owner.prog || {})[h.id] || { score: 0, missing: [] };
