@@ -43,7 +43,9 @@ app.use(
 // Import uploads carry base64 documents (3 x 10 MB), so only those two routes get a bigger JSON limit, and only after sign-in.
 const jsonSmall = express.json({ limit: "6mb" });
 const jsonBig = express.json({ limit: "42mb" });
-app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet)|setup\/extract)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
+const jsonPdf = express.json({ limit: "15mb" }); // one PDF (10 MB) as base64
+const pdfsteps = require("./pdfsteps");
+app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet|pdf)|setup\/extract|author\/pdf)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
 app.use(
   session({
     store: new PgStore({ pool, tableName: "session" }),
@@ -119,7 +121,7 @@ async function settingsRow() {
 }
 
 function publicSettings(s, full) {
-  const base = { showSource: s.show_source, aiOn: !!(s.key_enc && s.provider !== "none") };
+  const base = { showSource: s.show_source, aiOn: !!(s.key_enc && s.provider !== "none") || ai.mockEnabled() };
   if (!full) return base;
   return {
     ...base,
@@ -877,20 +879,57 @@ async function authorContext(user, hotelId, target) {
   };
 }
 
-app.post(
-  "/api/author",
-  authorLimiter,
-  auth("Manager"),
-  hotel,
-  wrap(async (req, res) => {
+// Saves the screenshots cropped from a PDF as ordinary images (the same table and URLs photos use). Returns Map(image object -> id).
+async function saveCrops(extracted, hotelId, userId) {
+  const ids = new Map();
+  for (const p of extracted.procedures) for (const it of p.items) {
+    if (!it.image) continue;
+    const id = crypto.randomUUID();
+    await q("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", [id, hotelId, it.image.mime, it.image.buf, userId]);
+    ids.set(it.image, id);
+  }
+  return ids;
+}
+
+// What the AI is told about the SOPs that already exist (so it can say "this matches your SOP ...").
+async function authorCatalog(target, hotelId) {
+  const rows = target === "master"
+    ? (await q("SELECT id, title, category, keywords FROM master_sops ORDER BY id")).rows
+    : (await q("SELECT id, title, category, keywords FROM sops WHERE hotel_id=$1 AND status <> 'off' ORDER BY id", [hotelId])).rows;
+  return rows.map((r) => ({ id: r.id, title: r.title, category: r.category, kw: String(r.keywords || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 5).join(", ").slice(0, 80) }));
+}
+const pdfLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many PDFs. Wait a few minutes and try again." } });
+
+const authorHandler = wrap(async (req, res) => {
     const target = req.body.target === "master" ? "master" : "hotel";
     if (target === "master" && !isOwner(req.user)) return bad(res, 403, "Only the Owner can write master library SOPs.");
     const message = String(req.body.message || "").trim().slice(0, 3000);
     const imageIds = [...new Set((Array.isArray(req.body.imageIds) ? req.body.imageIds : []).map(String))].slice(0, MAX_AUTHOR_IMAGES);
-    if (!message && !imageIds.length) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
-    const cfg = aiConfig(await settingsRow(), "writing");
+    const pdfFile = req.path === "/api/author/pdf" ? req.body.file : null;
+    if (!message && !imageIds.length && !pdfFile) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
+    const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
     if (!cfg) return bad(res, 400, "AI isn't switched on. Use Write it myself.");
     const hotelKey = target === "master" ? null : req.hotel;
+
+    // An attached PDF guide: read its steps and screenshots now; the writing model gets a compact listing.
+    let pdfTurn = null;
+    if (pdfFile) {
+      try {
+        const name = String(pdfFile.name || "guide.pdf").replace(/[\\/]/g, "_").slice(0, 120);
+        const buf = imp.decodeUpload(pdfFile.data);
+        imp.checkFile(name, buf, ["pdf"]);
+        const ex = await pdfsteps.extractSteps(buf, { fallbackTitle: imp.titleFromFile(name) });
+        const ids = await saveCrops(ex, req.hotel, req.user.id);
+        const stepCount = ex.procedures.reduce((n, p) => n + p.items.length, 0);
+        pdfTurn = {
+          name, pages: ex.pages, shots: ex.shots, procedures: ex.procedures.length, steps: stepCount, titles: ex.procedures.map((p) => p.title).slice(0, 12),
+          warnings: ex.warnings, imageIds: [...ids.values()], listing: pdfsteps.listing(ex, (im) => ids.get(im)).slice(0, 30000),
+        };
+      } catch (e) {
+        if (e instanceof imp.ImportError || e instanceof pdfsteps.StepsError) return bad(res, 400, e.message);
+        throw e;
+      }
+    }
 
     // Load this manager's draft, or start one (seeded from the SOP being edited, or from what the editor currently shows).
     let row = null;
@@ -913,13 +952,16 @@ app.post(
       await q("INSERT INTO sop_drafts (id, hotel_id, user_id, sop_id, draft) VALUES ($1,$2,$3,$4,$5)", [id, hotelKey, req.user.id, sopId, JSON.stringify(draft)]);
       row = { id, hotel_id: hotelKey, sop_id: sopId, turns: [], draft };
     }
+    // The next SOP from the same PDF: the chat and the PDF stay, the finished draft is cleared.
+    if (req.body.nextSop === true && req.body.draftId != null) { row.draft = {}; row.sop_id = null; }
 
     // Photos: each must be one this user may see. The newest MAX_AUTHOR_SENT go to the model; all stay usable on steps.
     const captions = req.body.captions && typeof req.body.captions === "object" ? req.body.captions : {};
     const mine = (ids) => ids.length ? q("SELECT id, mime, data, hotel_id FROM images WHERE id = ANY($1)", [ids]).then((r) => new Map(r.rows.filter((i) => req.user.hotels.includes(i.hotel_id)).map((i) => [i.id, i]))) : Promise.resolve(new Map());
     const have = await mine(imageIds);
     const newImgs = imageIds.filter((id) => have.has(id)).map((id) => ({ id, caption: String(captions[id] || "").trim().slice(0, 200) || undefined }));
-    const turns = [...(row.turns || []), { role: "manager", text: message, images: newImgs }];
+    const turns = [...(row.turns || []), { role: "manager", text: message, images: newImgs, ...(pdfTurn ? { pdf: pdfTurn } : {}) }];
+    const pdfImageIds = turns.flatMap((t) => (t.pdf && t.pdf.imageIds) || []);
     const sessionImgs = [];
     for (const t of turns) for (const i of t.images || []) if (!sessionImgs.some((x) => x.id === i.id)) sessionImgs.push(i);
     const sendIds = sessionImgs.slice(-MAX_AUTHOR_SENT);
@@ -931,12 +973,13 @@ app.post(
     let asks = 0;
     for (let i = turns.length - 2; i >= 0 && turns[i].role === "assistant" && turns[i].kind === "ask"; i -= 2) asks++;
     const ctx = await authorContext(req.user, req.hotel, target);
+    const catalog = turns.some((t) => t.pdf) ? await authorCatalog(target, req.hotel) : [];
     let out;
     try {
       out = await ai.authorSop(cfg, {
         hotelName: ctx.hotelName, system: ctx.system, categories: ctx.categories, detailKeys: ctx.detailKeys, roles: ctx.roles,
         existingSop: row.sop_id ? { id: row.sop_id, title: draft && draft.title, category: draft && draft.category } : null,
-        draft, turns, images, allowedImages: [...onSteps, ...sessionImgs.map((i) => i.id)], asks,
+        draft, turns, images, allowedImages: [...onSteps, ...sessionImgs.map((i) => i.id), ...pdfImageIds], asks, catalog,
       });
     } catch (e) {
       console.error("AI author error:", e.message);
@@ -973,9 +1016,14 @@ app.post(
       draft: draftOut(newDraft),
       notes: out.action === "draft" ? out.notes : "",
       missing: out.action === "draft" ? out.missing : [],
+      multi: out.action === "ask" && !!out.multi,
+      updateId: out.action === "draft" && out.updateId ? out.updateId : null,
+      pdf: pdfTurn ? { name: pdfTurn.name, pages: pdfTurn.pages, shots: pdfTurn.shots, procedures: pdfTurn.procedures, steps: pdfTurn.steps, warnings: pdfTurn.warnings } : null,
     });
-  })
-);
+});
+
+app.post("/api/author", authorLimiter, auth("Manager"), hotel, authorHandler);
+app.post("/api/author/pdf", pdfLimiter, authorLimiter, auth("Manager"), jsonPdf, hotel, authorHandler);
 
 app.post(
   "/api/author/:id/discard",
@@ -2125,14 +2173,16 @@ async function importCtx(target) {
 const stepTexts = (steps) => (Array.isArray(steps) ? steps : []).map((x) => (typeof x === "string" ? x : x.t || "")).filter(Boolean);
 const sameText = (a, b) => JSON.stringify(a.map((x) => imp.norm(x))) === JSON.stringify(b.map((x) => imp.norm(x)));
 // New step list from plain text, keeping the photo and HotelKey wording of any step whose text is unchanged.
-const carryOver = (oldSteps, texts) => {
+// imgs: optional picture ids from a PDF import, one per step (they win over a carried-over photo).
+const carryOver = (oldSteps, texts, imgs) => {
   const old = new Map();
   for (const s of Array.isArray(oldSteps) ? oldSteps : []) if (s && s.t) old.set(imp.norm(s.t), s);
-  return texts.map((t) => {
+  return texts.map((t, i) => {
     const o = old.get(imp.norm(t));
-    return { t, hk: o && o.hk ? o.hk : null, img: o && o.img ? o.img : null };
+    return { t, hk: o && o.hk ? o.hk : null, img: (imgs && imgs[i]) || (o && o.img ? o.img : null) };
   });
 };
+const hasImgs = (m) => !!(m.imgs && m.imgs.some(Boolean));
 
 const itemCount = (r) => ["matches", "new", "details"].reduce((n, g) => n + (r[g] || []).length, 0);
 const openCount = (r) => ["matches", "new", "details"].reduce((n, g) => n + (r[g] || []).filter((x) => !x.state).length, 0);
@@ -2200,6 +2250,7 @@ app.get(
       canMaster: isOwner(req.user),
       hotels: hs,
       maxFiles: imp.MAX_FILES,
+      maxPdfs: 20,
       maxMb: imp.MAX_FILE_BYTES / 1048576,
       types: imp.EXTS,
     });
@@ -2277,6 +2328,85 @@ app.post(
   })
 );
 
+// One PDF guide at a time (the screen sends several in a row). Guides with a screenshot per step keep their pictures; any other PDF
+// goes through the ordinary text reading. With batchId the result is added to that batch instead of starting a new one.
+const pdfImportLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false, message: { error: "Too many imports. Wait a few minutes and try again." } });
+const sameStr = (a, b) => imp.norm(a) === imp.norm(b);
+function mergeIntoResult(result, add) {
+  for (const m of add.matches) {
+    const i = result.matches.findIndex((x) => x.sop_id === m.sop_id && !x.state);
+    if (i < 0) result.matches.push({ ...m, state: null });
+    else if (result.matches[i].steps.length < m.steps.length) result.matches[i] = { ...m, state: null };
+  }
+  for (const n of add.new) {
+    const i = result.new.findIndex((x) => sameStr(x.title, n.title) && !x.state);
+    if (i < 0) result.new.push({ ...n, state: null });
+    else if (result.new[i].steps.length < n.steps.length) result.new[i] = { ...n, state: null };
+  }
+  for (const d of add.details || []) if (!result.details.some((x) => !x.state && sameStr(x.key, d.key))) result.details.push({ ...d, state: null });
+}
+
+app.post(
+  "/api/import/pdf",
+  auth("GM"),
+  pdfImportLimiter,
+  jsonPdf,
+  importTarget,
+  wrap(async (req, res) => {
+    try {
+      const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
+      if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings. You can still import with the spreadsheet template.", noAi: true });
+      const [file] = loadFiles(req.body.file ? [req.body.file] : []);
+      imp.checkFile(file.name, file.buf, ["pdf"]);
+      const complete = (system, user, opts) => ai.complete(cfg, system, user, opts);
+      const ctx = await importCtx(req.target);
+      let result, meta = { warnings: [] };
+      let ex = null;
+      try { ex = await pdfsteps.extractSteps(file.buf, { fallbackTitle: imp.titleFromFile(file.name) }); }
+      catch (e) { if (e instanceof pdfsteps.StepsError) throw new imp.ImportError(`${file.name}: ${e.message}`); throw e; }
+      const imgHotel = req.target || req.user.hotels[0];
+      const ids = new Map();
+      if (pdfsteps.isStepGuide(ex)) {
+        for (const p of ex.procedures) for (const it of p.items) if (it.image) ids.set(it.image, crypto.randomUUID());
+        const listing = pdfsteps.listing(ex, (im) => ids.get(im)).slice(0, 40000);
+        result = await imp.analyzePdf(complete, listing, [...ids.values()], ctx);
+        // Only the pictures the result actually uses are saved.
+        const used = new Set([...result.matches, ...result.new].flatMap((x) => x.imgs || []).filter(Boolean));
+        for (const [im, id] of ids) if (used.has(id)) await q("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,$5)", [id, imgHotel, im.mime, im.buf, req.user.id]);
+        meta.shots = used.size;
+        meta.warnings = ex.warnings.map((w) => `${file.name}: ${w}`);
+      } else {
+        const { text, truncated, empty } = await imp.extractAll([file]);
+        if (!text) throw new imp.ImportError(`We couldn't find any text in ${file.name}.`);
+        const a = await imp.analyzeText(complete, text, ctx);
+        result = a.result;
+        if (truncated) meta.warnings.push(`${file.name}: longer than we can read at once, so only the first part was used.`);
+        if (a.failedParts) meta.warnings.push(`${file.name}: ${a.failedParts} of ${a.parts} parts couldn't be read.`);
+        meta.warnings.push(`${file.name}: no step-by-step screenshots found, read as plain text.`);
+      }
+      if (!result.matches.length && !result.new.length && !(result.details || []).length) throw new imp.ImportError(`We didn't find any procedures in ${file.name}.`);
+
+      const batchId = Number.isInteger(+req.body.batchId) && req.body.batchId ? +req.body.batchId : null;
+      if (batchId) {
+        const out = await tx(async (c) => {
+          const row = (await c.query("SELECT * FROM imports WHERE id=$1 FOR UPDATE", [batchId])).rows[0];
+          if (!row || !canUseBatch(req.user, row) || row.status === "discarded" || (row.hotel_id || null) !== (req.target || null)) return null;
+          const r = row.result;
+          mergeIntoResult(r, withStates(result));
+          r.meta = { ...(r.meta || {}), pdfShots: ((r.meta && r.meta.pdfShots) || 0) + (meta.shots || 0), warnings: [...((r.meta && r.meta.warnings) || []), ...meta.warnings] };
+          await c.query("UPDATE imports SET result=$2, status='review', filenames = array_append(filenames, $3) WHERE id=$1", [row.id, JSON.stringify(r), file.name]);
+          return (await c.query("SELECT * FROM imports WHERE id=$1", [row.id])).rows[0];
+        });
+        if (out) return res.json(await batchView(out));
+      }
+      const row = await newImportRow(req.user, req.target, "ai", [file.name], { ...withStates(result), meta: { pdfShots: meta.shots || 0, warnings: meta.warnings } });
+      res.json(await batchView(row));
+    } catch (e) {
+      importFail(res, e);
+    }
+  })
+);
+
 app.post(
   "/api/import/sheet",
   auth("GM"),
@@ -2342,10 +2472,10 @@ async function prefixFor(c, hotelId, category) {
 async function importUseMaster(c, m, user) {
   const cur = (await c.query("SELECT * FROM master_sops WHERE id=$1 FOR UPDATE", [m.sop_id])).rows[0];
   if (!cur) return { err: [404, "That master SOP no longer exists."] };
-  const steps = carryOver(cur.steps, m.steps);
+  const steps = carryOver(cur.steps, m.steps, m.imgs);
   const script = m.script || cur.script, flag = m.flag || cur.flag;
   const scriptHk = script !== cur.script ? null : cur.script_hk, flagHk = flag !== cur.flag ? null : cur.flag_hk;
-  if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag) return { same: true };
+  if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag && !hasImgs(m)) return { same: true };
   let hk = cur.hk_status;
   if (!hasHk(steps, scriptHk, flagHk)) hk = "same";
   else if (hkSig(steps, scriptHk, flagHk) !== hkSig(cur.steps, cur.script_hk, cur.flag_hk) || cur.hk_status === "same") hk = "draft";
@@ -2364,9 +2494,9 @@ async function importUseHotel(c, hotelId, m, user) {
     const inLib = (await c.query("SELECT 1 FROM master_sops WHERE id=$1", [m.sop_id])).rows.length;
     return { err: [inLib ? 400 : 404, inLib ? "This SOP is still in the Lotus library. After you go live you can update its wording from the Library." : "That SOP no longer exists at this hotel."] };
   }
-  const steps = carryOver(cur.steps, m.steps).map((s) => ({ t: s.t, img: s.img }));
+  const steps = carryOver(cur.steps, m.steps, m.imgs).map((s) => ({ t: s.t, img: s.img }));
   const script = m.script || cur.script, flag = m.flag || cur.flag;
-  if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag) return { same: true };
+  if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag && !hasImgs(m)) return { same: true };
   await c.query("INSERT INTO sop_history (hotel_id, sop_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4,$5)", [hotelId, cur.id, cur.version, JSON.stringify(sopOut(cur)), user.id]);
   const r = await c.query(
     `UPDATE sops SET steps=$3, script=$4, flag=$5, version=version+1, updated_at=now(), updated_by=$6, kept = (kept OR master_id IS NOT NULL)
@@ -2383,7 +2513,7 @@ async function importAdd(c, hotelId, item, category, user) {
   const id = await nextSopId(c, prefix);
   const title = item.title.slice(0, 200);
   if (!hotelId) {
-    const steps = item.steps.map((t) => ({ t, hk: null, img: null }));
+    const steps = item.steps.map((t, i) => ({ t, hk: null, img: (item.imgs && item.imgs[i]) || null }));
     await c.query(
       `INSERT INTO master_sops (id, category, title, steps, script, flag, keywords, applies, requires, hk_status, updated_by, status)
        VALUES ($1,$2,$3,$4,$5,$6,'',$7,$8,'same',$9,'draft')`,
@@ -2392,7 +2522,7 @@ async function importAdd(c, hotelId, item, category, user) {
     return { id, note: `Added ${id} to the master library as a draft. Publish it from the Master library when it is ready for hotels.` };
   }
   await ensureCategory(c, hotelId, category);
-  const steps = item.steps.map((t) => ({ t, img: null }));
+  const steps = item.steps.map((t, i) => ({ t, img: (item.imgs && item.imgs[i]) || null }));
   await c.query(
     `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by)
      VALUES ($1,$2,$3,$4,$5,$6,$7,'','draft',$8)`,

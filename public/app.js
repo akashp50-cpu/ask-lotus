@@ -723,7 +723,7 @@ function showSheet(which) {
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));
 }
-function hideSheet(velocity) { if (AU.active) authorDiscard(); sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; }); }
+function hideSheet(velocity) { if (AU.active) authorDiscard(); sheetH = cardEl.offsetHeight || sheetH; sheetS.to(sheetH, { damping: 1, response: 0.32, velocity }, () => { sheet.hidden = true; scrim.hidden = true; document.body.style.overflow = ""; if (AUQ && !AU.active) authorResume(); }); }
 sheet.querySelectorAll(".cancel").forEach((b) => (b.onclick = () => hideSheet()));
 scrim.onclick = () => hideSheet();
 addEventListener("keydown", (e) => { if (e.key === "Escape") { if (!$("lightbox").hidden) $("lightbox").hidden = true; else if (!sheet.hidden) hideSheet(); } });
@@ -1455,11 +1455,11 @@ function paintImpStart() {
       : `<p class="hint" style="margin-top:14px">Importing into <b>${esc(hotelName(STATE.hotel))}</b> only. Everything arrives as a draft. Nothing goes live until you switch it on.</p>`}
     <div class="sec"><span>Upload documents</span></div>
     <div class="group"><div class="cell imp">
-      <span class="body"><span class="t wrap">Read my binder, SOP files or checklists</span><span class="m wrapm">PDF, Word, Excel, CSV or text. Up to ${I.maxFiles} files, ${I.maxMb} MB each. We sort what we find into what you already have, new procedures and hotel details. You review everything first.</span></span>
+      <span class="body"><span class="t wrap">Read my binder, SOP files or checklists</span><span class="m wrapm">PDF, Word, Excel, CSV or text, ${I.maxMb} MB each. We sort what we find into what you already have, new procedures and hotel details. You review everything first.</span><span class="m wrapm"><b>PDF guides with a screenshot under each step</b> keep their screenshots on the steps. Choose up to ${I.maxPdfs} PDFs at once. Other files: up to ${I.maxFiles} at a time.</span></span>
       ${files.length ? `<div class="impfiles">${files.map((f, i) => `<span class="impfile"><span>${esc(f.name)} <small>${fmtSize(f.size)}</small></span><button type="button" class="iconbtn del" data-rm="${i}" aria-label="Remove ${esc(f.name)}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg></button></span>`).join("")}</div>` : ""}
       <div class="acts"><button type="button" class="pillbtn press" id="impPick" ${IMP.busy ? "disabled" : ""}>${files.length ? "Change files" : "Choose files"}</button>
       <button type="button" class="pillbtn tint press" id="impRead" ${!files.length || IMP.busy || !I.aiOn ? "disabled" : ""}>${IMP.busy === "ai" ? "Reading…" : "Read documents"}</button></div>
-      ${IMP.busy === "ai" ? `<span class="m wrapm"><span class="spin"></span> Reading your files. This can take a minute.</span>` : ""}
+      ${IMP.busy === "ai" ? `<span class="m wrapm" role="status"><span class="spin"></span> ${esc(IMP.progress || "Reading your files. This can take a minute.")}</span>` : ""}
       ${!I.aiOn ? `<span class="m wrapm no">Reading documents needs an AI key, and none is set up yet. ${isOwner() ? "Add one in Settings, or" : "Ask the Owner to add one, or"} use the spreadsheet below.</span>` : ""}
       <input type="file" id="impFile" multiple accept="${IMP_TYPES.join(",")}" hidden>
     </div></div>
@@ -1480,7 +1480,9 @@ function paintImpStart() {
   $("impFile").onchange = (e) => {
     const picked = [...e.target.files];
     const bad = picked.find((f) => !IMP_TYPES.includes("." + f.name.split(".").pop().toLowerCase()) || f.size > I.maxMb * 1048576);
-    if (picked.length > I.maxFiles) return toast(`Choose up to ${I.maxFiles} files`);
+    const nPdf = picked.filter((f) => /\.pdf$/i.test(f.name)).length;
+    if (picked.length - nPdf > I.maxFiles) return toast(`Choose up to ${I.maxFiles} files besides PDFs`);
+    if (nPdf > I.maxPdfs) return toast(`Choose up to ${I.maxPdfs} PDFs at a time`);
     if (bad) return toast(`${bad.name}: use PDF, Word, Excel, CSV or text under ${I.maxMb} MB`);
     IMP.files = picked; paintImpStart();
   };
@@ -1502,20 +1504,33 @@ async function impSend(kind, one) {
   try {
     let batch;
     if (kind === "ai") {
-      const files = await Promise.all(IMP.files.map(async (f) => ({ name: f.name, data: await readDataUrl(f) })));
-      batch = await api("/api/import/upload", { hotel: false, body: { target, files } });
+      // Other documents go in one request. PDFs go one at a time (each is read for its step screenshots) into the same batch.
+      const isPdf = (f) => /\.pdf$/i.test(f.name);
+      const others = IMP.files.filter((f) => !isPdf(f)), pdfs = IMP.files.filter(isPdf), problems = [];
+      if (others.length) {
+        IMP.progress = "Reading your documents. This can take a minute."; paintImpStart();
+        const files = await Promise.all(others.map(async (f) => ({ name: f.name, data: await readDataUrl(f) })));
+        batch = await api("/api/import/upload", { hotel: false, body: { target, files } });
+      }
+      for (let i = 0; i < pdfs.length; i++) {
+        IMP.progress = `Reading PDF ${i + 1} of ${pdfs.length}: ${pdfs[i].name}`; paintImpStart();
+        try {
+          batch = await api("/api/import/pdf", { hotel: false, body: { target, batchId: batch ? batch.id : undefined, file: { name: pdfs[i].name, data: await readDataUrl(pdfs[i]) } } });
+        } catch (e) { if (!batch && i === pdfs.length - 1) throw e; problems.push(`${pdfs[i].name}: ${e.message}`); }
+      }
+      if (batch && problems.length) batch.meta = { ...batch.meta, failedFiles: problems };
     } else {
       batch = await api("/api/import/sheet", { hotel: false, body: { target, file: { name: one.name, data: await readDataUrl(one) } } });
     }
-    IMP.busy = ""; IMP.files = []; IMP.batch = batch; IMP.open = new Set(); IMP.group = firstOpenGroup();
+    IMP.busy = ""; IMP.progress = ""; IMP.files = []; IMP.batch = batch; IMP.open = new Set(); IMP.group = firstOpenGroup();
     paintImpReview(); scrollTo(0, 0);
-  } catch (e) { IMP.busy = ""; if (IMP.target === target) paintImpStart(); fail(e); }
+  } catch (e) { IMP.busy = ""; IMP.progress = ""; if (IMP.target === target) paintImpStart(); fail(e); }
 }
 
 const firstOpenGroup = () => ["matches", "new", "details"].find((g) => IMP.batch[g].some((x) => !x.state)) || ["matches", "new", "details"].find((g) => IMP.batch[g].length) || "new";
 const STATE_TEXT = { kept: "Kept ours", used: "Used theirs", added: "Added as a draft", applied: "Saved", skipped: "Skipped" };
 
-const olSteps = (steps, id, clamp) => `<ol class="${clamp ? "clamp" : ""}">${steps.map((t) => `<li>${chipify(t)}</li>`).join("")}</ol>${clamp && steps.length > 3 ? `<button type="button" class="inlinebtn" data-more="${id}">Show all ${steps.length}</button>` : ""}`;
+const olSteps = (steps, id, clamp, imgs) => `<ol class="${clamp ? "clamp" : ""}">${steps.map((t, i) => `<li>${chipify(t)}${imgs && imgs[i] ? `<img class="stepThumb" alt="Screenshot for step ${i + 1}" loading="lazy" data-img="${esc(imgs[i])}" src="${imgUrl(imgs[i])}">` : ""}</li>`).join("")}</ol>${clamp && steps.length > 3 ? `<button type="button" class="inlinebtn" data-more="${id}">Show all ${steps.length}</button>` : ""}`;
 
 function paintImpReview() {
   const box = impEl(), B = IMP.batch, g = IMP.group, master = B.target === "master";
@@ -1525,6 +1540,8 @@ function paintImpReview() {
   if (B.meta.truncated) notes.push("The documents were longer than we can read at once, so only the first part was used. Split them and import the rest separately.");
   if (B.meta.failedParts) notes.push(`${B.meta.failedParts} of ${B.meta.parts} parts couldn't be read, so some procedures may be missing.`);
   if (B.meta.emptyFiles && B.meta.emptyFiles.length) notes.push(`No text found in: ${B.meta.emptyFiles.join(", ")}.`);
+  for (const w of B.meta.warnings || []) notes.push(esc(w));
+  for (const w of B.meta.failedFiles || []) notes.push(`Not imported: ${esc(w)}`);
   if (B.meta.examples) notes.push(`${B.meta.examples} example row${B.meta.examples === 1 ? "" : "s"} ignored.`);
   if (B.meta.skippedCount) notes.push(`${B.meta.skippedCount} row${B.meta.skippedCount === 1 ? "" : "s"} skipped: ${(B.meta.skipped || []).slice(0, 5).map((s) => `row ${s.row}${s.title ? " (" + esc(s.title) + ")" : ""} ${esc(s.reason.toLowerCase())}`).join("; ")}${B.meta.skippedCount > 5 ? "…" : ""}.`);
   const list = B[g];
@@ -1535,17 +1552,18 @@ function paintImpReview() {
       const k = "m" + m.i, full = IMP.open.has(k), ours = m.ours;
       return `<div class="cell imp ${m.state ? "done" : ""}">
         <div class="hd"><span class="body"><span class="t wrap">${esc(ours ? ours.title : m.title)}</span><span class="m wrapm">${esc(m.sop_id)}${m.difference ? " · " + esc(m.difference) : ""}</span></span>${stateTag(m)}</div>
-        <div class="cmp"><div><h4>${ours && ours.library ? "In the library" : "Ours"}</h4>${ours ? olSteps(ours.steps, k, !full) : "<em>This SOP no longer exists.</em>"}</div><div><h4>Theirs</h4>${olSteps(m.steps, k, !full)}</div></div>
+        <div class="cmp"><div><h4>${ours && ours.library ? "In the library" : "Ours"}</h4>${ours ? olSteps(ours.steps, k, !full) : "<em>This SOP no longer exists.</em>"}</div><div><h4>${m.imgs ? "From the guide" : "Theirs"}</h4>${olSteps(m.steps, k, !full, m.imgs)}</div></div>
         ${m.state ? "" : `<div class="acts"><button type="button" class="pillbtn press" data-act="keep" data-i="${m.i}">Keep ours</button><button type="button" class="pillbtn tint press" data-act="use" data-i="${m.i}" ${ours && !ours.library ? "" : "disabled"}>Use theirs</button></div>
-        <span class="m wrapm">${master ? "Using theirs updates the master and bumps its version. Hotels then see an update to accept or keep." : ours && ours.library ? "This hotel will start with the Lotus library wording when you go live. Keep ours is fine here. You can change wording from the Library after going live." : "Using theirs rewrites the steps of this SOP at your hotel."}</span>`}
+        <span class="m wrapm">${m.imgs ? "This guide overlaps your SOP: using it replaces the steps and adds its screenshots. " : ""}${master ? "Using theirs updates the master and bumps its version. Hotels then see an update to accept or keep." : ours && ours.library ? "This hotel will start with the Lotus library wording when you go live. Keep ours is fine here. You can change wording from the Library after going live." : "Using theirs rewrites the steps of this SOP at your hotel."}</span>`}
       </div>`;
     }).join("");
   } else if (g === "new") {
     body = B.new.map((n) => {
       const k = "n" + n.i, full = IMP.open.has(k);
       return `<div class="cell imp ${n.state ? "done" : ""}">
-        <div class="hd"><span class="body"><span class="t wrap">${esc(n.title)}</span><span class="m wrapm">${n.category ? esc(n.category) : '<span class="no">Needs a category</span>'} · ${plural(n.steps.length, "step")}${master && n.applies === "hilton" ? " · Hilton only" : ""}${master && n.requires ? " · only if " + esc(AMEN[n.requires] || n.requires) : ""}</span></span>${stateTag(n)}</div>
-        ${full ? `<div class="cmp one"><div>${olSteps(n.steps, k, false)}${n.script ? `<p class="prevp"><b>Say</b> ${chipify(n.script)}</p>` : ""}${n.flag ? `<p class="prevp"><b>Call</b> ${chipify(n.flag)}</p>` : ""}</div></div>` : ""}
+        <div class="hd"><span class="body"><span class="t wrap">${esc(n.title)}</span><span class="m wrapm">${n.category ? esc(n.category) : '<span class="no">Needs a category</span>'} · ${plural(n.steps.length, "step")}${n.imgs ? " · " + plural(n.imgs.filter(Boolean).length, "screenshot") : ""}${master && n.applies === "hilton" ? " · Hilton only" : ""}${master && n.requires ? " · only if " + esc(AMEN[n.requires] || n.requires) : ""}</span></span>${stateTag(n)}</div>
+        ${n.imgs && !full ? `<div class="thumbStrip">${n.imgs.filter(Boolean).slice(0, 6).map((id) => `<img alt="Screenshot" loading="lazy" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}
+        ${full ? `<div class="cmp one"><div>${olSteps(n.steps, k, false, n.imgs)}${n.script ? `<p class="prevp"><b>Say</b> ${chipify(n.script)}</p>` : ""}${n.flag ? `<p class="prevp"><b>Call</b> ${chipify(n.flag)}</p>` : ""}</div></div>` : ""}
         ${n.state ? "" : `<div class="acts">
           ${n.category ? "" : `<select data-cat="${n.i}" aria-label="Category" class="impsel"><option value="">Pick a category</option>${B.cats.map((c) => `<option>${esc(c)}</option>`).join("")}</select>`}
           <button type="button" class="pillbtn press" data-prev="${k}">${full ? "Hide" : "Preview"}</button>
@@ -1575,6 +1593,7 @@ function paintImpReview() {
   $("impList").onclick = async () => { IMP.batch = null; await renderImport(); };
   box.querySelectorAll("[data-g]").forEach((b) => (b.onclick = () => { IMP.group = b.dataset.g; paintImpReview(); }));
   box.querySelectorAll("[data-more]").forEach((b) => (b.onclick = () => { IMP.open.add(b.dataset.more); paintImpReview(); }));
+  box.querySelectorAll("img[data-img]").forEach((im) => (im.onclick = () => openLB(im.src)));
   box.querySelectorAll("[data-prev]").forEach((b) => (b.onclick = () => { const k = b.dataset.prev; IMP.open.has(k) ? IMP.open.delete(k) : IMP.open.add(k); paintImpReview(); }));
   box.querySelectorAll("[data-act]").forEach((b) => (b.onclick = () => {
     const body = { group: g, index: +b.dataset.i, action: b.dataset.act };
@@ -1605,7 +1624,8 @@ async function impAct(body) {
 
 /* ---------- New SOP / Edit SOP with AI ---------- */
 // A chat where the manager briefs the AI. The result always lands in the normal editor for review; nothing is published from here.
-const AU = { active: false, target: "hotel", sopId: null, from: "list", seed: null, draftId: null, draft: null, thread: [], pending: [], busy: false, cardOpen: true };
+const AU = { active: false, target: "hotel", sopId: null, from: "list", seed: null, draftId: null, draft: null, thread: [], pending: [], busy: false, cardOpen: true, queue: [], updateId: null, picks: new Set() };
+let AUQ = null; // SOPs still to write from the same PDF, kept while the finished one is open in the editor
 const AU_MAX_PHOTOS = 6;
 const fillify = (t) => chipify(t).replace(/\[FILL:([^\]]*)\]/g, '<span class="fill">[FILL:$1]</span>');
 const auIntro = () => AU.sopId || (AU.seed && AU.seed.title)
@@ -1613,14 +1633,15 @@ const auIntro = () => AU.sopId || (AU.seed && AU.seed.title)
   : "Tell me how this procedure works, in your own words. Attach screenshots or photos if you have them. I'll ask about anything I'm missing, then write the steps.";
 
 function authorOpen({ target, from, sopId, seed }) {
-  Object.assign(AU, { active: true, target, from, sopId: sopId || null, seed: seed && seed.title ? seed : null, draftId: null, draft: seed && seed.title ? seed : null, pending: [], busy: false, cardOpen: true });
+  AUQ = null;
+  Object.assign(AU, { active: true, target, from, sopId: sopId || null, seed: seed && seed.title ? seed : null, draftId: null, draft: seed && seed.title ? seed : null, pending: [], busy: false, cardOpen: true, queue: [], updateId: null, picks: new Set() });
   AU.thread = [{ role: "bot", text: auIntro() }];
   $("auTitle").textContent = AU.sopId ? `Edit ${AU.sopId} with AI` : seed && seed.title ? "Edit with AI" : AU.target === "master" ? "New master SOP with AI" : "New SOP with AI";
   $("auText").value = ""; $("auText").style.height = "auto";
   showSheet("authorEd"); authorRender(); setTimeout(() => $("auText").focus(), 380);
 }
 function authorDiscard() {
-  const id = AU.draftId; AU.active = false; AU.draftId = null;
+  const id = AU.draftId; AU.active = false; AU.draftId = null; AU.queue = []; AUQ = null;
   if (id) api(`/api/author/${encodeURIComponent(id)}/discard`, { body: {} }).catch(() => {});
 }
 function authorBack() { // leave the chat without a draft: back to the editor it came from, or close
@@ -1635,13 +1656,27 @@ $("auSelf").onclick = () => {
 };
 function authorHandoff() {
   if (!AU.draft) return;
-  const d = AU.draft, from = AU.from, target = AU.target;
-  authorDiscard();
+  const d = AU.draft, from = AU.from, target = AU.target, upd = AU.updateId;
+  if (AU.queue.length && AU.draftId) { // more SOPs to write from the same PDF: keep the chat, come back after this one is saved
+    AUQ = { draftId: AU.draftId, queue: AU.queue.slice(), target, thread: AU.thread.slice() };
+    AU.active = false; AU.draftId = null; AU.queue = [];
+  } else authorDiscard();
   if (from === "editor") {
     if (target === "master") { fillMasterEditor(d); showSheet("masterEd"); }
     else { fillEditor(d); showSheet("editor"); }
     toast("Draft loaded. Review it, then save.");
-  } else if (target === "master") openMaster(null, d); else openSop(null, null, null, d);
+  } else if (target === "master") openMaster(upd && STATE.owner.master && STATE.owner.master.sops.some((m) => m.id === upd) ? upd : null, d);
+  else openSop(upd && sop(upd) ? upd : null, null, null, d);
+  if (upd && from !== "editor") toast(`Updating ${upd}. Review it, then save.`);
+}
+// After the editor closes: the next SOP from the same PDF.
+function authorResume() {
+  const q = AUQ; AUQ = null; if (!q || !q.queue.length) return;
+  Object.assign(AU, { active: true, target: q.target, from: "list", sopId: null, seed: null, draftId: q.draftId, draft: null, pending: [], busy: false, cardOpen: true, queue: q.queue.slice(1), updateId: null, picks: new Set() });
+  AU.thread = [...q.thread, { role: "bot", text: `Saved or closed. Next up: ${q.queue[0]}.` }];
+  $("auTitle").textContent = AU.target === "master" ? "New master SOP with AI" : "New SOP with AI";
+  showSheet("authorEd"); authorRender();
+  authorSend(`Next one: ${q.queue[0]}`, [], null, { nextSop: true });
 }
 $("auOpen").onclick = authorHandoff;
 function authorRestart() {
@@ -1661,6 +1696,8 @@ function authorCard() {
     <ol>${d.steps.map((x) => `<li><span>${fillify(x.t)}${x.img ? `<img alt="Photo for this step" loading="lazy" data-img="${esc(x.img)}" src="${imgUrl(x.img)}">` : ""}</span></li>`).join("")}</ol>
     ${line("Say it like this", d.script)}${line("Call the manager if", d.flag)}${line("Ways staff might ask", d.kw)}
     ${r.notes ? `<div class="auNote">${esc(r.notes)}</div>` : ""}
+    ${AU.updateId ? `<div class="auNote">This replaces the steps of ${esc(AU.updateId)} when you save it in the editor.</div>` : ""}
+    ${AU.queue.length ? `<div class="auNote">${AU.queue.length} more to write after this one: ${AU.queue.map(esc).join("; ")}. Open this one in the editor, save it, and the next one follows.</div>` : ""}
     ${r.missing && r.missing.length ? `<div class="auMiss">Still needed: ${r.missing.map(esc).join("; ")}</div>` : ""}
     <div class="auActs"><button type="button" data-a="start">Start over</button><button type="button" class="pri" data-a="open">Open in editor</button></div>
   </div>`;
@@ -1669,11 +1706,23 @@ function authorRender(scrollTo) {
   const body = $("auBody"), lastIdx = AU.thread.map((m) => m.role).lastIndexOf("bot");
   body.innerHTML = AU.thread.map((m, i) => {
     if (m.role === "err") return `<div class="auMsg err" role="alert">${esc(m.text)}</div>`;
-    if (m.role === "me") return `<div class="auMsg me">${m.text ? esc(m.text) : ""}${m.imgs && m.imgs.length ? `<div class="auThumbs">${m.imgs.map((id) => `<img alt="Attached photo" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}</div>`;
-    const chips = m.options && m.options.length ? `<div class="auChips">${m.options.map((o) => `<button type="button" class="chip press" data-opt="${esc(o)}" ${m.answered || AU.busy || i !== lastIdx ? "disabled" : ""}>${esc(o)}</button>`).join("")}</div>` : "";
+    if (m.role === "me") return `<div class="auMsg me">${m.pdf ? `<span class="auPdf" title="${esc(m.pdf.name)}"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/></svg><span>${esc(m.pdf.name)}${m.pdf.pages ? ` · ${plural(m.pdf.pages, "page")} · ${plural(m.pdf.shots, "screenshot")}` : " · reading…"}</span></span>` : ""}${m.text ? esc(m.text) : ""}${m.imgs && m.imgs.length ? `<div class="auThumbs">${m.imgs.map((id) => `<img alt="Attached photo" data-img="${esc(id)}" src="${imgUrl(id)}">`).join("")}</div>` : ""}</div>`;
+    const live = !(m.answered || AU.busy || i !== lastIdx);
+    const chips = m.options && m.options.length
+      ? `<div class="auChips">${m.options.map((o) => m.multi
+        ? `<button type="button" class="chip press" data-pick="${esc(o)}" aria-pressed="${AU.picks.has(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`
+        : `<button type="button" class="chip press" data-opt="${esc(o)}" ${live ? "" : "disabled"}>${esc(o)}</button>`).join("")}${m.multi ? `<button type="button" class="chip press auGo" data-go="1" ${live && AU.picks.size ? "" : "disabled"}>${AU.picks.size ? `Continue with ${AU.picks.size}` : "Tap the ones you want"}</button>` : ""}</div>` : "";
     return `<div class="auMsg bot">${esc(m.text)}</div>${chips}`;
   }).join("") + (AU.busy ? `<div class="auTyping"><span class="spin"></span> Writing…</div>` : "") + authorCard();
   body.querySelectorAll("[data-opt]").forEach((b) => (b.onclick = () => { AU.thread[lastIdx].answered = true; authorSend(b.dataset.opt, []); }));
+  body.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { const o = b.dataset.pick; AU.picks.has(o) ? AU.picks.delete(o) : AU.picks.add(o); authorRender(); }));
+  body.querySelectorAll("[data-go]").forEach((b) => (b.onclick = () => {
+    const m = AU.thread[lastIdx], chosen = m.options.filter((o) => AU.picks.has(o));
+    if (!chosen.length) return;
+    m.answered = true; AU.picks = new Set();
+    AU.queue = chosen.slice(1);
+    authorSend(chosen.length === 1 ? `Make this one: ${chosen[0]}` : `Make these ${chosen.length} SOPs, one at a time. Start with: ${chosen[0]}. Then: ${chosen.slice(1).join("; ")}`, []);
+  }));
   body.querySelectorAll("[data-img]").forEach((im) => (im.onclick = () => openLB(im.src)));
   body.querySelectorAll("#auCard [data-a]").forEach((b) => (b.onclick = () => {
     const a = b.dataset.a;
@@ -1687,16 +1736,20 @@ function authorRender(scrollTo) {
   else body.scrollTop = body.scrollHeight;
 }
 
-async function authorSend(text, imageIds) {
+async function authorSend(text, imageIds, pdf, extra) {
   text = String(text || "").trim();
-  if (AU.busy || (!text && !imageIds.length)) return;
-  AU.thread.push({ role: "me", text, imgs: imageIds });
+  if (AU.busy || (!text && !imageIds.length && !pdf)) return;
+  const mine = { role: "me", text, imgs: imageIds, pdf: pdf ? { name: pdf.name } : null };
+  AU.thread.push(mine);
   AU.busy = true; authorRender();
   try {
-    const r = await api("/api/author", { body: { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined } });
+    const body = { draftId: AU.draftId || undefined, message: text, imageIds, target: AU.target, sopId: AU.sopId || undefined, seed: AU.draftId ? undefined : AU.seed || undefined, ...(extra || {}) };
+    if (pdf) body.file = pdf;
+    const r = await api(pdf ? "/api/author/pdf" : "/api/author", { body });
     AU.draftId = r.draftId; AU.last = r;
-    if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options }); AU.cardOpen = false; }
-    else { AU.draft = r.draft; AU.thread.push({ role: "bot", text: r.notes || "Here's the draft. Check it on the card below." }); AU.cardOpen = true; }
+    if (r.pdf) { mine.pdf = r.pdf; if (r.pdf.warnings && r.pdf.warnings.length) AU.thread.push({ role: "bot", text: r.pdf.warnings.join(" ") }); }
+    if (r.kind === "ask") { AU.thread.push({ role: "bot", text: r.question, options: r.options, multi: !!r.multi }); AU.cardOpen = false; AU.picks = new Set(); }
+    else { AU.draft = r.draft; AU.updateId = r.updateId || null; AU.thread.push({ role: "bot", text: r.notes || "Here's the draft. Check it on the card below." }); AU.cardOpen = true; }
     AU.busy = false; authorRender("last");
   } catch (e) {
     AU.busy = false;
@@ -1730,6 +1783,18 @@ async function authorAttach(files) {
     authorRender();
   }
 }
+$("auAttachPdf").onclick = () => { $("auPdf").value = ""; $("auPdf").click(); };
+$("auPdf").onchange = async () => {
+  const f = $("auPdf").files[0]; if (!f) return;
+  if (AU.busy) return toast("Wait for the reply first");
+  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") return toast("Choose a PDF");
+  if (f.size > 10 * 1048576) return toast("That PDF is over 10 MB");
+  const text = $("auText").value, ids = AU.pending.map((p) => p.id).filter(Boolean);
+  if (AU.pending.some((p) => p.up)) return toast("Wait for the photo to finish uploading");
+  try { var data = await readDataUrl(f); } catch (e) { return fail(e); }
+  $("auText").value = ""; $("auText").style.height = "auto"; AU.pending = [];
+  authorSend(text, ids, { name: f.name, data });
+};
 $("auAttach").onclick = () => { $("auPick").value = ""; $("auPick").click(); };
 $("auPick").onchange = () => authorAttach($("auPick").files);
 $("auText").addEventListener("paste", (e) => {

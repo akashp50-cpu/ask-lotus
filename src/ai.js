@@ -115,7 +115,8 @@ function buildRequest(cfg, system, user, opts = {}) {
 const MIN_OUTPUT_TOKENS = 4000;
 
 async function complete(cfg, system, user, opts = {}) {
-  if (mockEnabled()) return mockNext();
+  // Test hook only: "@img:N" in a scripted reply becomes the Nth "[img:ID]" of the prompt (ids from a PDF are made at request time).
+  if (mockEnabled()) { const ids = [...String(user).matchAll(/\[img:([0-9a-f-]{36})\]/g)].map((m) => m[1]); return mockNext().replace(/@img:(\d+)/g, (m, n) => ids[+n - 1] || ""); }
   const timeoutMs = opts.timeoutMs || TIMEOUT_MS;
   const req = buildRequest(cfg, system, user, opts);
   return req.read(await post(req.url, req.headers, req.body, timeoutMs));
@@ -382,15 +383,15 @@ async function converse(cfg, { hotelName, system, turns, candidates, catalog, la
 
 // ---------- SOP authoring (manager briefs the AI; it asks, then drafts) ----------
 const AUTHOR_MAX_ASKS = 3;
-const AUTHOR_TIMEOUT_MS = 45000, AUTHOR_MAX_TOKENS = 1500;
+const AUTHOR_TIMEOUT_MS = 45000, AUTHOR_MAX_TOKENS = 1500, AUTHOR_PDF_MAX_TOKENS = 5000;
 
-function authorSystem({ hotelName, system, categories, detailKeys, roles, editing, asks }) {
+function authorSystem({ hotelName, system, categories, detailKeys, roles, editing, asks, pdf }) {
   return [
     `You are a seasoned hotel operator (20+ years, front desk to general manager) writing the standard operating procedures (SOPs) that front desk agents follow in the middle of a shift${hotelName ? ` at ${hotelName}` : ""}. A manager is briefing you like an assistant: they describe a procedure in their own words and may attach screenshots or photos. You turn it into a clean SOP.`,
     system ? `Front desk system: ${system}. Use that name in the steps, never "the PMS" or "the system".` : "",
     "Reply with ONE JSON object and nothing else, in one of these shapes:",
-    '{"action":"ask","question":"one or two short questions in one string","options":["optional, 2-4 short answers"]}',
-    '{"action":"draft","sop":{"title":"...","category":"one name from the category list","steps":[{"t":"step text","img":"photo id or null"}],"script":"what to say to the guest, or empty","flag":"when to call a manager, or empty","kw":"comma separated phrases staff might type"},"notes":"one line on what you did or assumed","missing":["things still unknown"]}',
+    '{"action":"ask","question":"one or two short questions in one string","options":["optional, 2-4 short answers"]' + (pdf ? ',"multi":true or false' : "") + "}",
+    '{"action":"draft","sop":{"title":"...","category":"one name from the category list","steps":[{"t":"step text","img":"photo id or null"}],"script":"what to say to the guest, or empty","flag":"when to call a manager, or empty","kw":"comma separated phrases staff might type"},"notes":"one line on what you did or assumed","missing":["things still unknown"]' + (pdf ? ',"update_sop_id":"id of the existing SOP this replaces, only when the manager chose to update it"' : "") + "}",
     `WHEN TO ASK: If the manager's message and photos are enough for a usable SOP, DRAFT IMMEDIATELY. Ask only about genuinely missing critical information: something that changes what the agent does and cannot be inferred (who to call, which screen or button, a time limit or fee that must be stated, which branch applies). One or two short questions per turn, written in the one "question" string. Add "options" only when the answer is a short choice (2 to 4 options, 5 words or fewer each). Never ask about wording or format, never ask for confirmation, never ask what was already said. Questions asked in a row so far: ${asks || 0} of ${AUTHOR_MAX_ASKS}. ${asks >= AUTHOR_MAX_ASKS ? "You MUST draft now: use [FILL: ...] for what is unknown and list it in missing." : `After ${AUTHOR_MAX_ASKS} questions in a row you MUST draft.`} If the manager says they don't know, draft with a [FILL: ...] marker.`,
     "STEPS: Short imperative steps, one action per step, plain words a new hire can follow, starting with the verb. Name the exact screen path with > (for example Reservation > Stay tab > Departure Time) only when the manager gave it. No numbering inside the text, no markdown, no emojis.",
     "KEEP THEIR WORDING: Labels, quoted text, field names, templates and formats the manager gave (for example a log book headline format) must be kept character for character, in quotes where they gave quotes. Do not paraphrase them.",
@@ -402,8 +403,17 @@ function authorSystem({ hotelName, system, categories, detailKeys, roles, editin
       ? "EDITING: The manager is changing an existing SOP (shown as CURRENT DRAFT). Keep everything they did not mention exactly as it is: same wording, same photos, same order. Return the FULL updated SOP, not a diff. Keep photo ids already on steps unless asked to change them."
       : "NEW SOP: If a CURRENT DRAFT is shown, you already drafted it earlier in this chat. Apply the manager's newest message to it and return the FULL updated SOP.",
     "notes is one short line (25 words or fewer) on what you did or assumed. missing lists short items still unknown, or [].",
+    pdf ? PDF_RULES : "",
   ].filter(Boolean).join("\n");
 }
+
+// Added to the author prompt when the manager attached a PDF quick-reference guide.
+const PDF_RULES = [
+  "PDF GUIDE: The manager attached a PDF guide. Its text was read for you and is listed in the conversation as PROCEDURE n, then numbered lines \"step text [img:ID]\". Each ID is a screenshot cropped from the guide, already saved; you never see the pictures. Attach one to a step with that step's \"img\" (the ID only, no \"img:\" prefix). Use only IDs from the listing, each on one step only.",
+  "PDF STEPS: Rewrite each step short, plain and staff-friendly in the hotel's own wording (say \"PEP\", never OnQ or \"the PMS\"; the folio is V2; the property is cashless; night audit is the Night Audit tab, then Start). Keep one screenshot per step where it helps the agent find the screen. When two steps have near-identical screenshots, or the screenshot only shows a confirmation, keep one and drop the other. Merge a step that is only an introduction into the next one. Never invent a click, button, field, fee or number that is not in the guide. Keep the guide's order. Ignore policy text and corporate notices that are not steps.",
+  "PDF SPLIT OR UPDATE: Before you draft, check two things. (1) If the guide holds MORE THAN ONE separate procedure, ask whether to make one SOP for each, as ONE question listing them, for example \"This guide has 2 procedures: Print one guest's registration card / Print all arrivals' cards. Make 2 SOPs?\". Give each procedure as its own short option and set \"multi\":true so the manager can tick several; add an option \"Combine into one SOP\" only if it makes sense. (2) If a procedure clearly overlaps an SOP in the CATALOG, ask, for example \"This matches your SOP 'Standard check-out' (CO-04): update it, or make a new one?\" with options \"Update CO-04\" and \"Make a new SOP\" and \"multi\":false. Do both in one question when both apply. If the guide is one procedure with no overlap, DRAFT IMMEDIATELY and ask nothing. The manager's answer is final: never ask the same thing twice.",
+  "PDF ONE AT A TIME: Draft only ONE SOP per reply. When the manager asks for several, write the first now and say in notes which one is next; the manager will ask for the next one after saving this one. When the manager chose to update an existing SOP, return the full updated SOP built from the guide, and set \"update_sop_id\" to that SOP's id from the CATALOG; otherwise leave it out. Never put the existing SOP's id on a new SOP.",
+].join("\n");
 
 const draftBlock = (d) => !d ? "" : [
   `CURRENT DRAFT: ${d.title || "(no title yet)"} [${d.category || "no category"}]`,
@@ -413,12 +423,16 @@ const draftBlock = (d) => !d ? "" : [
 
 // turns: [{role:"manager",text,images:[{id,caption}]} | {role:"assistant",kind:"ask",question,options} | {role:"assistant",kind:"draft",notes}]
 // images: [{id,mime,b64,caption}] actually sent (max 6). allowedImages: extra photo ids the draft may use (already on the existing SOP).
-async function authorSop(cfg, { hotelName, system, categories, detailKeys = [], roles = [], existingSop, draft, turns, images = [], allowedImages = [], asks = 0 }) {
-  const sys = authorSystem({ hotelName, system, categories, detailKeys, roles, editing: !!existingSop, asks });
-  const convo = turns.slice(-20).map((t) => {
+async function authorSop(cfg, { hotelName, system, categories, detailKeys = [], roles = [], existingSop, draft, turns, images = [], allowedImages = [], asks = 0, catalog = [] }) {
+  const hasPdf = turns.some((t) => t.pdf);
+  const sys = authorSystem({ hotelName, system, categories, detailKeys, roles, editing: !!existingSop, asks, pdf: hasPdf });
+  const lastPdf = turns.map((t, i) => (t.pdf ? i : -1)).filter((i) => i >= 0).pop();
+  const first = Math.max(0, turns.length - 20);
+  const convo = turns.slice(-20).map((t, k) => {
     if (t.role === "manager") {
       const ph = (t.images || []).map((i) => i.id + (i.caption ? ` (${i.caption})` : "")).join(", ");
-      return `MANAGER: ${t.text || "(no text)"}${ph ? ` [attached photos: ${ph}]` : ""}`;
+      const pdf = t.pdf ? (first + k === lastPdf ? `\n[Attached PDF "${t.pdf.name}", ${t.pdf.pages} pages, ${t.pdf.shots} screenshots. What it contains:]\n${t.pdf.listing}\n[End of PDF]` : `\n[Attached PDF "${t.pdf.name}" (listed earlier in this chat)]`) : "";
+      return `MANAGER: ${t.text || (t.pdf ? "(attached a PDF guide)" : "(no text)")}${ph ? ` [attached photos: ${ph}]` : ""}${pdf}`;
     }
     if (t.kind === "ask") return `ASSISTANT asked: ${t.question}${(t.options || []).length ? ` [options: ${t.options.join(" | ")}]` : ""}`;
     return `ASSISTANT drafted the SOP${t.notes ? ` (${t.notes})` : ""}`;
@@ -426,13 +440,15 @@ async function authorSop(cfg, { hotelName, system, categories, detailKeys = [], 
   const sent = cleanImages(images);
   const user = [
     existingSop ? `Editing existing SOP ${existingSop.id || ""}: ${existingSop.title || ""}` : "",
-    draftBlock(draft), "", "Conversation (the last MANAGER line is the newest message):", convo,
+    draftBlock(draft),
+    hasPdf && catalog.length ? `\nCATALOG of the SOPs that already exist (id | title | category | keywords):\n${catalog.map((c) => `${c.id} | ${c.title} | ${c.category}${c.kw ? " | " + c.kw : ""}`).join("\n")}\n` : "",
+    "", "Conversation (the last MANAGER line is the newest message):", convo,
     sent.length ? `\nPhotos follow, each introduced with its id: ${sent.map((i) => i.id).join(", ")}.` : "",
   ].filter((x) => x !== "").join("\n");
-  const text = await complete(cfg, sys, user, { maxTokens: AUTHOR_MAX_TOKENS, timeoutMs: AUTHOR_TIMEOUT_MS, images: sent });
+  const text = await complete(cfg, sys, user, { maxTokens: hasPdf ? AUTHOR_PDF_MAX_TOKENS : AUTHOR_MAX_TOKENS, timeoutMs: hasPdf ? 90000 : AUTHOR_TIMEOUT_MS, images: sent });
   const raw = looseParse(text);
   if (!raw) throw new Error("The AI reply wasn't understood");
-  return coerceAuthor(raw, { categories, validImages: [...sent.map((i) => i.id), ...allowedImages], fallbackCategory: (draft && draft.category) || (existingSop && existingSop.category) || "" });
+  return coerceAuthor(raw, { pdf: hasPdf, categories, validImages: [...sent.map((i) => i.id), ...allowedImages], catalogIds: catalog.map((c) => c.id), fallbackCategory: (draft && draft.category) || (existingSop && existingSop.category) || "" });
 }
 
 const tidy = (v, n) => (typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, n) : "");
@@ -451,7 +467,8 @@ function coerceAuthor(raw, ctx) {
       const t = tidy(typeof o === "string" ? o : o && o.text, 40);
       if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); options.push(t); }
     }
-    return { action: "ask", question, options: options.length >= 2 ? options.slice(0, 4) : [] };
+    const opts = options.length >= 2 ? options.slice(0, ctx.pdf ? 8 : 4) : [];
+    return { action: "ask", question, options: opts, ...(ctx.pdf && opts.length && raw.multi === true ? { multi: true } : {}) };
   }
   const src = raw && (raw.sop || (action === "draft" ? raw : null));
   if (!src) throw new Error("The AI reply wasn't understood");
@@ -480,6 +497,7 @@ function coerceAuthor(raw, ctx) {
     sop: { title, category, steps, script: longText(src.script), flag: longText(src.flag), kw: tidy(String(kwRaw), 1000) },
     notes: tidy(raw.notes, 300),
     missing,
+    ...(ctx.pdf ? { updateId: (ctx.catalogIds || []).find((id) => id.toLowerCase() === String(raw.update_sop_id || src.update_sop_id || "").trim().toLowerCase()) || null } : {}),
   };
 }
 
