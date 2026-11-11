@@ -1029,7 +1029,7 @@ const DQ_Q = {
   pack_and_plays: ["Pack-and-plays", "Do you have pack-and-plays for guests?"],
   connecting_rooms: ["Connecting rooms", "Do you have connecting rooms?"],
 };
-const SEC_ORDER = ["Hotel identity", "Timing & policies", "Rooms", "Supplies & storage", "Tools & systems", "Other details"];
+const SEC_ORDER = ["Hotel identity", "Timing & policies", "Rooms", "Supplies & storage", "Emergency & basics", "Tools & systems", "Other details"];
 const SU = {
   hotel: null, data: null, view: "wizard", step: 0, ans: {}, det: {}, ov: { on: new Set(), off: new Set() },
   pick: "questions", from: null, open: new Set(), showAll: false, secOpen: new Set(["Timing & policies"]),
@@ -1071,6 +1071,7 @@ async function suLoad() {
   SU.data = d;
   SU.ans = {}; [...AMEN_LIST, ...DQ_LIST].forEach((k) => (SU.ans[k] = d.answers[k])); // undefined = not answered yet
   SU.det = { ...(d.details || {}) };
+  WZ.rooms = null;
   SU.ov = { on: new Set(d.selection.on), off: new Set(d.selection.off) };
   if (d.copyFrom) { SU.pick = "copy"; SU.from = SU.from || d.copyFrom; }
   if (!SU.from && d.sources[0]) SU.from = d.sources[0].id;
@@ -1079,7 +1080,7 @@ async function suLoad() {
 
 async function renderSetup(fresh) {
   setupHeader();
-  if (SU.hotel !== STATE.hotel) { Object.assign(SU, { hotel: STATE.hotel, data: null, step: 0, open: new Set(), showAll: false, from: null, pick: "questions", busy: false }); fresh = true; WZ.crows = null; WZ.more = new Set(); WZ.pend = {}; WZ.pw = {}; }
+  if (SU.hotel !== STATE.hotel) { Object.assign(SU, { hotel: STATE.hotel, data: null, step: 0, open: new Set(), showAll: false, from: null, pick: "questions", busy: false }); fresh = true; WZ.crows = null; WZ.rooms = null; WZ.roomNote = ""; WZ.pend = {}; WZ.pw = {}; }
   SU.view = suView();
   if (SU.view === "kit") { renderKit(); return; }
   if (fresh || !SU.data) {
@@ -1106,7 +1107,7 @@ function paintSetup() {
 /* ----- details form pieces (used by step 2, the review side panel and Hotel details) ----- */
 function fldHtml(df, opt = {}) {
   const long = (df.hint || "").length > 30;
-  return `<label class="fld"><span>${esc(df.key)}</span><input data-k="${esc(df.key)}" value="${esc(SU.det[df.key] || "")}" placeholder="${long ? "" : esc(df.hint || "")}" autocomplete="off" autocapitalize="sentences">${long ? `<em class="fh">${esc(df.hint)}</em>` : ""}${opt.used ? `<em class="fh">Used in ${plural(opt.used, "SOP")}</em>` : ""}</label>`;
+  return `<label class="fld"><span>${esc(df.label || df.key)}</span><input data-k="${esc(df.key)}" value="${esc(SU.det[df.key] || "")}" placeholder="${long ? "" : esc(df.hint || "")}" autocomplete="off" autocapitalize="sentences">${long ? `<em class="fh">${esc(df.hint)}</em>` : ""}${opt.used ? `<em class="fh">Used in ${plural(opt.used, "SOP")}</em>` : ""}</label>`;
 }
 function saveDetail(k, v) {
   return suRun(() => api("/api/hotel/details", { method: "PUT", body: { merge: true, details: { [k]: v } } })).catch(fail);
@@ -1136,14 +1137,14 @@ function bindSecs(root) {
     b.setAttribute("aria-expanded", open); b.nextElementSibling.hidden = !open; b.querySelector(".chev").classList.toggle("dn", open);
   }));
 }
-const generalSections = (defs) => SEC_ORDER.map((t) => [t, defs.filter((d) => !d.group && !d.q && d.section === t)]).filter(([, l]) => l.length);
+const generalSections = (defs) => SEC_ORDER.map((t) => [t, defs.filter((d) => !d.hidden && !d.gate && !d.q && !d.group && d.section === t)]).filter(([, l]) => l.length);
 
 // The yes/no detail questions and the early check-in fields, as one block each (setup step 2 and Hotel details).
 function dqHtml(k) {
   const [name, q] = DQ_Q[k], yes = !!SU.ans[k], defs = (SU.data.qkeys[k] || []).map((key) => SU.data.detailDefs.find((d) => d.key === key)).filter(Boolean);
   return `<div class="amen" data-amen="${k}"><div class="amenhead"><span class="body"><b>${name}</b><small>${q}</small></span>
-      <span class="yn" role="radiogroup" aria-label="${esc(q)}"><button type="button" role="radio" data-f="yn-${k}-yes" data-yn="yes" aria-checked="${yes}">Yes</button><button type="button" role="radio" data-f="yn-${k}-no" data-yn="no" aria-checked="${!yes}">No</button></span></div>
-    ${defs.length ? `<p class="amennote">Filled in for you. Change anything that isn't right.</p><div class="form amenform" data-sec="${esc(name)}">${defs.map((x) => fldHtml(x)).join("")}</div>` : ""}</div>`;
+      <span class="yn" role="radiogroup" aria-label="${esc(q)}"><button type="button" role="radio" data-f="yn-${k}-yes" data-yn="yes" aria-checked="${yes}">Yes</button><button type="button" role="radio" data-f="yn-${k}-no" data-yn="no" aria-checked="${SU.ans[k] === false}">No</button></span></div>
+    ${yes && defs.length ? `<div class="form amenform" data-sec="${esc(name)}">${defs.map((x) => fldHtml(x)).join("")}</div>` : `<p class="amennote">${yes ? "" : "The SOPs word this for you."}</p>`}</div>`;
 }
 function earlyHtml() {
   const defs = (SU.data.qkeys.early_checkin || []).map((key) => SU.data.detailDefs.find((d) => d.key === key)).filter(Boolean);
@@ -1230,11 +1231,13 @@ function paintReview() {
 /* ----- Hotel details (all details, saved as you go) ----- */
 function paintDetails() {
   const d = SU.data, defs = d.detailDefs;
-  const amenSecs = AMEN_LIST.map((k) => [AMEN_Q[k][0], defs.filter((x) => x.group === k)]).filter(([, l]) => l.length);
+  const amenSecs = AMEN_LIST.map((k) => [AMEN_Q[k][0], defs.filter((x) => x.group === k && !x.hidden)]).filter(([, l]) => l.length);
   const all = [...generalSections(defs), ...amenSecs];
   $("suBody").innerHTML = `<p class="hint" style="margin-top:6px">These fill the {Detail name} gaps in your SOPs. Changes save as you go and every SOP updates. Leave blank if you don't know; staff see "ask a manager".</p>
     ${policiesHtml()}
+    ${wzRoomEditor()}
     ${all.map(([t, l]) => secHtml(t, l)).join("")}`;
+  if (SU.view === "details") wzBindRooms($("suBody"));
   bindSecs($("suBody"));
   bindFields($("suBody"), () => toast("Saved"));
   $("suBody").querySelectorAll("[data-yn]").forEach((b) => (b.onclick = () => setAnswer(b.closest("[data-amen]").dataset.amen, b.dataset.yn === "yes")));

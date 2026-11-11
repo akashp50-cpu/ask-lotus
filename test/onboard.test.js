@@ -2,31 +2,24 @@ const test = require("node:test");
 const assert = require("node:assert");
 const ob = require("../src/onboard");
 
-// A trimmed copy of the hotel detail definitions (key + amenity group) the server hands to these helpers.
-const DEFS = [
-  ["Check-in time"], ["Check-out time"], ["Hotel name"], ["Wi-Fi network"], ["Wi-Fi network name"],
-  ["Late check-out cutoff"], ["Smoking fee"], ["Quiet hours"], ["Visitor policy"], ["Occupancy limit"], ["Weapons policy"], ["Debit hold amount"], ["Parking pass days"],
-  ["Early check-in fee"], ["Early check-in cutoff"], ["Cash policy"], ["Cash payment step"],
-  ["Breakfast hours", "breakfast"], ["Pet fee", "pets"], ["Pet fee quote", "pets"], ["Laundry cost", "laundry"], ["Pool hours", "pool"],
-  ["Accessible rooms"], ["Hearing kit location"], ["Room type 1"], ["Crib storage"], ["Rollaway policy"],
-  ["ID scanner"], ["Log book app"], ["Key system"],
-].map(([key, group]) => ({ key, group: group || null }));
+const D = require("../src/details");
 
-test("classify: every known detail lands on a screen with a kind; amenity groups win", () => {
+test("classify: every asked detail lands on a screen with a kind; retired ones are marked derived", () => {
   assert.deepStrictEqual(ob.classify("Check-out time"), { screen: "hotel", kind: "identity", sec: "Name and times", more: false, ml: false });
   assert.strictEqual(ob.classify("Quiet hours").kind, "policy");
   assert.strictEqual(ob.classify("Quiet hours").screen, "policies");
   assert.strictEqual(ob.classify("Pet fee", "pets").kind, "amenity"); // "fee" must not make an amenity detail a policy
   assert.strictEqual(ob.classify("Pet fee", "pets").screen, "amenities");
-  assert.strictEqual(ob.classify("Room type 3").screen, "rooms");
   assert.strictEqual(ob.classify("Key system").screen, "systems");
-  assert.strictEqual(ob.classify("Wi-Fi network name").more, true);
+  assert.strictEqual(ob.classify("AED location").screen, "basics");
+  assert.strictEqual(ob.classify("Room type 3").derived, true, "Room type N comes from the room list now");
+  assert.strictEqual(ob.classify("Wi-Fi network name").derived, true);
   // a name the table doesn't know: policy-sounding goes to Policies, anything else to More details on the first screen
   assert.deepStrictEqual([ob.classify("Minimum age to check in").screen, ob.classify("Minimum age to check in").kind], ["policies", "policy"]);
   assert.deepStrictEqual([ob.classify("Pool towel color").screen, ob.classify("Pool towel color").more], ["hotel", true]);
 });
 
-test("classify: no detail is lost - every table key resolves and layout keys are unique", () => {
+test("classify: no detail is lost - every old master detail resolves and layout keys are unique", () => {
   const seen = new Set();
   for (const [, , , primary, more] of ob.LAYOUT) for (const k of [...primary, ...more]) { assert.ok(!seen.has(k), "duplicate " + k); seen.add(k); }
   const fs = require("fs"), path = require("path");
@@ -34,64 +27,185 @@ test("classify: no detail is lost - every table key resolves and layout keys are
   for (const d of master.details) {
     const c = ob.classify(d.key, ["breakfast", "pool", "pets", "laundry", "market"].includes(d.group) ? d.group : null);
     assert.ok(ob.SCREENS.includes(c.screen), `${d.key} -> ${c.screen}`);
-    assert.ok(["identity", "amenity", "policy", "rooms", "systems", "other"].includes(c.kind), `${d.key} kind`);
+    assert.ok(["identity", "amenity", "policy", "rooms", "systems", "basics", "other"].includes(c.kind), `${d.key} kind ${c.kind}`);
   }
+  assert.ok(ob.SCREENS.includes("basics") && ob.STEP_IDS.includes("basics"));
 });
 
-test("templatePatch copies only policy-type keys, never identity, Wi-Fi, rooms, storage, systems or amenities", () => {
-  const src = {
-    id: "hop",
-    answers: {},
-    details: {
-      "Hotel name": "the Hampton", "Wi-Fi network": "HamptonGuest", "Check-out time": "11 AM", "Room type 1": "KXTD", "Crib storage": "317 Storage",
-      "ID scanner": "IDGuru", "Log book app": "Quore", "Breakfast hours": "6-10 AM", "Pet fee": "$75", "Pet fee quote": "$75", "Accessible rooms": "119",
-      "Smoking fee": "$450", "Quiet hours": "[FILL]", "Late check-out cutoff": "12 PM", "Early check-in fee": "$50", "Cash policy": "The hotel is completely cashless.", "Weapons policy": "No weapons.",
-    },
-  };
-  const out = ob.templatePatch(src, { details: {}, answers: {} }, DEFS);
-  assert.deepStrictEqual(Object.keys(out.details).sort(), ["Cash policy", "Early check-in fee", "Late check-out cutoff", "Smoking fee", "Weapons policy"]);
-  for (const bad of ["Hotel name", "Wi-Fi network", "Check-out time", "Room type 1", "Crib storage", "ID scanner", "Log book app", "Breakfast hours", "Pet fee", "Pet fee quote", "Accessible rooms"]) assert.ok(!(bad in out.details), bad + " must not be copied");
+const SRC = () => ({
+  id: "hop",
+  answers: { cash: false, pool: true, breakfast: true, rollaways: false },
+  details: {
+    "Hotel name": "the Hampton", "Wi-Fi network": "HamptonGuest", "Wi-Fi password": "pw", "Check-out time": "11 AM", "Crib storage": "317 Storage", "ID scanner": "IDGuru", "Log book app": "Quore",
+    "Breakfast hours": "6-10 AM", "Pool opening time": "10 AM", "Pool closing time": "10 PM", "Pet fee": "$75", "Smoking fee": "$450", "Quiet hours": "[FILL]", "Late check-out cutoff": "12 PM",
+    "Early check-in fee": "$50", "Early check-in occupancy limit": "70%", "Cash policy": "The hotel is completely cashless.", "Weapons policy": "No weapons.",
+    "AED location": "Lobby", "Hotel address": "10591 Metcalf", "Front desk phone": "(913) 555-0100", "Late check-out fee": "$25",
+  },
+});
+
+test("templatePatch fills the Policies screen only: never identity, Wi-Fi, rooms, storage, systems, amenities or basics", () => {
+  const out = ob.templatePatch(SRC(), { details: {}, answers: {} });
+  assert.deepStrictEqual(Object.keys(out.details).sort(), ["Early check-in fee", "Early check-in occupancy limit", "Late check-out cutoff", "Smoking fee", "Weapons policy"]);
+  assert.ok(!("Cash policy" in out.details), "cashless: nothing to copy, the wording is generated");
   assert.ok(!("Quiet hours" in out.details), "a [FILL] placeholder is not worth copying");
   assert.strictEqual(out.prefilled["Smoking fee"], "hop");
-  assert.strictEqual(out.answers.cash, false, "cash answer read from the cashless policy text");
+  assert.strictEqual(out.answers.cash, false);
   assert.strictEqual(out.prefilled.cash, "hop");
 });
 
 test("templatePatch never overwrites what the GM typed, but replaces a [FILL] placeholder", () => {
   const src = { id: "hop", answers: { cash: true }, details: { "Smoking fee": "$450", "Quiet hours": "10 PM to 7 AM", "Visitor policy": "No visitors after 10." } };
   const cur = { details: { "Smoking fee": "$300", "Visitor policy": "[FILL: visitors]" }, answers: { cash: false } };
-  const out = ob.templatePatch(src, cur, DEFS);
+  const out = ob.templatePatch(src, cur);
   assert.ok(!("Smoking fee" in out.details), "typed value kept");
   assert.strictEqual(out.details["Visitor policy"], "No visitors after 10.");
   assert.strictEqual(out.details["Quiet hours"], "10 PM to 7 AM");
   assert.ok(!("cash" in out.answers), "an existing cash answer is kept");
 });
 
-const READY = () => ({
-  answers: { breakfast: true, pool: false, pets: false, laundry: true, market: false, cash: false, rollaways: false, pack_and_plays: false, connecting_rooms: false, chats_confirmed: true },
-  details: {
-    "Wi-Fi network": "LotusGuest", "Check-out time": "11 AM", "Late check-out cutoff": "12 PM", "Smoking fee": "$450", "Quiet hours": "10 PM to 7 AM", "Visitor policy": "x", "Occupancy limit": "4", "Weapons policy": "x",
-    "Debit hold amount": "$50", "Parking pass days": "1 day", "Early check-in fee": "$50", "Early check-in cutoff": "12 PM", "Cash policy": "cashless", "Cash payment step": "card",
-    "Accessible rooms": "119", "Hearing kit location": "desk", "Room type 1": "KXTD",
-  },
-  contacts: [{ role: "GM", name: "Priya Shah", phone: "(913) 555-0142" }],
-  frontDesk: 1, used: ["Wi-Fi network", "Check-out time"], defs: DEFS, chatCustom: false,
+test("copy per section: each screen takes only its own copyable answers and marks them 'check this'", () => {
+  const src = SRC();
+  const hotel = ob.copyPatch(src, { details: {}, answers: {} }, "hotel");
+  assert.deepStrictEqual(Object.keys(hotel.details), ["Check-out time"], "name and Wi-Fi are identity; only the times copy");
+  for (const k of ["Hotel name", "Wi-Fi network", "Wi-Fi password"]) assert.ok(!(k in hotel.details), k);
+  const am = ob.copyPatch(src, { details: {}, answers: {} }, "amenities");
+  assert.deepStrictEqual(am.answers, { pool: true, breakfast: true });
+  assert.deepStrictEqual(Object.keys(am.details).sort(), ["Breakfast hours", "Pool closing time", "Pool opening time"]);
+  assert.ok(!("Pet fee" in am.details), "pets was not answered yes, so its fee is not copied");
+  assert.strictEqual(am.prefilled.pool, "hop");
+  assert.strictEqual(am.prefilled["Breakfast hours"], "hop");
+  const rooms = ob.copyPatch(src, { details: {}, answers: {} }, "rooms");
+  assert.deepStrictEqual(Object.keys(rooms.details), ["Crib storage"], "storage copies; the room list never does");
+  assert.deepStrictEqual(rooms.answers, { rollaways: false });
+  const basics = ob.copyPatch(src, { details: {}, answers: {} }, "basics");
+  assert.deepStrictEqual(Object.keys(basics.details), ["Late check-out fee"], "emergency locations, address and phone are never copied");
+  const sys = ob.copyPatch(src, { details: {}, answers: {} }, "systems");
+  assert.deepStrictEqual(Object.keys(sys.details).sort(), ["ID scanner", "Log book app"]);
+  assert.ok(!ob.COPY_SCREENS.includes("team") && !ob.COPY_SCREENS.includes("contacts"), "contacts are never copied");
 });
 
-test("readiness: all done scores 100 and may go live", () => {
+test("copy per section: a source that predates the merged fields is read the way the migration reads it", () => {
+  const old = { id: "mpi", answers: {}, details: { "Pool hours": "9 AM–9 PM", "Cash policy": "No cash. The hotel is cashless.", "Rollaway policy": "No rollaways are available." } };
+  const am = ob.copyPatch({ ...old, answers: { pool: true } }, { details: {}, answers: {} }, "amenities");
+  assert.strictEqual(am.details["Pool opening time"], "9 AM");
+  assert.strictEqual(ob.copyPatch(old, { details: {}, answers: {} }, "policies").answers.cash, false);
+  assert.strictEqual(ob.copyPatch(old, { details: {}, answers: {} }, "rooms").answers.rollaways, false);
+});
+
+test("copy per section: only empty fields are filled", () => {
+  const out = ob.copyPatch(SRC(), { details: { "Crib storage": "mine", "Pillow storage": "[FILL]" }, answers: { rollaways: true } }, "rooms");
+  assert.ok(!("Crib storage" in out.details));
+  assert.ok(!("rollaways" in out.answers), "an answer already given stays");
+});
+
+const READY = () => ({
+  answers: { breakfast: true, pool: false, pets: false, laundry: false, market: false, cash: false, rollaways: false, pack_and_plays: false, connecting_rooms: false, chats_confirmed: true },
+  details: {
+    "Hotel name": "the Lotus", "Wi-Fi network": "LotusGuest", "Check-in time": "3 PM", "Check-out time": "11 AM", "Breakfast hours": "6–10 AM",
+    "Late check-out cutoff": "12 PM", "Smoking fee": "$450", "Quiet hours": "10 PM to 7 AM", "Visitor policy": "x", "Occupancy limit": "4", "Weapons policy": "x",
+    "Early check-in cutoff": "12 PM", "Early check-in occupancy limit": "70%", "Early check-in fee": "$50",
+    "Hearing kit location": "desk", "Coffee supplies storage": "a", "Toiletries storage": "a", "Pillow storage": "a", "Crib storage": "a", "Fridge and microwave storage": "a",
+    "AED location": "lobby", "First aid kit location": "desk", "Water shutoff location": "boiler", "Breaker panel location": "hall", "Flashlight location": "desk",
+    "Hotel address": "1 Main St", "Front desk phone": "(913) 555-0100", "Debit hold amount": "$50", "Late check-out fee": "$25", "Parking cost": "Free", "Parking location": "rear lot",
+    "ID scanner": "x", "Log book app": "x", "Key system": "x", "Card authorization tool": "x",
+  },
+  rooms: { types: [{ code: "KG", name: "King", count: 40, rooms: [] }] },
+  contacts: [{ role: "GM", name: "Priya Shah", phone: "(913) 555-0142" }],
+  frontDesk: 1, used: ["Wi-Fi network", "Check-out time"], chatCustom: false,
+});
+
+test("readiness: everything applicable answered scores 100 and may go live (100% is reachable)", () => {
   const r = ob.readiness(READY());
   assert.strictEqual(r.score, 100);
   assert.strictEqual(r.essentialsDone, true);
   assert.deepStrictEqual(r.missing, []);
   assert.strictEqual(r.items.reduce((n, i) => n + i.weight, 0), 100);
+  assert.deepStrictEqual(r.skipped, []);
+});
+
+test("readiness: questions behind a No do not count; a Yes adds its follow-ups to the total", () => {
+  const base = ob.readiness(READY());
+  const i = READY(); i.answers.pets = false; i.answers.pool = false; i.answers.cash = false;
+  assert.strictEqual(ob.readiness(i).score, 100, "No hides the pet, pool and cash follow-ups");
+  assert.deepStrictEqual(ob.applicable(i).map((q) => q.key).filter((k) => /Pet|Pool|Cash/.test(k)), []);
+  const y = READY(); y.answers.pets = true; y.answers.cash = true;
+  const r = ob.readiness(y);
+  assert.ok(r.score < 100);
+  const keys = ob.applicable(y).map((q) => q.key);
+  for (const k of ["Pets allowed", "Pet fee", "Cash policy", "Cash deposit step", "Starting cash note"]) assert.ok(keys.includes(k), k);
+  assert.ok(!keys.includes("Pet fee quote") && !keys.includes("Cash payment step"), "generated tokens are never asked");
+  const by = Object.fromEntries(r.items.map((x) => [x.id, x]));
+  assert.strictEqual(by.amenfields.left, 2);
+  assert.strictEqual(by.policies.left, 3);
+  assert.ok(base.score === 100);
+});
+
+test("readiness: hotel-specific leftovers count only when a SOP that is on uses them", () => {
+  const i = READY(); i.answers.breakfast = true;
+  const keys = (u) => ob.applicable({ ...i, used: u }).map((q) => q.key);
+  assert.ok(!keys([]).includes("To-go bag name") && !keys([]).includes("Parking pass days") && !keys([]).includes("Gym cups storage"));
+  assert.ok(keys(["To-go bag name", "Parking pass days"]).includes("To-go bag name"));
+  assert.ok(keys(["Parking pass days"]).includes("Parking pass days"));
+  i.answers.pool = false;
+  assert.ok(!keys(["Gym cups storage"]).includes("Gym cups storage"), "even if used, a No hides it");
+  assert.ok(keys(["Some owner added detail"]).includes("Some owner added detail"), "an Owner-added detail used by a SOP is asked");
+  assert.ok(!keys(["Pool hours", "Rollaway script", "Room type 3", "Wi-Fi network name"]).some((k) => /Pool hours|Rollaway|Room type|network name/.test(k)), "generated details are never asked");
+  const r = ob.readiness({ ...i, used: ["Parking pass days"] });
+  assert.ok(r.score < 100 && r.items.find((x) => x.id === "policies").left === 1);
+});
+
+test("readiness: the Rooms section counts the room list and the yes/no questions, not Room type 1 or Accessible rooms", () => {
+  const i = READY(); i.rooms = null;
+  const r = ob.readiness(i);
+  assert.strictEqual(r.items.find((x) => x.id === "rooms").done, false);
+  assert.strictEqual(r.items.find((x) => x.id === "rooms").field, "rooms-inventory");
+  i.rooms = { types: [{ code: "KG", count: 0 }] };
+  assert.strictEqual(ob.readiness(i).items.find((x) => x.id === "rooms").done, false, "a type with no rooms is not a room list");
+  i.rooms = { types: [{ code: "KG", count: 3 }] };
+  delete i.answers.rollaways;
+  const r2 = ob.readiness(i).items.find((x) => x.id === "rooms");
+  assert.strictEqual(r2.field, "yn-rollaways");
+  assert.ok(r2.frac < 1 && r2.frac > 0.5);
+  const j = READY(); delete j.details["Accessible rooms"]; delete j.details["Room type 1"];
+  assert.strictEqual(ob.readiness(j).items.find((x) => x.id === "rooms").done, true);
+});
+
+test("readiness: an early check-in limit that is not a percent is unanswered; the value is kept", () => {
+  const i = READY(); i.details["Early check-in occupancy limit"] = "2 people per bed in a room.";
+  const r = ob.readiness(i);
+  assert.strictEqual(r.items.find((x) => x.id === "policies").left, 1);
+  assert.strictEqual(r.items.find((x) => x.id === "policies").field, "Early check-in occupancy limit");
+  assert.strictEqual(i.details["Early check-in occupancy limit"], "2 people per bed in a room.");
+});
+
+test("readiness: Don't know yet is a marker; it does not block go-live unless the question is essential, and it is listed", () => {
+  const i = READY(); delete i.details["AED location"]; delete i.details["Quiet hours"]; i.answers.unknown = { "AED location": true, "Quiet hours": true };
+  const r = ob.readiness(i);
+  assert.strictEqual(r.essentialsDone, true, "non-essential skipped questions never block");
+  assert.deepStrictEqual(r.skipped.map((s) => s.key).sort(), ["AED location", "Quiet hours"]);
+  assert.ok(r.score < 100, "a skipped question is not answered, so progress is below 100");
+  const bs = r.items.find((x) => x.id === "basics");
+  assert.strictEqual(bs.left, 0);
+  assert.strictEqual(bs.skipped, 1);
+  assert.ok(/Don't know yet/.test(bs.label));
+  // essential: Wi-Fi marked unknown still blocks go-live
+  const w = READY(); delete w.details["Wi-Fi network"]; w.answers.unknown = { "Wi-Fi network": true };
+  assert.strictEqual(ob.readiness(w).essentialsDone, false);
+  // a yes/no and the room list can be skipped too
+  const y = READY(); delete y.answers.rollaways; y.rooms = null; y.answers.unknown = { rollaways: true, "rooms-inventory": true };
+  const ry = ob.readiness(y);
+  assert.deepStrictEqual(ry.skipped.map((s) => s.key).sort(), ["rollaways", "rooms-inventory"]);
+  assert.strictEqual(ry.essentialsDone, true);
+  // answering clears it from the list (the server drops the marker, but even a stale marker does not list an answered question)
+  const a = READY(); a.answers.unknown = { "AED location": true };
+  assert.deepStrictEqual(ob.readiness(a).skipped, []);
 });
 
 test("readiness: an empty hotel scores low, lists essentials first and points Fix links at fields", () => {
-  const r = ob.readiness({ answers: {}, details: {}, contacts: [], frontDesk: 0, used: ["Wi-Fi network"], defs: DEFS });
-  assert.ok(r.score < 15);
+  const r = ob.readiness({ answers: {}, details: {}, contacts: [], frontDesk: 0, used: ["Wi-Fi network"] });
+  assert.ok(r.score < 15, "score " + r.score);
   assert.strictEqual(r.essentialsDone, false);
-  const ids = r.missing.map((i) => i.id);
-  assert.deepStrictEqual(ids.slice(0, 5), ["contact", "wifi", "checkout", "staff", "amenities"]);
+  assert.deepStrictEqual(r.missing.map((i) => i.id).slice(0, 5), ["contact", "wifi", "checkout", "staff", "amenities"]);
   const by = Object.fromEntries(r.items.map((i) => [i.id, i]));
   assert.deepStrictEqual([by.wifi.screen, by.wifi.field], ["hotel", "Wi-Fi network"]);
   assert.deepStrictEqual([by.checkout.screen, by.checkout.field], ["hotel", "Check-out time"]);
@@ -106,21 +220,22 @@ test("readiness: essentials are each required", () => {
   assert.strictEqual(without((i) => (i.contacts = [{ role: "AGM", name: "Tom", phone: "" }])).essentialsDone, false, "a GM/AGM needs a phone");
   assert.strictEqual(without((i) => (i.contacts = [{ role: "agm", name: "Tom", phone: "913-555-0111" }])).essentialsDone, true, "AGM with a phone counts");
   assert.strictEqual(without((i) => { i.details["Wi-Fi network"] = "[FILL: network name]"; }).essentialsDone, false, "a [FILL] Wi-Fi is not filled");
-  assert.strictEqual(without((i) => { delete i.details["Wi-Fi network"]; i.details["Wi-Fi network name"] = "Guest"; }).essentialsDone, true, "either Wi-Fi detail counts");
+  assert.strictEqual(without((i) => { delete i.details["Wi-Fi network"]; i.details["Wi-Fi network name"] = "Guest"; }).essentialsDone, true, "an older Wi-Fi name still counts");
   assert.strictEqual(without((i) => delete i.details["Check-out time"]).essentialsDone, false);
   assert.strictEqual(without((i) => (i.frontDesk = 0)).essentialsDone, false);
   assert.strictEqual(without((i) => { i.frontDesk = 0; i.answers.staff_later = true; }).essentialsDone, true, "'staff later' satisfies the staff item");
   assert.strictEqual(without((i) => delete i.answers.market).essentialsDone, false, "all five amenity answers are needed");
   const r = without((i) => delete i.answers.market);
   assert.strictEqual(r.items.find((i) => i.id === "amenities").label, "Answer the amenity question");
+  assert.strictEqual(without((i) => { delete i.details["Wi-Fi password"]; }).essentialsDone, true, "the Wi-Fi password is optional");
 });
 
 test("readiness: recommended items lower the score but never block go-live", () => {
-  const i = READY(); delete i.details["Quiet hours"]; delete i.details["Room type 1"]; i.answers.chats_confirmed = false; i.used.push("Hearing kit location", "Laundry cost");
+  const i = READY(); delete i.details["Quiet hours"]; i.rooms = null; i.answers.chats_confirmed = false; i.used.push("Parking pass days");
   const r = ob.readiness(i);
   assert.strictEqual(r.essentialsDone, true);
-  assert.ok(r.score < 100 && r.score > 80, "score " + r.score);
-  assert.deepStrictEqual(r.missing.map((x) => x.id).sort(), ["blanks", "chats", "policies", "rooms"]);
+  assert.ok(r.score < 100 && r.score > 70, "score " + r.score);
+  assert.deepStrictEqual(r.missing.map((x) => x.id).sort(), ["chats", "policies", "rooms"]);
   const chats = ob.readiness({ ...i, chatCustom: true }).items.find((x) => x.id === "chats");
   assert.strictEqual(chats.done, true, "custom chat names count as confirmed");
 });
@@ -144,7 +259,7 @@ const DOC = [
   "Assistant General Manager: Tom Becker",
   "Engineer: Luis Ortega (913) 555-0177",
 ].join("\n");
-const KEYS = DEFS.map((d) => d.key);
+const KEYS = D.FIELDS.map((f) => f.key);
 
 test("coerceExtraction keeps grounded values, canonical keys and formatted phones", () => {
   const out = ob.coerceExtraction({

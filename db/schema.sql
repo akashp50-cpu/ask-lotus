@@ -336,6 +336,7 @@ ON CONFLICT DO NOTHING;
 
 -- Where a hotel's SOPs are copied from when it is set up (a hotel id). Chosen when the hotel is added; filled in for older hotels by the groups migration.
 ALTER TABLE hotels ADD COLUMN IF NOT EXISTS copy_source TEXT;
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS rooms JSONB;  -- room inventory {types:[{code,name,count,rooms,accessible,sofa,fridge}]}; NULL = none yet
 
 -- family = the same SOP across hotels (master copies use the master id, hotel-only SOPs 'hotel:id'). kind = 'pms' | 'general' | 'brand'.
 -- requires = the amenity a SOP depends on (breakfast, pool, ...). All filled in by db/groups.js; null means "not classified yet".

@@ -116,3 +116,36 @@ export async function readPdf(file, opts = {}) {
     await doc.destroy().catch(() => {});
   }
 }
+
+// A PMS room report (PDF) -> the visual lines of its text, then the room types and counts found in them (public/pdf/rooms.js).
+// Reads text only, a page at a time; no page is drawn.
+let roomsP = null;
+const loadRooms = (v) => (roomsP ||= loadScript(`/pdf/rooms.js?v=${v || "1"}`).then(() => globalThis.RoomReport).catch((e) => { roomsP = null; throw e; }));
+export async function readRoomReport(file, opts = {}) {
+  const [{ pdfjs, base }, RR] = await Promise.all([load(opts.version, opts.v), loadRooms(opts.v)]);
+  let doc;
+  try {
+    doc = await pdfjs.getDocument({
+      data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false, disableFontFace: true, verbosity: 0,
+      standardFontDataUrl: base + "standard_fonts/", cMapUrl: base + "cmaps/", cMapPacked: true, wasmUrl: base + "wasm/", iccUrl: base + "iccs/",
+    }).promise;
+  } catch { throw new Error("That PDF couldn't be opened. Try exporting the report again, or upload it as Excel or CSV."); }
+  try {
+    const lines = [], pages = Math.min(doc.numPages, 60);
+    for (let n = 1; n <= pages; n++) {
+      if (opts.onProgress) opts.onProgress({ page: n, of: pages });
+      const pg = await doc.getPage(n);
+      const tc = await pg.getTextContent();
+      lines.push(...RR.pageLines(tc.items.map((i) => ({ str: i.str, x: i.transform[4], y: i.transform[5] }))));
+      pg.cleanup();
+      await tick();
+    }
+    return RR.parse(lines);
+  } finally { await doc.destroy().catch(() => {}); }
+}
+
+// A CSV (text) or the rows of an Excel sheet -> the same result as a PDF report.
+export async function parseRoomRows(rows, csvText, v) {
+  const RR = await loadRooms(v);
+  return RR.parseRows(rows || RR.parseCsv(csvText || ""));
+}

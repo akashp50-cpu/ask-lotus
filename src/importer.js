@@ -431,6 +431,13 @@ async function buildTemplate(categories) {
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
+// Every row of every worksheet (or of a CSV) as arrays of strings: the room list upload reads these in the browser's parser.
+async function anyRowsFromFile(name, buf) {
+  const ext = checkFile(name, buf, ["xlsx", "csv"]);
+  if (ext === "csv") return parseCsv(buf.toString("utf8"));
+  return (await xlsxSheets(buf)).flatMap((s) => s.rows);
+}
+
 async function sheetRowsFromFile(name, buf) {
   const ext = checkFile(name, buf, ["xlsx", "csv"]);
   if (ext === "csv") return parseCsv(buf.toString("utf8"));
@@ -498,5 +505,5 @@ module.exports = {
   pdfSystem,
   ImportError, MAX_FILES, MAX_FILE_BYTES, MAX_TEXT, CHUNK, EXTS, REQUIRES_LABELS, APPLIES_LABELS,
   decodeUpload, checkFile, titleFromFile, analyzePdf, keepValidImgs, cleanStepList, extractAll, fileText, chunkText, looseJSON, cleanAiResult, mergeResults, analyzeText,
-  buildTemplate, sheetRowsFromFile, parseSheetRows, parseCsv, matchCategory, norm, providerMessage,
+  buildTemplate, sheetRowsFromFile, anyRowsFromFile, parseSheetRows, parseCsv, matchCategory, norm, providerMessage,
 };

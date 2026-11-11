@@ -4,23 +4,19 @@
    (SU, STATE, api, esc, Spring, toast, ...) when it is called, never while it loads. */
 
 const WZ_STEPS = [
-  ["hotel", "Your hotel"], ["amenities", "Amenities"], ["policies", "Policies"], ["rooms", "Rooms"],
+  ["hotel", "Your hotel"], ["amenities", "Amenities"], ["policies", "Policies"], ["rooms", "Rooms"], ["basics", "Emergency & basics"],
   ["systems", "Systems"], ["contacts", "Contacts & chats"], ["team", "Team"], ["review", "Review & go live"],
 ];
 const WZ_SUB = {
   hotel: "The basics your team gets asked about.",
   amenities: "Tell us what your hotel offers. We switch on the right SOPs.",
-  policies: "How your hotel handles cash, fees and house rules.",
-  rooms: "Rollaways, cribs, accessible rooms and where things are kept.",
+  policies: "How your hotel handles cash, check-out and house rules.",
+  rooms: "Your room list, rollaways, cribs and where things are kept.",
+  basics: "Where emergency gear is, and the basics staff get asked about.",
   systems: "The tools your front desk uses every day.",
   contacts: "Who staff call, and the two WhatsApp chats.",
   team: "Add the people who will sign in.",
   review: "Check everything, then open the hotel to your team.",
-};
-const WZ_LABEL = {
-  "Hotel name": "Hotel name, as you say it on the phone", "Hotel short name": "Shorter name for scripts",
-  "Wi-Fi network": "Wi-Fi network name", "Wi-Fi network name": "Wi-Fi name, as the help SOP shows it",
-  "Hotel welcome name": "How you welcome guests", "Hotel location check": "Name and street, to tell it from look-alikes",
 };
 const WZ_DEFAULT_ROLES = ["GM", "AGM", "Engineer", "Head Housekeeper"];
 const WZ_ROLE_HELP = { GM: "General Manager", AGM: "Assistant General Manager", Engineer: "Maintenance and emergencies", "Head Housekeeper": "Rooms and supplies" };
@@ -30,7 +26,7 @@ const WZ = {
   screen: "welcome", dir: 1, pend: {}, timer: 0, saving: 0, savedAt: 0, rdyTimer: 0, prevPct: 0,
   rowQ: new Set(), more: new Set(), sopsOpen: false, tpl: { on: true, from: null }, copyOpen: false, copyFrom: null, busy: "",
   pw: {}, celebrate: false, kitUsers: null, newUser: { name: "", username: "", role: "Front Desk", touched: false },
-  crows: null, fix: null, orig: {},
+  crows: null, fix: null, orig: {}, rooms: null, roomTimer: 0, roomBusy: "", copySel: "",
 };
 
 /* ---------- small helpers ---------- */
@@ -39,6 +35,12 @@ const wzIdx = (id) => wzSteps().indexOf(id);
 const wzShort = () => (SU.data && SU.data.prefilledNames && Object.values(SU.data.prefilledNames)[0]) || "Hampton";
 const wzFillPrompt = (v) => { const m = String(v ?? "").match(/\[FILL:?\s*([^\]]*)\]/); return m ? m[1].trim() || "Needs your answer" : null; };
 const wzVal = (k) => { const v = SU.det[k]; return v === undefined || /\[FILL/.test(v) || v === NOT_OFFERED ? "" : v; };
+// What shows on a screen: not a generated/retired detail, behind its yes/no if it has one, and (for the hotel-specific leftovers) only if a SOP that is on uses it.
+const wzUsed = () => new Set((SU.data.used || []).map(tokKey));
+const wzShow = (df) => !df.hidden && (!df.gate || SU.ans[df.gate.q] === df.gate.v) && (df.when !== "used" || df.optional || wzUsed().has(tokKey(df.key)));
+const wzDefs = (screen) => SU.data.detailDefs.filter((d) => d.screen === screen && wzShow(d));
+const wzPctOk = (v) => { const m = /^\s*(\d{1,3}(?:\.\d+)?)\s*%?\s*$/.exec(String(v ?? "")); return !!m && +m[1] <= 100; };
+const wzUnk = (k) => !!(SU.data.unknown || {})[k];
 const wzDigits = (s) => String(s ?? "").replace(/\D/g, "");
 function wzPhoneLive(s) {
   let d = wzDigits(s); if (d.length > 10 && d[0] === "1") d = d.slice(1); d = d.slice(0, 10);
@@ -121,15 +123,13 @@ async function wzGo(screen, opts = {}) {
 // "Fix" links: go to the screen, open "More details" if the field is in there, scroll to it and pulse it.
 async function wzFix(screen, field) {
   if (!field) return wzGo(screen);
-  const defs = SU.data.detailDefs.find((d) => d.key === field);
-  if (defs && defs.more && defs.screen === screen) WZ.more.add(screen);
   if (screen === WZ.screen) paintWizard(false); else await wzGo(screen, { fix: field });
   setTimeout(() => {
     const el = [...document.querySelectorAll("[data-fk]")].find((e) => e.dataset.fk === field);
     if (!el) return;
     el.scrollIntoView({ block: "center", behavior: RM.matches ? "auto" : "smooth" });
     el.classList.add("pulse"); setTimeout(() => el.classList.remove("pulse"), 1600);
-    const inp = el.querySelector("input,textarea"); if (inp) inp.focus({ preventScroll: true });
+    const inp = el.querySelector("input,textarea,button"); if (inp) inp.focus({ preventScroll: true });
   }, 120);
 }
 
@@ -161,12 +161,13 @@ function paintWizard(animate) {
   document.documentElement.style.setProperty("--hdrh", ($("hdr").offsetHeight || 50) + "px");
   document.body.classList.toggle("wzon", s !== "welcome");
   if (s === "welcome") { $("suBody").innerHTML = `<div class="wz"><div id="wzScreen" class="wzscreen">${wzWelcome()}</div></div>`; wzBindWelcome(); if (animate) wzIn($("wzScreen")); return; }
-  const body = { hotel: wzHotel, amenities: wzAmenities, policies: wzPolicies, rooms: wzRooms, systems: wzSystems, contacts: wzContacts, team: wzTeam, review: wzReview }[s]();
+  const body = { hotel: wzHotel, amenities: wzAmenities, policies: wzPolicies, rooms: wzRooms, basics: wzBasics, systems: wzSystems, contacts: wzContacts, team: wzTeam, review: wzReview }[s]();
   const aiOn = d.aiOn;
   $("suBody").innerHTML = `<div class="wz">${wzHead()}<div id="wzScreen" class="wzscreen" data-screen="${s}">
     <div class="wzhd"><h2>${esc(WZ_STEPS[wzIdx(s)][1])}</h2><p>${esc(WZ_SUB[s])}</p>${aiOn && s !== "review" && s !== "team" ? `<button type="button" class="lnk" data-doc>Fill from a document</button>` : ""}</div>
-    ${wzSugBanner(s)}${body}</div></div>${wzNav()}`;
+    ${wzCopyBar(s)}${wzSugBanner(s)}${body}</div></div>${wzNav()}`;
   wzBind();
+  if (s === "rooms") wzBindRooms($("suBody"));
   // animated pieces: the screen slides in on a spring, the progress bar fills on a spring
   const pct = ((wzIdx(s) + 1) / WZ_STEPS.length) * 100, fill = $("wzFill");
   if (fill) { const sp = Spring(WZ.prevPct, (v) => (fill.style.width = v + "%")); sp.set(WZ.prevPct); sp.to(pct, { damping: 1, response: 0.5 }); }
@@ -194,10 +195,6 @@ function wzBind() {
   if (s === "contacts") wzBindContacts(root);
   if (s === "team") wzBindTeam(root);
   if (s === "review") wzBindReview(root);
-  root.querySelectorAll("[data-more]").forEach((b) => (b.onclick = () => {
-    const k = b.dataset.more, open = !WZ.more.has(k); open ? WZ.more.add(k) : WZ.more.delete(k);
-    b.setAttribute("aria-expanded", open); b.nextElementSibling.hidden = !open; b.querySelector(".chev").classList.toggle("dn", open);
-  }));
   root.querySelectorAll("[data-yn]").forEach((b) => (b.onclick = () => wzSetAnswer(b.closest("[data-q]").dataset.q, b.dataset.yn === "yes")));
 }
 
@@ -211,31 +208,93 @@ function wzSugHtml(s, label) {
 function wzBadge(key) {
   const src = SU.data.prefilled[key]; if (!src) return "";
   const nm = SU.data.prefilledNames[src] || "another hotel";
-  return `<div class="wzsame" data-same="${esc(key)}"><span class="wzchip same">Same as ${esc(nm)}</span><button type="button" class="lnk" data-confirm="${esc(key)}">Confirm</button></div>`;
+  return `<div class="wzsame" data-same="${esc(key)}"><span class="wzchip same">Check this: same as ${esc(nm)}</span><button type="button" class="lnk" data-confirm="${esc(key)}">Confirm</button></div>`;
+}
+// "Don't know yet": a marker, never text in the answer. Hidden once the question has a value.
+function wzDk(key, filled) {
+  if (filled) return "";
+  if (wzUnk(key)) return `<div class="wzdk on"><span class="wzchip dk">Don't know yet</span><button type="button" class="lnk" data-dk-undo="${esc(key)}">Undo</button></div>`;
+  return `<div class="wzdk"><button type="button" class="lnk dkbtn" data-dk="${esc(key)}">Don't know yet</button></div>`;
 }
 function wzField(df) {
   const k = df.key, raw = SU.det[k], fill = wzFillPrompt(raw);
-  const v = raw === undefined || fill !== null || raw === NOT_OFFERED ? "" : raw;
-  const long = (df.hint || "").length > 30, ph = fill !== null ? fill : long ? "" : df.hint || "";
+  const pct = df.type === "percent";
+  const badPct = pct && raw !== undefined && fill === null && raw !== NOT_OFFERED && String(raw).trim() !== "" && !wzPctOk(raw);
+  let v = raw === undefined || fill !== null || raw === NOT_OFFERED || badPct ? "" : raw;
+  if (pct) v = String(v).replace(/\s*%\s*$/, "");
+  const hint = df.hint || "";
+  const long = hint.length > 34, ph = fill !== null ? fill : df.default ? df.default : long ? "" : hint;
+  const attrs = `data-k="${esc(k)}" ${pct ? 'data-type="percent" inputmode="decimal"' : df.type === "phone" ? 'data-type="phone" inputmode="tel"' : ""}`;
   const input = df.ml
-    ? `<textarea data-k="${esc(k)}" rows="2" placeholder="${esc(ph)}" autocomplete="off">${esc(v)}</textarea>`
-    : `<input data-k="${esc(k)}" value="${esc(v)}" placeholder="${esc(ph)}" autocomplete="off" autocapitalize="sentences" enterkeyhint="next">`;
+    ? `<textarea ${attrs} rows="2" placeholder="${esc(ph)}" autocomplete="off">${esc(v)}</textarea>`
+    : pct
+      ? `<span class="affix"><input ${attrs} value="${esc(v)}" placeholder="${esc(ph || "70")}" autocomplete="off" enterkeyhint="next"><b aria-hidden="true">%</b></span>`
+      : `<input ${attrs} value="${esc(v)}" placeholder="${esc(ph)}" autocomplete="off" autocapitalize="sentences" enterkeyhint="next">`;
   const sug = wzSugs("detail", k).map((s) => wzSugHtml(s)).join("");
-  return `<div class="wzf" data-fk="${esc(k)}"><label class="fld"><span>${esc(WZ_LABEL[k] || k)}</span>${input}${long && fill === null ? `<em class="fh">${esc(df.hint)}</em>` : fill !== null ? `<em class="fh need">Needs your answer: ${esc(fill)}</em>` : ""}</label>${wzBadge(k)}${sug}</div>`;
+  const note = badPct ? `<em class="fh need">This was "${esc(raw)}". Enter a percentage so staff know when to offer early check-in.</em>`
+    : fill !== null ? `<em class="fh need">Needs your answer: ${esc(fill)}</em>`
+    : df.default && !raw ? `<em class="fh">Usually ${esc(df.default)}. Change it if yours is different.</em>`
+    : long ? `<em class="fh">${esc(hint)}</em>` : "";
+  const extra = k === "Wi-Fi password" ? `<button type="button" class="pillbtn press wzopen" data-openwifi>Open network (no password)</button>` : "";
+  return `<div class="wzf" data-fk="${esc(k)}"><label class="fld"><span>${esc(df.label || k)}</span>${input}${note}</label>${extra}${wzBadge(k)}${sug}${df.optional ? "" : wzDk(k, !!v && !badPct)}</div>`;
 }
 function wzBindFields(root) {
   root.querySelectorAll("[data-k]").forEach((i) => {
     if (i.tagName === "TEXTAREA") { const g = () => { i.style.height = "auto"; i.style.height = i.scrollHeight + "px"; }; g(); i.addEventListener("input", g); }
+    const type = i.dataset.type;
     i.addEventListener("input", () => {
-      wzQueue(i.dataset.k, i.value);
+      const k = i.dataset.k;
+      if (type === "phone") { const f = wzPhoneLive(i.value); if (f !== i.value) i.value = f; }
+      if (type === "percent") { const clean = i.value.replace(/[^0-9.]/g, ""); if (clean !== i.value) i.value = clean; wzQueue(k, clean ? clean + "%" : ""); }
+      else wzQueue(k, i.value);
       const b = i.closest(".wzf").querySelector("[data-same]");
-      if (b) { b.remove(); delete SU.data.prefilled[i.dataset.k]; } // typing makes it the GM's own
+      if (b) { b.remove(); delete SU.data.prefilled[k]; } // typing makes it the GM's own
+      if (i.value.trim() && wzUnk(k)) { delete SU.data.unknown[k]; const d = i.closest(".wzf").querySelector(".wzdk"); if (d) d.remove(); }
     });
     i.addEventListener("blur", () => wzFlush());
   });
+  root.querySelectorAll("[data-openwifi]").forEach((b) => (b.onclick = () => {
+    const inp = b.closest(".wzf").querySelector("[data-k]"); inp.value = "Open network (no password)"; wzQueue("Wi-Fi password", inp.value); wzFlush();
+  }));
+  root.querySelectorAll("[data-dk]").forEach((b) => (b.onclick = () => wzUnknown(b.dataset.dk, true)));
+  root.querySelectorAll("[data-dk-undo]").forEach((b) => (b.onclick = () => wzUnknown(b.dataset.dkUndo, false)));
   root.querySelectorAll("[data-confirm]").forEach((b) => (b.onclick = () => wzConfirm(b.dataset.confirm)));
   root.querySelectorAll("[data-sug] [data-sug-act]").forEach((b) => (b.onclick = () => wzSugAct(b.closest("[data-sug]").dataset.sug, b.dataset.sugAct)));
   root.querySelectorAll("[data-acceptall]").forEach((b) => (b.onclick = () => wzAcceptAll(b.dataset.acceptall)));
+  root.querySelectorAll("[data-copy-screen]").forEach((b) => (b.onclick = () => wzCopySection(b.dataset.copyScreen)));
+  const sel = $("wzCopySel"); if (sel) sel.onchange = () => { WZ.copySel = sel.value; };
+}
+// Marks a question "Don't know yet" (or takes the mark off). It stays in the Dashboard's Needs you row until the question is answered.
+async function wzUnknown(key, on) {
+  SU.data.unknown = SU.data.unknown || {};
+  if (on) SU.data.unknown[key] = true; else delete SU.data.unknown[key];
+  paintWizard(false);
+  try { await wzTrack(suRun(() => api("/api/setup/unknown", { method: "PUT", body: { key, on } }))); } catch (e) { fail(e); }
+}
+async function wzCopySection(screen) {
+  const sel = $("wzCopySel"), from = sel ? sel.value : WZ.copySel;
+  if (!from) return;
+  WZ.copySel = from; WZ.busy = "copy"; paintWizard(false);
+  try {
+    await wzFlush();
+    const r = await suRun(() => api("/api/setup/copy-section", { body: { screen, from } }));
+    SU.det = { ...r.details };
+    for (const k of Object.keys(r.answers)) if (SU.ans[k] === undefined || r.prefilled[k]) SU.ans[k] = r.answers[k];
+    SU.data.prefilled = r.prefilled; SU.data.prefilledNames[r.from.id] = (SU.data.copyHotels.find((h) => h.id === r.from.id) || {}).short || r.from.name;
+    for (const k of Object.keys(r.prefilled)) if (SU.data.unknown) delete SU.data.unknown[k];
+    SU.data.answers = { ...SU.data.answers, ...r.answers }; SU.dirty = true;
+    WZ.busy = ""; paintWizard(false); wzRdySoon();
+    toast(r.count ? `Copied ${plural(r.count, "answer")} from ${SU.data.prefilledNames[r.from.id]}. Check each one.` : `Nothing to copy: this screen is already filled in, or ${SU.data.prefilledNames[r.from.id]} has no answers for it.`);
+  } catch (e) { WZ.busy = ""; paintWizard(false); fail(e); }
+}
+// "Copy from <hotel>" at the top of a screen. Names, address, phone, Wi-Fi, the room list and contacts are never copied.
+function wzCopyBar(screen) {
+  const d = SU.data, list = d.copyHotels || [];
+  if (!list.length || !(d.copyScreens || []).includes(screen)) return "";
+  if (!WZ.copySel || !list.find((h) => h.id === WZ.copySel)) WZ.copySel = (list.find((h) => h.id === d.copyFrom) || list[0]).id;
+  return `<div class="wzcopybar"><label class="fld"><span>Copy this screen from</span><select id="wzCopySel" aria-label="Hotel to copy from">${list.map((h) => `<option value="${esc(h.id)}" ${h.id === WZ.copySel ? "selected" : ""}>${esc(h.name)}</option>`).join("")}</select></label>
+    <button type="button" class="pillbtn tint press" data-copy-screen="${screen}" ${WZ.busy === "copy" ? "disabled" : ""}>${WZ.busy === "copy" ? "Copying…" : "Copy"}</button>
+    <small>Fills only empty answers and marks each one "check this". Names, phones, Wi-Fi and the room list are never copied.</small></div>`;
 }
 async function wzConfirm(key) {
   delete SU.data.prefilled[key]; wzSyncBadges();
@@ -294,42 +353,44 @@ async function wzSetAnswer(k, yes, quiet) {
   const prev = SU.ans[k];
   if (prev === yes) { if (SU.data.prefilled[k]) wzConfirm(k); return; }
   SU.ans[k] = yes; SU.focus = `yn-${k}-${yes ? "yes" : "no"}`;
-  delete SU.data.prefilled[k];
+  delete SU.data.prefilled[k]; if (SU.data.unknown) delete SU.data.unknown[k];
   if (yes) SU.data.detailDefs.filter((x) => x.group === k).forEach((x) => { if (SU.det[x.key] === NOT_OFFERED) delete SU.det[x.key]; });
   if (!quiet) paintWizard(false);
   try {
     await wzFlush();
     const r = await wzTrack(suRun(() => api("/api/setup/answers", { method: "PUT", body: { answers: { [k]: yes } } })));
     SU.det = { ...r.details }; SU.ov = { on: new Set(r.selection.on), off: new Set(r.selection.off) }; SU.data.prefilled = r.prefilled || SU.data.prefilled;
-    SU.data.answers = r.answers; SU.dirty = true;
+    SU.data.answers = r.answers; SU.data.unknown = r.unknown || SU.data.unknown; SU.data.used = r.used || SU.data.used; SU.dirty = true;
     if (!quiet) { SU.focus = `yn-${k}-${yes ? "yes" : "no"}`; paintWizard(false); }
   } catch (e) { SU.ans[k] = prev; if (!quiet) paintWizard(false); fail(e); }
 }
+// What the "No" answers leave to the SOPs, so nobody wonders where the other questions went.
+const WZ_NO_NOTE = {
+  cash: "SOPs will say the hotel is cashless. Nothing else to fill in.",
+  rollaways: "SOPs will say rollaways aren't available.",
+  pack_and_plays: "SOPs will say no pack-and-plays are stocked.",
+  connecting_rooms: "SOPs will say the hotel has no connecting rooms.",
+};
+// A yes/no card. The follow-up questions show only after a Yes; a No hides them and they don't count.
 function wzQuestion(k, title, q, fields, opts = {}) {
   const sug = wzSugs("answer", k).map((s) => wzSugHtml(s)).join("");
-  const answered = SU.ans[k] !== undefined;
+  const a = SU.ans[k];
+  const note = opts.note || (a === false && WZ_NO_NOTE[k] ? esc(WZ_NO_NOTE[k]) : "");
   return `<div class="wzcard" data-q="${k}" data-fk="${opts.fk || "yn-" + k}">
     <div class="wzq">${opts.icon ? `<span class="wzico">${wzSvg(opts.icon)}</span>` : ""}<span class="body"><b>${esc(title)}</b><small>${esc(q)}</small></span>${wzYn(k, q)}</div>
     ${wzBadge(k)}${sug}
-    ${opts.note ? `<p class="amennote">${opts.note}</p>` : ""}
-    ${answered && fields.length ? `<div class="wzfields">${opts.intro ? `<p class="amennote">${opts.intro}</p>` : ""}${fields.map(wzField).join("")}</div>` : ""}</div>`;
+    ${note ? `<p class="amennote">${note}</p>` : ""}
+    ${a === true && fields.length ? `<div class="wzfields">${opts.intro ? `<p class="amennote">${opts.intro}</p>` : ""}${fields.map(wzField).join("")}</div>` : ""}
+    ${a === undefined ? wzDk(k, false) : ""}</div>`;
 }
-const wzMoreBlock = (screen, defs) => {
-  if (!defs.length) return "";
-  const open = WZ.more.has(screen);
-  let last = "";
-  const rows = defs.map((d) => { const cap = d.sec !== last ? `<div class="wzsubsec">${esc(d.sec)}</div>` : ""; last = d.sec; return cap + wzField(d); }).join("");
-  return `<button type="button" class="morebtn press" data-more="${screen}" aria-expanded="${open}"><span class="body"><span class="t">More details</span><span class="m">${plural(defs.length, "rarely needed detail")}. Skip them for now if you like.</span></span>${chev.replace('class="chev"', `class="chev ${open ? "dn" : ""}"`)}</button>
-    <div class="wzmore" ${open ? "" : "hidden"}><div class="group wzgrp">${rows}</div></div>`;
-};
-// Sections of plain fields for one screen. Fields owned by a yes/no question or an amenity card are drawn there instead.
-function wzSections(screen, skip = () => false) {
-  const defs = SU.data.detailDefs.filter((d) => d.screen === screen && d.kind !== "amenity" && !(d.q && ["cash", "rollaways", "pack_and_plays", "connecting_rooms"].includes(d.q)) && !d.more && !skip(d));
+// Sections of plain fields for one screen. Fields behind a yes/no are drawn in that question's card.
+function wzSections(screen) {
+  const defs = wzDefs(screen).filter((d) => d.kind !== "amenity" && !d.gate);
   const order = [...new Set([...(SU.data.layout || []).filter((l) => l.screen === screen).map((l) => l.sec), ...defs.map((d) => d.sec)])];
   return order.map((sec) => [sec, defs.filter((d) => d.sec === sec)]).filter(([, l]) => l.length)
     .map(([sec, l]) => `<div class="sec"><span>${esc(sec)}</span></div><div class="group wzgrp">${l.map(wzField).join("")}</div>`).join("");
 }
-const wzMoreDefs = (screen) => SU.data.detailDefs.filter((d) => d.screen === screen && d.more && (d.kind !== "amenity" || SU.ans[d.group] === true));
+const wzGated = (k) => wzDefs(ANSWER_SCREEN_C[k]).filter((d) => d.gate && d.gate.q === k);
 
 /* ---------- screens ---------- */
 function wzWelcome() {
@@ -385,38 +446,128 @@ function wzHotel() {
   const rec = owner ? `<div class="sec"><span>Hotel record (Owner)</span></div><div class="group wzgrp"><div class="wzf"><label class="fld"><span>Hotel name in Ask Lotus</span><input id="su-name" value="${esc(h.name)}" autocomplete="off"></label></div>
       <div class="wzf"><label class="fld"><span>Brand</span><select id="su-brand">${opts(STATE.brands.map((b) => [b.id, b.name]), h.brand)}</select></label></div>
       <div class="wzf"><label class="fld"><span>Property system</span><select id="su-system">${opts(STATE.pms.map((p) => [p.id, p.name]), h.system)}</select></label></div></div><p class="hint">As the Owner you can change these until the hotel goes live.</p>` : "";
-  const more = wzMoreBlock("hotel", wzMoreDefs("hotel"));
-  return `${wzSections("hotel")}${more}${rec}`;
+  return `${wzSections("hotel")}${rec}`;
 }
 function wzAmenities() {
   const d = SU.data, sops = d.sops;
   const cards = AMEN_LIST.map((k) => {
     const [name, q] = AMEN_Q[k], ms = sops.filter((m) => m.requires === k && suFits(m));
-    const fields = d.detailDefs.filter((x) => x.group === k && !x.more);
     const note = SU.ans[k] !== undefined && ms.length ? `${SU.ans[k] ? "Turns on" : "Leaves off"}: ${esc(titleList(ms))}` : "";
-    return wzQuestion(k, name, q, SU.ans[k] ? fields : [], { icon: WZ_AMEN_ICON[k], fk: "amen-" + k, note });
+    return wzQuestion(k, name, q, wzGated(k), { icon: WZ_AMEN_ICON[k], fk: "amen-" + k, note });
   }).join("");
-  return `<div class="wzcards">${cards}</div>${wzMoreBlock("amenities", wzMoreDefs("amenities"))}`;
+  return `<div class="wzcards">${cards}</div>`;
 }
 function wzPolicies() {
-  const d = SU.data;
-  const cashDefs = (d.qkeys.cash || []).map((key) => d.detailDefs.find((x) => x.key === key)).filter((x) => x && !x.more);
-  const cash = wzQuestion("cash", "Cash", DQ_Q.cash[1], cashDefs, { fk: "yn-cash", intro: "Filled in for you. Change anything that isn't right." });
-  return `<div class="wzcards">${cash}</div>${wzSections("policies")}${wzMoreBlock("policies", wzMoreDefs("policies"))}`;
+  const cash = wzQuestion("cash", "Cash", DQ_Q.cash[1], wzGated("cash"), { fk: "yn-cash", intro: "Everything else about cash is filled in for you." });
+  return `<div class="wzcards">${cash}</div>${wzSections("policies")}`;
+}
+
+/* ---------- the room list: upload a PMS report or type it ---------- */
+const wzFloor = (r) => { const m = /^(\d{3,4})/.exec(String(r)); return m ? (m[1].length === 3 ? +m[1][0] : +m[1].slice(0, 2)) : null; };
+const wzRoomTotal = () => (WZ.rooms.types || []).reduce((n, t) => n + (+t.count || 0), 0);
+function wzRoomInv() { if (!WZ.rooms) { const r = SU.data.rooms; WZ.rooms = { types: ((r && r.types) || []).map((t) => ({ ...t })) }; } return WZ.rooms; }
+function wzRoomRow(t, i) {
+  const cb = (f, lbl) => `<label class="chk"><input type="checkbox" data-rf="${f}" ${t[f] ? "checked" : ""} aria-label="${esc(t.code || "Room type")} ${lbl}"><span class="lbl">${lbl}</span></label>`;
+  return `<div class="wzrr" data-ri="${i}" role="row">
+    <label class="fld c-code"><span class="lbl">Code</span><input data-rf="code" value="${esc(t.code)}" placeholder="KG" maxlength="24" autocomplete="off" autocapitalize="characters" aria-label="Room type code"></label>
+    <label class="fld c-name"><span class="lbl">Name</span><input data-rf="name" value="${esc(t.name)}" placeholder="Standard King" maxlength="60" autocomplete="off" aria-label="Room type name"></label>
+    <label class="fld c-count"><span class="lbl">Rooms</span><input data-rf="count" type="number" min="0" max="5000" inputmode="numeric" value="${t.count ?? ""}" aria-label="Number of rooms of this type"></label>
+    <span class="c-flags">${cb("accessible", "Accessible")}${cb("sofa", "Sofa sleeper")}${cb("fridge", "Fridge and microwave")}</span>
+    <button type="button" class="wzrdel press" data-rdel="${i}" aria-label="Remove ${esc(t.code || "this room type")}">${wzSvg("M6 6l12 12M18 6 6 18")}</button></div>`;
+}
+function wzRoomSummary() {
+  const inv = wzRoomInv(), n = inv.types.length, total = wzRoomTotal();
+  const by = new Map(); for (const t of inv.types) for (const r of t.rooms || []) { const f = wzFloor(r); if (f !== null) by.set(f, (by.get(f) || 0) + 1); }
+  const floors = [...by.entries()].sort((a, b) => a[0] - b[0]).map(([f, c]) => `${f}: ${c}`).join(" · ");
+  return n ? `<b>${plural(total, "room")}</b> in ${plural(n, "type")}${floors ? ` · by floor ${esc(floors)}` : ""}` : "No room types yet.";
+}
+const wzRepaintRooms = () => (SU.view === "details" ? paintSetup() : paintWizard(false));
+function wzRoomEditor() {
+  const inv = wzRoomInv();
+  const busy = WZ.roomBusy;
+  const editor = `<div class="sec"><span>Room list</span></div>
+    <div class="group wzrooms" data-fk="rooms-inventory">
+      <div class="wzupload"><span class="body"><b>Upload a room list from your PMS</b><small>PDF, Excel or CSV. The PDF is read on this device. Or add the types by hand below.</small></span>
+        <button type="button" class="pillbtn tint press" id="wzRoomUp" ${busy ? "disabled" : ""}>${busy || "Upload"}</button>
+        <input type="file" id="wzRoomFile" accept=".pdf,.xlsx,.csv,application/pdf,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden></div>
+      ${WZ.roomNote ? `<p class="wzroomnote" role="status">${esc(WZ.roomNote)}</p>` : ""}
+      ${inv.types.length ? `<div class="wzrhead" aria-hidden="true"><span>Code</span><span>Name</span><span>Rooms</span><span>Accessible</span><span>Sofa sleeper</span><span>Fridge + microwave</span><span></span></div>` : ""}
+      <div class="wzrt" role="table" aria-label="Room types">${inv.types.map(wzRoomRow).join("")}</div>
+      <div class="wzrfoot"><button type="button" class="pillbtn press" id="wzRoomAdd">Add a room type</button><span class="wzrsum" id="wzRoomSum" aria-live="polite">${wzRoomSummary()}</span></div>
+      ${SU.view === "details" ? "" : wzDk("rooms-inventory", inv.types.length > 0 && wzRoomTotal() > 0)}</div>`;
+  return editor;
 }
 function wzRooms() {
-  const d = SU.data;
-  const blocks = ["rollaways", "pack_and_plays", "connecting_rooms"].map((k) => {
-    const defs = (d.qkeys[k] || []).map((key) => d.detailDefs.find((x) => x.key === key)).filter((x) => x && !x.more);
-    return wzQuestion(k, DQ_Q[k][0], DQ_Q[k][1], defs, { fk: "yn-" + k, intro: "Filled in for you. Add the fee and where they are kept." });
-  }).join("");
-  const sections = wzSections("rooms", (x) => x.sec === "Rollaways, cribs and connecting rooms");
-  return `<div class="wzcards">${blocks}</div>${sections}${wzMoreBlock("rooms", wzMoreDefs("rooms"))}`;
+  const editor = wzRoomEditor();
+  const blocks = ["rollaways", "pack_and_plays", "connecting_rooms"].map((k) => wzQuestion(k, DQ_Q[k][0], DQ_Q[k][1], wzGated(k), { fk: "yn-" + k })).join("");
+  return `${editor}<div class="wzcards">${blocks}</div>${wzSections("rooms")}`;
+}
+function wzRoomsSave() {
+  clearTimeout(WZ.roomTimer);
+  WZ.roomQ = true; wzMark();
+  WZ.roomTimer = setTimeout(async () => {
+    const body = { types: WZ.rooms.types };
+    try {
+      const r = await wzTrack(suRun(() => api("/api/hotel/rooms", { method: "PUT", body })));
+      SU.data.rooms = r.rooms; if (WZ.rooms.types.length && r.total && SU.data.unknown) delete SU.data.unknown["rooms-inventory"];
+    } catch (e) { fail(e); }
+    WZ.roomQ = false; wzMark();
+  }, 600);
+}
+function wzBindRooms(root) {
+  const inv = wzRoomInv();
+  const up = $("wzRoomUp"), file = $("wzRoomFile");
+  if (up) up.onclick = () => file.click();
+  if (file) file.onchange = () => { const f = file.files && file.files[0]; file.value = ""; if (f) wzRoomUpload(f); };
+  $("wzRoomAdd").onclick = () => { inv.types.push({ code: "", name: "", count: 0, rooms: [], accessible: false, sofa: false, fridge: false }); wzRepaintRooms(); const rows = document.querySelectorAll(".wzrr"); const last = rows[rows.length - 1]; if (last) last.querySelector("input").focus(); };
+  root.querySelectorAll(".wzrr").forEach((row) => {
+    const t = inv.types[+row.dataset.ri];
+    row.querySelectorAll("[data-rf]").forEach((el) => {
+      const f = el.dataset.rf;
+      if (el.type === "checkbox") el.onchange = () => { t[f] = el.checked; wzRoomsSave(); };
+      else el.oninput = () => {
+        if (f === "count") t.count = el.value === "" ? 0 : Math.max(0, Math.round(+el.value)); else t[f] = el.value;
+        const sum = $("wzRoomSum"); if (sum) sum.innerHTML = wzRoomSummary();
+        wzRoomsSave();
+      };
+    });
+    const del = row.querySelector("[data-rdel]");
+    if (del) del.onclick = () => { inv.types.splice(+row.dataset.ri, 1); WZ.roomNote = ""; wzRepaintRooms(); wzRoomsSave(); };
+  });
+}
+// Reads the room report. PDFs and CSVs are parsed in this browser; an Excel file is opened by the server's spreadsheet reader and the rows are looked at here.
+async function wzRoomUpload(file) {
+  if (WZ.roomBusy) return;
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  if (!["pdf", "csv", "xlsx"].includes(ext)) return toast("Use a PDF, Excel or CSV file");
+  if (file.size > 12 * 1048576) return toast("That file is too big. Room lists are small; export just the room list.");
+  WZ.roomBusy = "Reading…"; WZ.roomNote = ""; wzRepaintRooms();
+  try {
+    const mod = await pdfReader();
+    let r;
+    if (ext === "pdf") r = await mod.readRoomReport(file, { version: STATE.pdfjs, v: APP_V, onProgress: (p) => { const b = $("wzRoomUp"); if (b) b.textContent = `Page ${p.page} of ${p.of}…`; } });
+    else if (ext === "csv") r = await mod.parseRoomRows(null, await file.text(), APP_V);
+    else {
+      const out = await api("/api/setup/rooms-sheet", { body: { file: { name: file.name, data: await readDataUrl(file) } } });
+      r = await mod.parseRoomRows(out.rows, "", APP_V);
+    }
+    if (!r || !r.types.length) { WZ.roomNote = "We couldn't find room numbers and room types in that file. Add the types by hand, or try the PMS room count report."; }
+    else {
+      const old = wzRoomInv().types, byCode = new Map(old.map((t) => [t.code.toLowerCase(), t]));
+      WZ.rooms = { types: r.types.map((t) => { const o = byCode.get(t.code.toLowerCase()) || {}; return { code: t.code, name: o.name || "", count: t.count, rooms: t.rooms, accessible: !!o.accessible, sofa: !!o.sofa, fridge: !!o.fridge }; }), source: "pdf" };
+      WZ.roomNote = `Found ${plural(r.types.length, "room type")} and ${plural(r.total, "room")}. Add a name for each and tick the accessible, sofa sleeper and fridge types.${r.warnings.length ? " " + r.warnings.slice(0, 2).join(" ") : ""}`;
+      wzRoomsSave();
+    }
+  } catch (e) { WZ.roomNote = e.message || "That file couldn't be read."; }
+  WZ.roomBusy = ""; wzRepaintRooms();
+}
+function wzBasics() {
+  return `${wzSections("basics")}<p class="hint">Staff use these in emergencies and when guests ask. Nothing here is shown to guests.</p>`;
 }
 function wzSystems() {
   const h = SU.data.hotel;
   const pms = `<div class="sec"><span>Property management system</span></div><div class="group"><div class="cell"><span class="body"><span class="t">${esc(pmsFullName(h))}</span><span class="m">Set when the hotel was added. SOP wording follows this. Ask an Owner if it is wrong.</span></span><span class="status ok">Read only</span></div></div>`;
-  return `${pms}${wzSections("systems")}${wzMoreBlock("systems", wzMoreDefs("systems"))}`;
+  return `${pms}${wzSections("systems")}`;
 }
 
 /* contacts, routes and chats */
@@ -442,12 +593,12 @@ function wzContacts() {
     <p class="hint">Staff see these names and numbers when a question needs a manager. In an SOP, {AGM} or {Engineer} shows the person here. Only people with a name and a 10-digit phone are saved.</p>
     <div class="sec"><span>When staff need help</span></div><div class="group" id="wzRoutes">${routes}</div>
     <p class="hint">Pick who is called first and who is next. Anyone you add above shows up in these lists.</p>
-    <div class="sec"><span>WhatsApp chats</span></div>
+    <div class="sec"><span>Escalation: WhatsApp chats and reply time</span></div>
     <div class="group wzgrp" data-fk="chat-fd"><div class="wzf"><label class="fld"><span>Front desk chat name</span><input id="su-chatFd" value="${esc(ch.front_desk || "")}" placeholder="${esc(chd.front_desk || "")}" maxlength="40" autocomplete="off"></label></div>
       <div class="wzf"><label class="fld"><span>Housekeeping chat name</span><input id="su-chatHk" value="${esc(ch.housekeeping || "")}" placeholder="${esc(chd.housekeeping || "")}" maxlength="40" autocomplete="off"></label></div>
       <div class="wzf"><label class="fld"><span>Manager reply time in the chat (minutes)</span><input id="su-chatMins" type="number" inputmode="numeric" min="1" max="60" step="1" value="${esc(String(ch.responseMinutes || 5))}"></label></div></div>
     <div class="wzsame inline" id="wzChatOk" ${d.chatsConfirmed ? "hidden" : ""}><span class="wzchip same">Suggested names</span><button type="button" class="lnk" id="wzChatConfirm">These match WhatsApp</button></div>
-    <p class="hint">When a manager's answer isn't urgent, Ask Lotus tells staff which chat to use and gives them a message to copy. Use the names your team sees in WhatsApp.</p>`;
+    <p class="hint">When a manager's answer isn't urgent, Ask Lotus tells staff which chat to use, how long to wait for a reply, and gives them a message to copy. Use the names your team sees in WhatsApp.</p>`;
 }
 function wzRoleOpts(sel, none) {
   const roles = (SU.data.setupContacts || []).map((c) => c.role);
@@ -591,7 +742,20 @@ function wzReviewInner(r, on) {
   return `<div class="wzscore"><div class="ring" style="--p:${r.score}"><b>${r.score}%</b><small>ready</small></div>
     <div class="body"><b>${r.essentialsDone ? "You can go live" : left === 1 ? "One thing before you go live" : `${left} things before you go live`}</b><small>${r.essentialsDone ? "The essentials are done. The rest can wait, but each one makes answers better." : "Fix these and the Go live button turns on."}</small></div></div>
     <div class="sec"><span>Needed to go live</span><span>${ess.filter((i) => i.done).length} of ${ess.length}</span></div><ul class="group wzlist">${ess.map(wzItemRow).join("")}</ul>
-    <div class="sec"><span>Recommended</span><span>${rec.filter((i) => i.done).length} of ${rec.length}</span></div><ul class="group wzlist">${rec.map(wzItemRow).join("")}</ul>`;
+    <div class="sec"><span>Recommended</span><span>${rec.filter((i) => i.done).length} of ${rec.length}</span></div><ul class="group wzlist">${rec.map(wzItemRow).join("")}</ul>
+    ${wzSkippedHtml(r)}${wzCheckHtml()}`;
+}
+// Questions marked "Don't know yet": they don't block go-live (unless essential) and wait in the Dashboard's Needs you row.
+function wzSkippedHtml(r) {
+  const sk = r.skipped || [];
+  if (!sk.length) return "";
+  return `<div class="sec"><span>Marked "Don't know yet"</span><span>${sk.length}</span></div><ul class="group wzlist">${sk.map((x) => `<li class="wzitem"><span class="wzchk"></span><span class="body"><b>${esc(x.label)}</b></span><button type="button" class="pillbtn tint press" data-fix="${esc(x.screen)}" data-field="${esc(x.yn ? "yn-" + x.key : x.key)}">Answer</button></li>`).join("")}</ul>
+    <p class="hint">You can go live with these open. They stay in Needs you on the Dashboard until they are answered.</p>`;
+}
+// Answers copied from another hotel still say "check this" until the GM confirms or edits them.
+function wzCheckHtml() {
+  const n = Object.keys(SU.data.prefilled || {}).length;
+  return n ? `<p class="hint">${plural(n, "answer")} copied from another hotel still say "check this". Confirm or edit them on their screens.</p>` : "";
 }
 function wzPaintReview() { const el = $("wzRev"); if (!el) return; el.innerHTML = wzReviewInner(SU.data.readiness, SU.data.sops.filter(suOn).length); bindFix(el); const lv = $("wzLive"); if (lv) lv.disabled = !SU.data.readiness.essentialsDone; }
 function bindFix(root) { root.querySelectorAll("[data-fix]").forEach((b) => (b.onclick = () => wzFix(b.dataset.fix, b.dataset.field))); }

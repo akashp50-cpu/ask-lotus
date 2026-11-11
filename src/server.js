@@ -17,6 +17,8 @@ const { ROUTES } = require("./defaults");
 const imp = require("./importer");
 const dash = require("./dashboard");
 const ob = require("./onboard");
+const D = require("./details");
+const roomsLib = require("./rooms");
 const grp = require("./groups");
 const share = require("./share");
 
@@ -48,7 +50,7 @@ const jsonSmall = express.json({ limit: "6mb" });
 const jsonBig = express.json({ limit: "42mb" });
 const jsonPdf = express.json({ limit: "2mb" }); // a PDF guide arrives already read by the browser: structure and text only, never the PDF itself
 const pdfsteps = require("./pdfsteps");
-app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet|pdf)|setup\/extract|author\/pdf)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
+app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet|pdf)|setup\/(extract|rooms-sheet)|author\/pdf)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
 app.use(
   session({
     store: new PgStore({ pool, tableName: "session" }),
@@ -144,9 +146,14 @@ function publicSettings(s, full) {
 }
 
 // The hotel with its PMS (name, what staff call it, wording rules for the AI). Hotels on a PMS that isn't in the table fall back to the old built-in wording.
+// `details` is what SOPs render with: the hotel's own details plus every alias, derived and generated token (src/details.js). `rawDetails` is what is stored.
 const hotelRow = async (id) => {
-  const h = (await q("SELECT h.id, h.name, h.ready, h.brand, h.system, h.setup, h.accent, h.details, h.chat_names, h.copy_source, to_jsonb(p) AS pms FROM hotels h LEFT JOIN pms p ON p.id = h.system WHERE h.id=$1", [id])).rows[0];
-  if (h) h.pms = grp.pmsOf(h, h.pms);
+  const h = (await q("SELECT h.id, h.name, h.ready, h.brand, h.system, h.setup, h.accent, h.details, h.answers, h.rooms, h.chat_names, h.copy_source, to_jsonb(p) AS pms FROM hotels h LEFT JOIN pms p ON p.id = h.system WHERE h.id=$1", [id])).rows[0];
+  if (h) {
+    h.pms = grp.pmsOf(h, h.pms);
+    h.rawDetails = h.details || {};
+    h.details = D.resolve(h.rawDetails, { answers: h.answers || {}, rooms: h.rooms });
+  }
   return h;
 };
 // The names staff see for the two WhatsApp chats. Default: "<short hotel name> FD" / "<short hotel name> HK" (Hampton FD, Merriam HK);
@@ -925,6 +932,17 @@ function mergeDetails(cur, incoming) {
   return out;
 }
 
+// "Don't know yet" markers (answers.unknown) go away once the question has a real answer.
+function pruneUnknown(answers, details) {
+  const unk = answers && typeof answers.unknown === "object" && answers.unknown ? answers.unknown : {};
+  const next = {};
+  for (const k of Object.keys(unk)) {
+    const f = D.fieldOf(k);
+    if (unk[k] && !(f ? D.valueFilled(f, ob.getDetail(details, k)) : D.valueFilled(k, ob.getDetail(details, k)))) next[k] = true;
+  }
+  return Object.keys(next).length === Object.keys(unk).length ? null : next;
+}
+
 // Replaces the hotel's details; with {merge: true} only the details sent are changed (blank clears one).
 app.put(
   "/api/hotel/details",
@@ -936,14 +954,16 @@ app.put(
     const row = (await q("SELECT details, setup, answers FROM hotels WHERE id=$1", [req.hotel])).rows[0];
     const cur = row.details || {};
     let out = incoming;
-    if (merge) out = mergeDetails(cur, incoming);
-    // While the hotel is in setup, an edited detail stops saying "same as <template hotel>".
+    if (merge) out = D.syncAfterSave(cur, mergeDetails(cur, incoming));
+    // While the hotel is in setup, an edited detail stops saying "check this".
     let patch = null;
     if (row.setup !== "live") {
       patch = { last_activity: new Date().toISOString() };
       const pre = objOf(objOf(row.answers).prefilled);
       if (Object.keys(pre).length) patch.prefilled = prunePrefilled(pre, cur, out);
     }
+    const unk = pruneUnknown(objOf(row.answers), out);
+    if (unk) patch = { ...(patch || {}), unknown: unk };
     if (patch) await q("UPDATE hotels SET details=$1, answers = COALESCE(answers,'{}'::jsonb) || $3::jsonb WHERE id=$2", [JSON.stringify(out), req.hotel, JSON.stringify(patch)]);
     else await q("UPDATE hotels SET details=$1 WHERE id=$2", [JSON.stringify(out), req.hotel]);
     res.json({ details: out, ...(patch && patch.prefilled ? { prefilled: patch.prefilled } : {}) });
@@ -957,18 +977,18 @@ app.put(
   hotel,
   wrap(async (req, res) => {
     const given = req.body.answers && typeof req.body.answers === "object" ? req.body.answers : {};
-    const sdef = await setupDefaults();
     const out = await tx(async (c) => {
-      const h = (await c.query("SELECT id, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const h = (await c.query("SELECT id, answers, details, rooms FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
       const old = h.answers && typeof h.answers === "object" ? h.answers : {};
       let details = { ...(h.details || {}) };
       const patch = {};
       for (const k of DETAIL_QS) {
         if (given[k] === undefined) continue;
         const yes = !!given[k];
-        if (old[k] === undefined || !!old[k] !== yes) details = applyQuestionDefaults(details, k, yes, sdef);
+        details = D.dropStaleGenerated(details, k, old, { ...old, [k]: yes }, h.rooms);
         patch[k] = yes;
       }
+      if (Object.keys(patch).length) { const unk = { ...objOf(old.unknown) }; for (const k of Object.keys(patch)) delete unk[k]; patch.unknown = unk; }
       if (!Object.keys(patch).length) return { answers: {}, details };
       await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb, details=$3 WHERE id=$1", [h.id, JSON.stringify(patch), JSON.stringify(details)]);
       return { answers: patch, details };
@@ -1217,22 +1237,8 @@ for (const action of ["add", "use", "keep", "skip"]) {
 
 // ---------- setup and SOP switches (GM and up) ----------
 const NOT_OFFERED = "not offered at this hotel";
-// Yes/no setup questions that only fill in hotel details (they never switch SOPs on or off). Their wording comes from setup_defaults.
+// Yes/no setup questions that only fill in hotel details (they never switch SOPs on or off). Their wording is generated by src/details.js.
 const DETAIL_QS = ["cash", "rollaways", "pack_and_plays", "connecting_rooms"];
-const DETAIL_GROUP_TITLE = { cash: "Payments & cash", early_checkin: "Early check-in", rooms_policy: "Rooms & bedding" };
-const AMEN_TITLE = { breakfast: "Breakfast", pool: "Pool", pets: "Pets", laundry: "Laundry", market: "Market" };
-// How the general (non-amenity) details are grouped on screen. Anything not listed falls under "Other details".
-const DETAIL_SECTION = {};
-[
-  ["Hotel identity", ["Hotel name", "Hotel short name", "Hotel welcome name", "Hotel location check", "State", "Hotel code"]],
-  ["Timing & policies", ["Check-in time", "Check-out time", "Late check-out cutoff", "Entrance lock time", "Parking pass days", "Smoking fee", "Debit hold amount", "Quiet hours", "Visitor policy", "Occupancy limit", "Weapons policy"]],
-  ["Rooms", ["Accessible rooms", "Accessible room list", "Hearing kit location", "Room type 1", "Room type 2", "Room type 3", "Room type 4", "Room type 5", "Room type 6", "Room type 7", "Fridge and microwave rooms", "Sofa sleeper rooms"]],
-  ["Payments & cash", ["Cash policy", "Cash payment step", "Cash payment script", "Cash deposit step", "Shop payment step", "Starting cash note", "Card machine down cash step"]],
-  ["Early check-in", ["Early check-in cutoff", "Early check-in occupancy limit", "Early check-in fee"]],
-  ["Rooms & bedding", ["Rollaway policy", "Rollaway script", "Rollaway crib script", "Pack-and-play policy", "Connecting rooms policy", "Connecting rooms script"]],
-  ["Supplies & storage", ["Coffee supplies storage", "Fridge and microwave storage", "Toiletries storage", "Pillow storage", "Crib storage", "Cribs on hand", "Bath amenities storage", "Audit envelope drop-off"]],
-  ["Tools & systems", ["Wi-Fi network", "Wi-Fi network name", "ID scanner", "DNR system", "Card authorization tool", "Log book app", "Key system", "Manual key steps", "Housekeeping chat app"]],
-].forEach(([sec, keys]) => keys.forEach((k) => (DETAIL_SECTION[k] = sec)));
 
 // Setup candidates: the SOPs a hotel could start with. They come from its copy source (another hotel), through the group rules:
 // general SOPs always, PMS SOPs only if the PMS matches, brand SOPs only if the brand matches. A candidate is suggested ON when the
@@ -1254,47 +1260,30 @@ function readSetup(h) {
   return { amen, qa, selection: { on: ids(a.selection && a.selection.on), off: ids(a.selection && a.selection.off) }, stage: a.stage || "start", copyFrom: a.copyFrom || null };
 }
 
-// The wording the yes/no detail questions fill in: { cash: {no:{key:value}, yes:{...}}, early_checkin: {default:{...}}, ... }.
-async function setupDefaults() {
-  const r = (await q("SELECT value FROM master_meta WHERE key='setup_defaults'")).rows[0];
-  return r && r.value && typeof r.value === "object" ? r.value : {};
-}
-// Detail names that belong to each question block (setup step 2 and Hotel details): { cash: [keys], ..., early_checkin: [keys] }.
-function questionKeys(defaults) {
+// Detail names that belong to each question block (setup and Hotel details): { cash: [keys], ..., early_checkin: [keys] }.
+function questionKeys() {
   const out = {};
-  for (const k of [...DETAIL_QS, "early_checkin"]) {
-    const keys = new Set();
-    for (const variant of Object.values((defaults && defaults[k]) || {})) for (const key of Object.keys(variant || {})) keys.add(key);
-    if (keys.size) out[k] = [...keys];
-  }
+  for (const f of D.FIELDS) if (f.gate && DETAIL_QS.includes(f.gate.q)) (out[f.gate.q] = out[f.gate.q] || []).push(f.key);
+  out.early_checkin = D.FIELDS.filter((f) => f.sec === "Early check-in").map((f) => f.key);
   return out;
 }
-async function detailDefs(defaults) {
-  const [{ rows }, qk] = await Promise.all([q("SELECT key, example, grp FROM master_details ORDER BY sort, key"), defaults ? questionKeys(defaults) : setupDefaults().then(questionKeys)]);
-  const owner = new Map();
-  for (const [k, keys] of Object.entries(qk)) for (const key of keys) owner.set(tokKey(key), k);
-  return rows.map((d) => {
-    const amen = AMENITIES.includes(d.grp);
-    return {
-      key: d.key, hint: d.example, group: amen ? d.grp : null, q: owner.get(tokKey(d.key)) || null,
-      section: amen ? AMEN_TITLE[d.grp] : DETAIL_GROUP_TITLE[d.grp] || DETAIL_SECTION[d.key] || "Other details",
-      ...ob.classify(d.key, amen ? d.grp : null), // screen, kind, sec, more, ml: where the guided setup shows it
-    };
-  });
-}
-
-// Fills the details a yes/no question owns with the wording for the answer. A detail is only replaced when it is empty
-// or still holds the other answer's wording, so text the GM typed is never overwritten.
-function applyQuestionDefaults(details, question, yes, defaults) {
-  const set = (defaults && defaults[question]) || {};
-  const mine = set[yes ? "yes" : "no"], other = set[yes ? "no" : "yes"] || {};
-  if (!mine) return details;
-  const out = { ...details };
-  for (const [key, val] of Object.entries(mine)) {
-    const have = Object.keys(out).find((x) => tokKey(x) === tokKey(key));
-    const cur = have === undefined ? "" : String(out[have] ?? "").trim();
-    const otherVal = other[key] !== undefined ? String(other[key]).trim() : null;
-    if (!cur || (otherVal !== null && cur === otherVal)) out[have === undefined ? key : have] = val;
+// Where each detail is edited after go-live ("Hotel details"). Retired and generated names have no section: they are never asked.
+const EDITOR_SECTION = { hotel: "Hotel identity", policies: "Timing & policies", rooms: "Rooms", basics: "Emergency & basics", systems: "Tools & systems" };
+// Every detail the wizard knows: the asked ones (src/details.js), then the names still in master_details (or in a SOP) that are no longer asked
+// (hidden: true; they are kept and still render, but nothing shows them).
+async function detailDefs() {
+  const { rows } = await q("SELECT key, example, grp FROM master_details ORDER BY sort, key");
+  const out = D.FIELDS.map((f) => ({
+    key: f.key, label: f.label, hint: f.hint, type: f.type, gate: f.gate, optional: f.optional, copy: f.copy, when: f.when, default: f.default || null,
+    group: f.gate && AMENITIES.includes(f.gate.q) ? f.gate.q : null, q: f.gate && DETAIL_QS.includes(f.gate.q) ? f.gate.q : f.sec === "Early check-in" ? "early_checkin" : null,
+    section: f.sec === "Storage locations" ? "Supplies & storage" : EDITOR_SECTION[f.screen] || "Other details",
+    hidden: false, ...ob.classify(f.key),
+  }));
+  const have = new Set(out.map((d) => tokKey(d.key)));
+  for (const d of rows) {
+    if (have.has(tokKey(d.key))) continue;
+    have.add(tokKey(d.key));
+    out.push({ key: d.key, label: d.key, hint: d.example, type: "text", gate: null, optional: false, copy: false, when: "used", default: null, group: AMENITIES.includes(d.grp) ? d.grp : null, q: null, section: "Other details", hidden: D.isGenerated(d.key), ...ob.classify(d.key, AMENITIES.includes(d.grp) ? d.grp : null) });
   }
   return out;
 }
@@ -1310,7 +1299,7 @@ function detailsUsedBy(m, byKey) {
   return [...out];
 }
 
-const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, chat_names, copy_source FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
+const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, rooms, chat_names, copy_source FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
 
 // The hotel SOPs are copied from at setup: the one chosen (answers.copyFrom, then hotels.copy_source) if it is still there, else the hotel in the
 // same group with the most live SOPs, else any hotel with SOPs (then only general SOPs are copied). null when there is nothing to copy from.
@@ -1388,9 +1377,8 @@ async function applyTemplate(c, hotelId, srcId) {
   const src = (await c.query("SELECT id, setup, answers, details FROM hotels WHERE id=$1", [srcId])).rows[0];
   if (!src || src.setup !== "live" || src.id === hotelId) return { err: "Pick a live hotel to copy the standards from." };
   const h = (await c.query("SELECT id, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [hotelId])).rows[0];
-  const defs = (await detailDefs()).map((d) => ({ key: d.key, group: d.group }));
   const cur = { details: h.details || {}, answers: objOf(h.answers) };
-  const patch = ob.templatePatch({ id: src.id, answers: objOf(src.answers), details: src.details || {} }, cur, defs);
+  const patch = ob.templatePatch({ id: src.id, answers: objOf(src.answers), details: src.details || {} }, cur);
   const details = mergeDetails(cur.details, cleanDetails(patch.details, false));
   const prefilled = { ...objOf(cur.answers.prefilled), ...patch.prefilled };
   const upd = { ...patch.answers, prefilled, template: src.id, last_activity: new Date().toISOString() };
@@ -1401,7 +1389,7 @@ async function applyTemplate(c, hotelId, srcId) {
 // Everything the guided screens need beyond the classic payload.
 async function setupExtras(h, req) {
   const a = objOf(h.answers);
-  const [contacts, routes, users, tmpl, ready, settings] = await Promise.all([
+  const [contacts, routes, users, tmpl, ready, settings, sisters] = await Promise.all([
     q("SELECT id, role, name, phone FROM contacts WHERE hotel_id=$1 ORDER BY id", [h.id]),
     q("SELECT id, label, sub, first_role AS first, then_role AS then, joiner AS join FROM routes WHERE hotel_id=$1 ORDER BY sort", [h.id]),
     q(
@@ -1412,9 +1400,12 @@ async function setupExtras(h, req) {
     templateSources(h.id),
     hotelReadiness(h.id, h),
     settingsRow(),
+    // Every hotel this person can see: "Copy from <hotel>" on each screen.
+    q("SELECT id, name, brand, system, setup FROM hotels WHERE id = ANY($1) AND id <> $2 ORDER BY (setup='live') DESC, name", [req.user.hotels || [], h.id]),
   ]);
   const names = {};
   for (const t of tmpl) names[t.id] = t.short;
+  for (const t of sisters.rows) names[t.id] = shortOf(t);
   for (const id of new Set(Object.values(objOf(a.prefilled)))) if (!names[id]) { const r = (await hotelRow(id)); if (r) names[id] = shortOf(r); }
   return {
     uiStep: ob.STEP_IDS.includes(a.ui_step) ? a.ui_step : null,
@@ -1422,6 +1413,11 @@ async function setupExtras(h, req) {
     prefilledNames: names,
     templates: tmpl,
     layout: ob.LAYOUT.map(([screen, , sec]) => ({ screen, sec })),
+    copyHotels: sisters.rows.map((t) => ({ id: t.id, name: t.name, short: shortOf(t), setup: t.setup })),
+    copyScreens: ob.COPY_SCREENS,
+    unknown: objOf(a.unknown),
+    skipped: ready.readiness.skipped,
+    rooms: h.rooms || { types: [] },
     suggestions: Array.isArray(a.suggestions) ? a.suggestions : [],
     staffLater: a.staff_later === true,
     chatsConfirmed: a.chats_confirmed === true,
@@ -1433,6 +1429,17 @@ async function setupExtras(h, req) {
     aiOn: !!aiConfig(settings, "writing") || ai.mockEnabled(),
     isOwner: isOwner(req.user),
   };
+}
+
+// Detail names that the SOPs which will be on use (setup selection, or the source's suggestion). Used to ask hotel-specific leftovers only when needed.
+async function usedKeys(h, defs) {
+  const [set, d] = await Promise.all([setupCandidates(h), defs || detailDefs()]);
+  const st = readSetup(h);
+  const byKey = new Map(d.map((x) => [tokKey(x.key), x.key]));
+  const on = new Set(selectedIds(set.cands, st.amen, st.selection));
+  const used = new Set();
+  for (const m of set.cands) if (on.has(m.id)) detailsUsedBy(m, byKey).forEach((k) => used.add(k));
+  return [...used];
 }
 
 // Readiness for one hotel: the score, the checklist and what is missing. `h` is the hotel row when the caller already has it.
@@ -1452,7 +1459,7 @@ async function hotelReadiness(hotelId, h) {
   const cn = (h.chat_names && typeof h.chat_names === "object") ? h.chat_names : {};
   const a = objOf(h.answers);
   const r = ob.readiness({
-    answers: a, details: h.details || {}, contacts: contacts.rows, frontDesk: fd.rows[0].n, used: [...used], defs,
+    answers: a, details: h.details || {}, rooms: h.rooms, contacts: contacts.rows, frontDesk: fd.rows[0].n, used: [...used], defs,
     chatCustom: !!(String(cn.front_desk || "").trim() && String(cn.housekeeping || "").trim()),
   });
   return { readiness: r, step: ob.STEP_IDS.includes(a.ui_step) ? a.ui_step : a.stage === "start" || h.setup === "new" ? "welcome" : "hotel", lastActivity: a.last_activity || null };
@@ -1464,10 +1471,9 @@ app.get(
   hotel,
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
-    const sdef = await setupDefaults();
     const [setupSet, defs, srcs, cc] = await Promise.all([
       setupCandidates(h),
-      detailDefs(sdef),
+      detailDefs(),
       q(
         `SELECT h.id, h.name, h.brand, h.system,
                 (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id AND s.status = 'live') AS live
@@ -1478,13 +1484,18 @@ app.get(
     ]);
     const st = readSetup(h);
     const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
+    // The details the SOPs that will be on use: the hotel-specific leftovers are only asked when a SOP that is on needs them.
+    const selOn = new Set(selectedIds(setupSet.cands, st.amen, st.selection));
+    const used = new Set();
+    for (const m of setupSet.cands) if (selOn.has(m.id)) detailsUsedBy(m, byKey).forEach((k) => used.add(k));
     res.json({
+      used: [...used],
       hotel: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup },
       stage: st.stage,
       copyFrom: st.copyFrom,
       source: setupSet.src ? { id: setupSet.src.id, name: setupSet.src.name, sameGroup: setupSet.src.brand === h.brand && setupSet.src.system === h.system } : null,
       answers: { ...st.amen, ...st.qa },
-      qkeys: questionKeys(sdef),
+      qkeys: questionKeys(),
       chats: chatNames(h), chatDefaults: chatDefaults(h),
       selection: st.selection,
       details: h.details || {},
@@ -1556,6 +1567,95 @@ app.post(
   })
 );
 
+// The room inventory (room types with code, name, count, room numbers and the Accessible, Sofa sleeper and Fridge and microwave flags).
+// Saved as typed or as read from a PMS report. Works in setup and after go-live.
+app.put(
+  "/api/hotel/rooms",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const inv = roomsLib.normalize(req.body);
+    const out = await tx(async (c) => {
+      const h = (await c.query("SELECT id, setup, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const patch = {};
+      const unk = { ...objOf(objOf(h.answers).unknown) };
+      if (roomsLib.hasInventory(inv) && unk["rooms-inventory"]) { delete unk["rooms-inventory"]; patch.unknown = unk; }
+      if (h.setup !== "live") patch.last_activity = new Date().toISOString();
+      await c.query("UPDATE hotels SET rooms=$2, answers = COALESCE(answers,'{}'::jsonb) || $3::jsonb WHERE id=$1", [h.id, JSON.stringify(inv), JSON.stringify(patch)]);
+      return inv;
+    });
+    res.json({ rooms: out, total: roomsLib.total(out), floors: roomsLib.perFloor(out) });
+  })
+);
+
+// An Excel room list is opened here with the same reader the SOP template import uses; the browser then looks for the room numbers and types.
+app.post(
+  "/api/setup/rooms-sheet",
+  auth("GM"),
+  jsonBig,
+  hotel,
+  wrap(async (req, res) => {
+    try {
+      const f = loadFiles([req.body && req.body.file])[0];
+      const rows = await imp.anyRowsFromFile(f.name, f.buf);
+      res.json({ rows: rows.slice(0, 3000).map((r) => r.slice(0, 20).map((x) => String(x ?? "").slice(0, 80))) });
+    } catch (e) { importFail(res, e); }
+  })
+);
+
+// "Don't know yet": remembered as a marker (answers.unknown), not as text in the answer. It never blocks go-live unless the question is essential,
+// and the Dashboard lists it until the question is answered.
+app.put(
+  "/api/setup/unknown",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const key = String(req.body.key || "").trim().slice(0, 80);
+    const known = D.YN_KEYS.includes(key) || key === "rooms-inventory" || D.fieldOf(key) || (await detailDefs()).some((d) => tokKey(d.key) === tokKey(key));
+    if (!key || !known) return bad(res, 400, "Unknown question.");
+    const out = await tx(async (c) => {
+      const h = (await c.query("SELECT id, setup, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const f = D.fieldOf(key);
+      const unk = { ...objOf(objOf(h.answers).unknown) };
+      const name = f ? f.key : key;
+      if (req.body.on === false) delete unk[name]; else unk[name] = true;
+      await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [h.id, JSON.stringify({ unknown: unk, ...(h.setup !== "live" ? { last_activity: new Date().toISOString() } : {}) })]);
+      return unk;
+    });
+    res.json({ unknown: out });
+  })
+);
+
+// "Copy from <hotel>" at the top of a screen: the sister hotel's answers for that screen's questions fill the empty ones and are marked "check this".
+// Identity fields (name, address, phone, Wi-Fi, room list, contacts) are never copied.
+app.post(
+  "/api/setup/copy-section",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => {
+    const screen = String(req.body.screen || ""), from = String(req.body.from || "");
+    if (!ob.COPY_SCREENS.includes(screen)) return bad(res, 400, "Nothing on this screen can be copied.");
+    if (!from || from === req.hotel || !(req.user.hotels || []).includes(from)) return bad(res, 400, "Pick a hotel to copy from.");
+    const out = await tx(async (c) => {
+      const src = (await c.query("SELECT id, name, answers, details FROM hotels WHERE id=$1", [from])).rows[0];
+      const h = (await c.query("SELECT id, setup, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      if (!src) return { err: "That hotel isn't there." };
+      if (h.setup === "live") return { err: "This hotel is already live. Change details from the Dashboard." };
+      const cur = { details: h.details || {}, answers: objOf(h.answers) };
+      const patch = ob.copyPatch({ id: src.id, answers: objOf(src.answers), details: src.details || {} }, cur, screen);
+      const details = mergeDetails(cur.details, cleanDetails(patch.details, false));
+      const prefilled = { ...objOf(cur.answers.prefilled), ...patch.prefilled };
+      const unk = { ...objOf(cur.answers.unknown) };
+      for (const k of [...Object.keys(patch.answers), ...Object.keys(patch.details)]) delete unk[k];
+      const upd = { ...patch.answers, prefilled, unknown: unk, last_activity: new Date().toISOString() };
+      await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb, details=$3 WHERE id=$1", [h.id, JSON.stringify(upd), JSON.stringify(details)]);
+      return { count: Object.keys(patch.prefilled).length, answers: { ...cur.answers, ...patch.answers }, details, prefilled, from: { id: src.id, name: src.name } };
+    });
+    if (out.err) return bad(res, 400, out.err);
+    res.json(out);
+  })
+);
+
 // Remember which screen the GM is on, so setup resumes there.
 app.put(
   "/api/setup/ui-step",
@@ -1620,7 +1720,7 @@ app.post(
       if (!cfg) return res.status(400).json({ error: "Reading documents needs an AI key, and none is set up yet. The Owner can add one in Settings.", noAi: true });
       const files = loadFiles(req.body.files);
       const defs = await detailDefs();
-      const editable = defs;
+      const editable = defs.filter((d) => !d.hidden);
       const results = [];
       for (const f of files) {
         const text = await imp.fileText(f.name, f.buf);
@@ -1691,7 +1791,7 @@ app.put(
   hotel,
   wrap(async (req, res) => {
     const out = await tx(async (c) => {
-      const h = (await c.query("SELECT id, brand, system, setup, answers, details, copy_source FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const h = (await c.query("SELECT id, brand, system, setup, answers, details, rooms, copy_source FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
       if (h.setup === "live") return { err: "This hotel is already live. Change details from the Dashboard." };
       const old = readSetup(h);
       const given = req.body.answers && typeof req.body.answers === "object" ? req.body.answers : {};
@@ -1706,8 +1806,8 @@ app.put(
       }
       // Details: merge what was sent, then settle the amenity groups ("no" fills the empty ones with a plain note).
       const incoming = cleanDetails(req.body.details, true);
-      let details = mergeDetails(h.details, incoming);
-      const defs = (await c.query("SELECT key, grp FROM master_details WHERE grp = ANY($1)", [AMENITIES])).rows;
+      let details = D.syncAfterSave(h.details || {}, mergeDetails(h.details, incoming));
+      const defs = [...(await c.query("SELECT key, grp FROM master_details WHERE grp = ANY($1)", [AMENITIES])).rows, ...D.FIELDS.filter((f) => f.gate && AMENITIES.includes(f.gate.q)).map((f) => ({ key: f.key, grp: f.gate.q }))];
       for (const d of defs) {
         const key = Object.keys(details).find((x) => tokKey(x) === tokKey(d.key));
         const sent = Object.keys(incoming).some((x) => tokKey(x) === tokKey(d.key) && incoming[x]);
@@ -1715,11 +1815,11 @@ app.put(
         else if (amen[d.grp] === true && key && details[key] === NOT_OFFERED && !sent) delete details[key];
       }
       // Yes/no questions that only fill in details: new (or first) answers write their wording into the empty details.
-      const qa = { ...old.qa }, sdef = await setupDefaults();
+      const qa = { ...old.qa };
       for (const k of DETAIL_QS) {
         if (given[k] === undefined) continue;
         const yes = !!given[k];
-        if (old.qa[k] === undefined || old.qa[k] !== yes) details = applyQuestionDefaults(details, k, yes, sdef);
+        details = D.dropStaleGenerated(details, k, objOf(h.answers), { ...objOf(h.answers), [k]: yes }, h.rooms);
         qa[k] = yes;
       }
       // A changed answer or detail is the GM's own now, so it no longer says "same as <template hotel>".
@@ -1730,11 +1830,17 @@ app.put(
       }
       prefilled = prunePrefilled(prefilled, h.details || {}, details);
       const patch = { ...amen, ...qa, selection, prefilled, last_activity: new Date().toISOString() };
+      // A "Don't know yet" goes away once the question has an answer.
+      const unk = { ...objOf(objOf(h.answers).unknown) };
+      for (const k of Object.keys(given)) delete unk[k];
+      const pruned = pruneUnknown({ unknown: unk }, details);
+      patch.unknown = pruned || unk;
       if (req.body.stage === "about" || req.body.stage === "review") patch.stage = req.body.stage;
       await c.query("UPDATE hotels SET answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb, details=$3 WHERE id=$1", [req.hotel, JSON.stringify(patch), JSON.stringify(details)]);
-      return { answers: { ...amen, ...qa }, selection, details, prefilled };
+      return { answers: { ...amen, ...qa }, selection, details, prefilled, unknown: patch.unknown };
     });
     if (out.err) return bad(res, 400, out.err);
+    out.used = await usedKeys(await hotelFull(req.hotel));
     res.json(out);
   })
 );
@@ -1830,8 +1936,8 @@ app.get(
       q("SELECT id, filenames, result FROM imports WHERE hotel_id=$1 AND status='review' ORDER BY id DESC", [req.hotel]),
       q("SELECT title, steps, script, flag FROM sops WHERE hotel_id=$1 AND status='live'", [req.hotel]),
     ]);
-    const det = h.details || {};
-    const filled = defs.filter((d) => String(det[d.key] ?? "").trim()).length;
+    const answers = objOf(h.answers);
+    const det = D.resolve(h.details || {}, { answers, rooms: h.rooms });
     // What waits on the GM besides suggestions: drafts, import batches with undecided matches or new SOPs, and blanks the live SOPs use.
     const undecided = (r) => ["matches", "new"].reduce((n, g) => n + ((r || {})[g] || []).filter((x) => !x.state).length, 0);
     const imports = imps.rows.map((r) => ({ id: r.id, open: undecided(r.result), files: r.filenames || [] })).filter((r) => r.open > 0);
@@ -1839,8 +1945,17 @@ app.get(
     const used = new Set();
     for (const s of texts.rows) for (const mt of JSON.stringify([s.title, s.steps, s.script, s.flag]).matchAll(/\{([^{}"\\]+)\}/g)) { const k = byKey.get(tokKey(mt[1])); if (k) used.add(k); }
     const blank = (k) => { const v = String(det[Object.keys(det).find((x) => tokKey(x) === tokKey(k))] ?? "").trim(); return !v || /\[FILL/.test(v); };
-    const missing = defs.filter((d) => used.has(d.key) && blank(d.key)).map((d) => d.key);
-    res.json({ suggestions, counts: counts.rows[0], drafts: counts.rows[0].draft, imports, missing, details: { filled, total: defs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
+    const missing = defs.filter((d) => !d.hidden && used.has(d.key) && blank(d.key)).map((d) => d.key);
+    // Room tokens come from the room list, so a missing list is the one thing to ask for.
+    if (!roomsLib.hasInventory(h.rooms) && defs.some((d) => d.hidden && used.has(d.key) && /^(Room type \d|Accessible room|Total rooms|Rooms per floor|Room list|Fridge and|Sofa sleeper)/i.test(d.key) && blank(d.key))) missing.push("Room list");
+    // Questions the GM marked "Don't know yet" stay in the same row until they are answered.
+    const qs = ob.applicable({ answers, details: h.details || {}, used: [...used] });
+    const skipped = [];
+    for (const x of qs) if (x.unknown && !x.filled && !missing.includes(x.key)) skipped.push(x.key);
+    for (const k of D.YN_KEYS) if (objOf(answers.unknown)[k] && answers[k] === undefined) skipped.push(D.YN[k].title);
+    if (objOf(answers.unknown)["rooms-inventory"] && !roomsLib.hasInventory(h.rooms)) skipped.push("Room list");
+    missing.push(...skipped);
+    res.json({ suggestions, counts: counts.rows[0], drafts: counts.rows[0].draft, imports, missing, skipped: skipped.length, details: { filled: qs.filter((x) => x.filled).length, total: qs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
   })
 );
 
