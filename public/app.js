@@ -486,6 +486,7 @@ $("gearBtn").onclick = () => {
 };
 $("backBtn").onclick = leaveSettings;
 // The feed is one row per staff message; a conversation (same convo id) is one item. Older rows are one item each.
+const l0 = (g) => g.rows[0];
 function groupLog(rows) {
   const m = new Map(), out = [];
   for (const l of rows) {
@@ -504,6 +505,7 @@ function groupLog(rows) {
     g.escChat = er.length ? er[er.length - 1].esc_chat : null;
     g.open = !g.sop && last.kind === "ask"; // still waiting on the staff member's answer: not a gap
     g.q = g.rows.map((r) => r.q).join(". ");
+    g.thread = !!l0(g).convo && g.rows.some((r) => r.thread);
   }
   return out;
 }
@@ -636,7 +638,36 @@ function renderActivity() {
   $("usage").innerHTML = e.length ? e.map(([k, v]) => `<div class="bar"><span class="nm">${esc(k)}</span><span class="n">${v}</span><div class="track"><div class="fill" style="width:${(v / max) * 100}%"></div></div></div>`).join("") : `<div class="empty">No answered questions yet.</div>`;
   $("feedTitle").textContent = `Recent questions (${log.length})`;
   $("feed").innerHTML = log.length ? log.slice(0, 50).map((l) => { const u = { id: l.uid || 0, name: l.user_name || "Removed user" }, s = l.sop && sop(l.sop);
-    return `<div class="cell">${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.rows[0].q)}</span>${l.rows.length > 1 ? `<span class="convoTurns">${l.rows.slice(1).map((r) => `<span class="ct">&#8627; ${esc(r.q)}</span>`).join("")}</span>` : ""}<span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : l.open ? "Waiting on an answer" : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""}${l.escLevel ? ` · ${escBadge(l)}` : ""} · ${fmtDT(l.when)}</span></span></div>`; }).join("") : `<div class="empty">No questions yet.</div>`;
+    const tag = l.thread ? `button type="button" class="cell press" data-thread="${esc(l.rows[0].convo)}" aria-label="Read the conversation"` : `div class="cell"`;
+    return `<${tag}>${avatar(u, 28)}<span class="body"><span class="t wrap">${esc(l.rows[0].q)}</span>${l.rows.length > 1 ? `<span class="convoTurns">${l.rows.slice(1).map((r) => `<span class="ct">&#8627; ${esc(r.q)}</span>`).join("")}</span>` : ""}<span class="m">${esc(u.name)} · ${s ? esc(s.id + " " + s.title) : l.open ? "Waiting on an answer" : `<span class="no">Not covered</span>`}${l.fb === "n" ? ` · <span class="no">Not helpful</span>` : ""}${l.escLevel ? ` · ${escBadge(l)}` : ""} · ${fmtDT(l.when)}</span></span>${l.thread ? chev : ""}</${l.thread ? "button" : "div"}>`; }).join("") : `<div class="empty">No questions yet.</div>`;
+  $("feed").querySelectorAll("[data-thread]").forEach((b) => (b.onclick = () => openThread(b.dataset.thread)));
+}
+
+/* ----- one conversation, read back (Activity) ----- */
+const thTime = (d) => (d ? new Date(d).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
+function thBot(t) {
+  const when = t.at ? `<span class="thAt">${thTime(t.at)}</span>` : "";
+  const escNote = t.escalate ? `<div class="thEsc${t.escalate.level === "urgent" ? " urgent" : ""}"><b>${t.escalate.level === "urgent" ? "Told to call a manager now" : `Told to post in the ${esc(chatName(t.escalate.chat === "housekeeping" ? "housekeeping" : "front_desk"))} chat`}</b>${t.escalate.message ? `<br>${esc(t.escalate.message)}` : ""}</div>` : "";
+  let body;
+  if (t.kind === "ask") body = `${esc(t.question || "Asked a follow-up question.")}${(t.options || []).length ? `<div class="thOpts">${t.options.map((o) => `<span>${esc(o)}</span>`).join("")}</div>` : ""}`;
+  else if (t.kind === "answer") {
+    const s = sop(t.sop_id), title = t.sop_title || (s && s.title) || "";
+    body = `${t.answer ? staffText(t.answer) : "Showed the SOP."}<div class="thSop">From ${esc(t.sop_id)}${title ? " " + esc(title) : ""}</div>${t.tip ? `<div class="thTip">${staffText(t.tip)}</div>` : ""}`;
+  } else if (t.kind === "advise") body = t.advice ? staffText(t.advice) : "Gave general guidance (no SOP fit).";
+  else body = `<span class="no">${t.aiDown ? "The AI didn't answer, and no SOP matched." : "No SOP covered this."}</span>`;
+  return `<div class="thRow bot"><div class="stMsg bot">${body}${escNote}</div>${when}</div>`;
+}
+async function openThread(id) {
+  $("thTitle").textContent = "Conversation"; $("thMeta").textContent = "Loading…"; $("thLog").innerHTML = "";
+  showSheet("threadEd");
+  try {
+    const t = await api(`/api/activity/thread/${encodeURIComponent(id)}`);
+    $("thTitle").textContent = t.user_name || "Removed user";
+    $("thMeta").textContent = `${fmtDT(t.started)}${t.last && new Date(t.last) - new Date(t.started) > 60000 ? " to " + thTime(t.last) : ""}`;
+    $("thLog").innerHTML = t.turns.map((x) => (x.role === "staff"
+      ? `<div class="thRow me"><div class="stMsg me">${esc(x.text)}</div>${x.at ? `<span class="thAt">${thTime(x.at)}</span>` : ""}</div>`
+      : thBot(x))).join("") || `<div class="empty">Nothing in this conversation.</div>`;
+  } catch (e) { $("thMeta").textContent = e.message; }
 }
 
 function renderTeam() {
@@ -756,7 +787,7 @@ const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 6
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });
 function showSheet(which) {
   const open = !sheet.hidden && sheetS.target === 0; // already on screen: just swap the form, no slide
-  ["editor", "userEd", "contactEd", "hotelEd", "listEd", "sopView", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  ["editor", "userEd", "contactEd", "hotelEd", "listEd", "sopView", "needsEd", "threadEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
   if (open) { sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0)); return; }
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));

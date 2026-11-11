@@ -130,7 +130,7 @@
         <div class="group" id="usage"></div>
         <div class="sec"><span id="feedTitle">Recent questions</span></div>
         <div class="group" id="feed"></div>
-        <p class="foot">Tap an employee to see only their questions. Spotting who asks about what helps target coaching.</p>
+        <p class="foot">Tap an employee to see only their questions. Tap a question to read the whole conversation (kept for 48 hours).</p>
       </div>
 
       <div id="tab-team" class="tabp" hidden>
@@ -311,6 +311,11 @@
         <div class="form"><div class="rowline"><span>This hotel only<small>Don't suggest this to the other hotels in the group.</small></span><button type="button" class="switch" id="f-only" role="switch" aria-checked="false" aria-label="This hotel only"><i></i></button></div></div>
         <button type="button" class="danger" id="delEd">Delete SOP</button>
       </div>
+    </form>
+
+    <form id="threadEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Close</button><h2 id="thTitle">Conversation</h2><span style="min-width:68px"></span></div>
+      <div class="sbody"><p class="hint" id="thMeta"></p><div class="thLog" id="thLog"></div><p class="foot">Full conversations are kept for 48 hours, then cleared. The question list stays for 90 days.</p></div>
     </form>
 
     <form id="needsEd" hidden>

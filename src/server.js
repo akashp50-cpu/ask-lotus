@@ -276,6 +276,12 @@ app.get(
 );
 
 const CONVO_TTL = "2 hours";
+// Full conversation threads are deleted this long after their last message, to keep the database small.
+const THREAD_KEEP = "48 hours";
+const pruneThreads = () =>
+  q(`DELETE FROM conversations WHERE updated_at < now() - interval '${THREAD_KEEP}'`).catch((e) => console.error("Clearing old conversations failed:", e.message));
+setTimeout(pruneThreads, 30 * 1000).unref();
+setInterval(pruneThreads, 60 * 60 * 1000).unref();
 const loadConvo = async (id, userId, hotelId) => {
   if (typeof id !== "string" || id.length > 64) return null;
   const r = await q(
@@ -323,11 +329,16 @@ app.post(
       "INSERT INTO questions (hotel_id, user_id, question, sop_id, matched_by, convo_id, turn, kind, escalate_level, escalate_chat) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
       [req.hotel, req.user.id, question, sop ? sop.id : null, kind === "ask" ? "ai" : by, convo.id, turnNo, kind, esc ? esc.level : null, esc ? esc.chat : null]
     );
-    const bot = kind === "ask" ? { role: "assistant", kind, question: result.question, options: result.options }
-      : kind === "answer" ? { role: "assistant", kind, sop_id: sop.id, answer: result.answer }
-      : { role: "assistant", kind };
+    // What staff saw, kept so managers can read the thread back (Activity). Extra fields are ignored by the AI prompt.
+    const at = new Date().toISOString();
+    const escOut = esc ? { level: esc.level, chat: esc.chat, message: esc.message || null } : null;
+    const bot = kind === "ask" ? { role: "assistant", kind, question: result.question, options: result.options, at }
+      : kind === "answer" ? { role: "assistant", kind, sop_id: sop.id, sop_title: sop.title, answer: result.answer, tip: result.tip || null, escalate: escOut, at }
+      : kind === "advise" ? { role: "assistant", kind, advice: result.advice || null, escalate: escOut, at }
+      : { role: "assistant", kind, escalate: escOut, aiDown: !!aiError, at };
+    const stamped = turns.map((t, i) => (i === turns.length - 1 && t.role === "staff" && !t.at ? { ...t, at } : t));
     await q("UPDATE conversations SET turns=$1, last_sop=$2, asks=$3, updated_at=now() WHERE id=$4", [
-      JSON.stringify([...turns, bot].slice(-40)),
+      JSON.stringify([...stamped, bot].slice(-40)),
       kind === "answer" ? sop.id : kind === "ask" ? convo.last_sop : convo.last_sop,
       kind === "ask" ? convo.asks + 1 : 0,
       convo.id,
@@ -625,13 +636,34 @@ app.get(
   wrap(async (req, res) => {
     const { rows } = await q(
       `SELECT qn.id, qn.user_id AS uid, u.name AS user_name, qn.question AS q, qn.sop_id AS sop,
-              qn.matched_by, qn.convo_id AS convo, qn.turn, qn.kind, qn.escalate_level AS esc_level, qn.escalate_chat AS esc_chat, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when"
+              qn.matched_by, qn.convo_id AS convo, qn.turn, qn.kind, qn.escalate_level AS esc_level, qn.escalate_chat AS esc_chat, qn.feedback AS fb, qn.dismissed, qn.asked_at AS "when",
+              (c.id IS NOT NULL) AS thread
          FROM questions qn LEFT JOIN users u ON u.id = qn.user_id
+         LEFT JOIN conversations c ON c.id = qn.convo_id AND c.hotel_id = qn.hotel_id AND c.updated_at > now() - interval '${THREAD_KEEP}'
         WHERE qn.hotel_id=$1 AND qn.asked_at > now() - interval '90 days'
         ORDER BY qn.asked_at DESC LIMIT 2000`,
       [req.hotel]
     );
     res.json(rows);
+  })
+);
+
+// The full thread of one conversation: what the staff member typed and what Ask Lotus answered. Kept THREAD_KEEP after the
+// last message, then deleted (the one-line rows in questions stay 90 days for the dashboard and Activity stats).
+app.get(
+  "/api/activity/thread/:convo",
+  auth("Manager"),
+  hotel,
+  wrap(async (req, res) => {
+    const { rows } = await q(
+      `SELECT c.id, c.turns, c.created_at, c.updated_at, u.id AS uid, u.name AS user_name
+         FROM conversations c LEFT JOIN users u ON u.id = c.user_id
+        WHERE c.id=$1 AND c.hotel_id=$2 AND c.updated_at > now() - interval '${THREAD_KEEP}'`,
+      [String(req.params.convo).slice(0, 64), req.hotel]
+    );
+    if (!rows[0]) return bad(res, 404, "This conversation was cleared. Full conversations are kept for 48 hours.");
+    const r = rows[0];
+    res.json({ id: r.id, uid: r.uid, user_name: r.user_name, started: r.created_at, last: r.updated_at, turns: r.turns || [] });
   })
 );
 

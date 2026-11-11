@@ -1362,3 +1362,16 @@ body.shell header.scrolled{background:var(--chrome);-webkit-backdrop-filter:blur
   .wzrr .chk .lbl{position:static;width:auto;height:auto;clip:auto;overflow:visible;font-size:.84rem;color:var(--label)}
   .wzupload{flex-wrap:wrap}
 }
+/* Activity: one conversation read back */
+.thLog{display:flex;flex-direction:column;gap:10px;margin-top:6px}
+.thRow{display:flex;flex-direction:column;gap:3px}
+.thRow.me{align-items:flex-end}.thRow.bot{align-items:flex-start}
+.thRow .stMsg{max-width:88%;white-space:normal}
+.thRow.me .stMsg{white-space:pre-wrap}
+.thAt{font-size:.72rem;color:var(--label3);padding:0 6px}
+.thSop{margin-top:8px;font-size:.8rem;font-weight:600;color:var(--tint)}
+.thTip{margin-top:6px;font-size:.86rem;color:var(--label2)}
+.thOpts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.thOpts span{padding:2px 10px;border-radius:999px;border:1px solid var(--edge);font-size:.8rem}
+.thEsc{margin-top:8px;padding:8px 10px;border-radius:12px;background:var(--tint-soft);font-size:.85rem}
+.thEsc.urgent{background:color-mix(in srgb,var(--red) 14%,transparent)}
