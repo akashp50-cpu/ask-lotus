@@ -230,6 +230,8 @@ async function selectHotel(id, target) {
 
 async function loadHotel() {
   const d = await api("/api/bootstrap");
+  // Questions and activity belong to one hotel: never show the last hotel's while this one loads.
+  if (canManage()) { setLog([]); try { setLog(await api("/api/activity")); } catch { /* the Activity tab retries on open */ } }
   Object.assign(STATE, { cats: d.cats, sops: d.sops, contacts: d.contacts, routes: d.routes, settings: d.settings, details: d.details || {}, chats: d.chats || {}, chatDefaults: d.chatDefaults || {}, info: d.info || {} });
   const ho = STATE.hotels.find((h) => h.id === STATE.hotel);
   if (ho && d.info) ho.accent = d.info.accent || null;
