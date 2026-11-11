@@ -318,7 +318,7 @@ const ESCALATE_RULES = (minutes) => [
   'ESCALATE: In an answer or advise reply you may add "escalate": {"level":"urgent" or "chat","chat":"front_desk" or "housekeeping","message":"the message to post"}.',
   'Include escalate when the SOP (steps or the "Call a manager if" line) or your own answer tells the agent to involve, ask or call a manager or someone else, when an "ask a manager" / "not set" gap blocks the answer, and on EVERY advise reply. Otherwise leave it out.',
   `The team replies in the group chat within about ${responseMinutes(minutes)} minutes, so prefer "chat". level "urgent" (the agent phones a manager now) ONLY for: an emergency (fire, medical, gas, flood), a safety or security risk (weapon, threat, violence, theft in progress, police needed, harassment, someone hurt or injured), or a guest becoming aggressive or abusive. Everything else that needs a manager is level "chat", including refunds, comps, discounts, disputes, a guest waiting at the desk, policy exceptions, late checkout beyond the rules and system questions. The agent is told to call if nobody answers the chat. Emergencies are never "chat".`,
-  'chat picks the group: "housekeeping" for rooms, cleaning, linens, towels, amenity stock, supplies, maintenance handoffs for a room, lost and found and room status; "front_desk" for everything else (reservations, rates, payments, PEP or HotelKey, policies, guest issues, shifts).',
+  'chat picks the group: "housekeeping" for rooms, cleaning, linens, towels, amenity stock, supplies, maintenance handoffs for a room, lost and found and room status; "front_desk" for everything else (reservations, rates, payments, front desk system (PMS) problems, policies, guest issues, shifts).',
   'message is ready to paste in WhatsApp, in the staff member\'s own voice: 1 to 3 short sentences, no emojis, no greeting. Include the room number and guest name only if the conversation gave them (otherwise write "[room #]"; never invent one), what the guest wants, what was already tried, and one clear question. Do not name the chat in the message.',
 ].join(" ");
 
@@ -386,7 +386,7 @@ async function converse(cfg, { hotelName, system, turns, candidates, catalog, la
 const AUTHOR_MAX_ASKS = 3;
 const AUTHOR_TIMEOUT_MS = 45000, AUTHOR_MAX_TOKENS = 1500, AUTHOR_PDF_MAX_TOKENS = 5000;
 
-function authorSystem({ hotelName, system, categories, detailKeys, roles, editing, asks, pdf }) {
+function authorSystem({ hotelName, system, pmsRules, categories, detailKeys, roles, editing, asks, pdf }) {
   return [
     `You are a seasoned hotel operator (20+ years, front desk to general manager) writing the standard operating procedures (SOPs) that front desk agents follow in the middle of a shift${hotelName ? ` at ${hotelName}` : ""}. A manager is briefing you like an assistant: they describe a procedure in their own words and may attach screenshots or photos. You turn it into a clean SOP.`,
     system ? `Front desk system: ${system}. Use that name in the steps, never "the PMS" or "the system".` : "",
@@ -404,14 +404,14 @@ function authorSystem({ hotelName, system, categories, detailKeys, roles, editin
       ? "EDITING: The manager is changing an existing SOP (shown as CURRENT DRAFT). Keep everything they did not mention exactly as it is: same wording, same photos, same order. Return the FULL updated SOP, not a diff. Keep photo ids already on steps unless asked to change them."
       : "NEW SOP: If a CURRENT DRAFT is shown, you already drafted it earlier in this chat. Apply the manager's newest message to it and return the FULL updated SOP.",
     "notes is one short line (25 words or fewer) on what you did or assumed. missing lists short items still unknown, or [].",
-    pdf ? PDF_RULES : "",
+    pdf ? pdfRules(pmsRules) : "",
   ].filter(Boolean).join("\n");
 }
 
 // Added to the author prompt when the manager attached a PDF quick-reference guide.
-const PDF_RULES = [
+const pdfRules = (pmsRules) => [
   "PDF GUIDE: The manager attached a PDF guide. Its text was read for you and is listed in the conversation as PROCEDURE n, then numbered lines \"step text [img:ID]\". Each ID is a screenshot cropped from the guide, already saved; you never see the pictures. Attach one to a step with that step's \"img\" (the ID only, no \"img:\" prefix). Use only IDs from the listing, each on one step only.",
-  "PDF STEPS: Rewrite each step short, plain and staff-friendly in the hotel's own wording (say \"PEP\", never OnQ or \"the PMS\"; the folio is V2; the property is cashless; night audit is the Night Audit tab, then Start). Keep one screenshot per step where it helps the agent find the screen. When two steps have near-identical screenshots, or the screenshot only shows a confirmation, keep one and drop the other. Merge a step that is only an introduction into the next one. Never invent a click, button, field, fee or number that is not in the guide. Keep the guide's order. Ignore policy text and corporate notices that are not steps.",
+  `PDF STEPS: Rewrite each step short, plain and staff-friendly in the hotel's own wording (${pmsRules ? pmsRules + "; " : ""}the property is cashless). Keep one screenshot per step where it helps the agent find the screen. When two steps have near-identical screenshots, or the screenshot only shows a confirmation, keep one and drop the other. Merge a step that is only an introduction into the next one. Never invent a click, button, field, fee or number that is not in the guide. Keep the guide's order. Ignore policy text and corporate notices that are not steps.`,
   "PDF SPLIT OR UPDATE: Before you draft, check two things. (1) If the guide holds MORE THAN ONE separate procedure, ask whether to make one SOP for each, as ONE question listing them, for example \"This guide has 2 procedures: Print one guest's registration card / Print all arrivals' cards. Make 2 SOPs?\". Give each procedure as its own short option and set \"multi\":true so the manager can tick several; add an option \"Combine into one SOP\" only if it makes sense. (2) If a procedure clearly overlaps an SOP in the CATALOG, ask, for example \"This matches your SOP 'Standard check-out' (CO-04): update it, or make a new one?\" with options \"Update CO-04\" and \"Make a new SOP\" and \"multi\":false. Do both in one question when both apply. If the guide is one procedure with no overlap, DRAFT IMMEDIATELY and ask nothing. The manager's answer is final: never ask the same thing twice.",
   "PDF ONE AT A TIME: Draft only ONE SOP per reply. When the manager asks for several, write the first now and say in notes which one is next; the manager will ask for the next one after saving this one. When the manager chose to update an existing SOP, return the full updated SOP built from the guide, and set \"update_sop_id\" to that SOP's id from the CATALOG; otherwise leave it out. Never put the existing SOP's id on a new SOP.",
 ].join("\n");
@@ -424,9 +424,9 @@ const draftBlock = (d) => !d ? "" : [
 
 // turns: [{role:"manager",text,images:[{id,caption}]} | {role:"assistant",kind:"ask",question,options} | {role:"assistant",kind:"draft",notes}]
 // images: [{id,mime,b64,caption}] actually sent (max 6). allowedImages: extra photo ids the draft may use (already on the existing SOP).
-async function authorSop(cfg, { hotelName, system, categories, detailKeys = [], roles = [], existingSop, draft, turns, images = [], allowedImages = [], asks = 0, catalog = [] }) {
+async function authorSop(cfg, { hotelName, system, pmsRules, categories, detailKeys = [], roles = [], existingSop, draft, turns, images = [], allowedImages = [], asks = 0, catalog = [] }) {
   const hasPdf = turns.some((t) => t.pdf);
-  const sys = authorSystem({ hotelName, system, categories, detailKeys, roles, editing: !!existingSop, asks, pdf: hasPdf });
+  const sys = authorSystem({ hotelName, system, pmsRules, categories, detailKeys, roles, editing: !!existingSop, asks, pdf: hasPdf });
   const lastPdf = turns.map((t, i) => (t.pdf ? i : -1)).filter((i) => i >= 0).pop();
   const first = Math.max(0, turns.length - 20);
   const convo = turns.slice(-20).map((t, k) => {

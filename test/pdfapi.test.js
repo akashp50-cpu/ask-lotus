@@ -156,7 +156,7 @@ test("import/pdf: unused crops are deleted when the AI uses none, and when the i
   assert.deepStrictEqual(await exists([theirs]), [theirs]);
 });
 
-test("import/pdf: a picture uploaded to another hotel is not accepted for this one (Owner master scope too)", { skip }, async () => {
+test("import/pdf: a picture uploaded to another hotel is not accepted for this one ", { skip }, async () => {
   const wrongHotel = (await upload("tpdf_owner", 1, OTHER))[0];
   const [right, right2] = await upload("tpdf_owner", 2, HID);
   mock([{ matches: [], new: [{ title: "Owner import", category: CAT, steps: [{ t: "One", img: "@img:1" }, { t: "Two", img: "@img:2" }] }] }]);
@@ -168,14 +168,7 @@ test("import/pdf: a picture uploaded to another hotel is not accepted for this o
   assert.strictEqual((await call("tpdf_gm", "POST", "/api/import/pdf", { target: OTHER, ...guide([step("a", null)]) })).status, 403);
   assert.strictEqual((await call("tpdf_mgr", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", null)]) })).status, 403);
   assert.strictEqual((await call("nobody", "POST", "/api/import/pdf", { target: HID, ...guide([step("a", null)]) })).status, 401);
-  // master library: pictures belong to the Owner's first hotel
-  const first = (await call("tpdf_owner", "GET", "/api/me")).body.user.hotels[0];
-  const [m, m2] = await upload("tpdf_owner", 2, first);
-  mock([{ matches: [], new: [{ title: "Master import", category: CAT, steps: [{ t: "One", img: "@img:1" }, { t: "Two", img: "@img:2" }] }] }]);
-  const rm = await call("tpdf_owner", "POST", "/api/import/pdf", { target: "master", ...guide([step("one", m), step("two", wrongHotel), step("three", m2)], { name: "check-out.pdf" }) });
-  assert.strictEqual(rm.status, 200, JSON.stringify(rm.body));
-  assert.deepStrictEqual(rm.body.new.find((x) => x.title === "Master import").imgs, [m, m2]);
-  await pool.query("DELETE FROM images WHERE id = ANY($1)", [[m, m2, wrongHotel, right, right2]]);
+  await pool.query("DELETE FROM images WHERE id = ANY($1)", [[wrongHotel, right, right2]]);
 });
 
 test("import/pdf: a PDF that is not a guide is read as text; the old PDF body and empty bodies are refused", { skip }, async () => {
@@ -325,7 +318,7 @@ test("studio: sheets and documents join one batch (batchId); items say which fil
   assert.deepStrictEqual(b.body.new.map((x) => x.title).sort(), ["Studio from sheet", "Studio from text"]);
   assert.strictEqual(b.body.new.find((x) => x.title === "Studio from sheet").src, "studio.csv");
   // another hotel's batch is never joined: a new batch starts instead
-  const c = await call("tpdf_owner", "POST", "/api/import/sheet", { target: "master", batchId: a.body.id, file: { name: "studio.csv", data: b64(csv.replace(CAT, CAT)) } });
+  const c = await call("tpdf_owner", "POST", "/api/import/sheet", { target: OTHER, batchId: a.body.id, file: { name: "studio.csv", data: b64(csv) } });
   assert.strictEqual(c.status, 200); assert.notStrictEqual(c.body.id, a.body.id);
   await call("tpdf_owner", "POST", `/api/import/${c.body.id}/discard`, {});
   // refine one item: new wording replaces it, Add as draft saves that wording

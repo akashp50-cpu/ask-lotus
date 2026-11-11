@@ -318,6 +318,8 @@ function normalizeMaster(j) {
   // Content updates (db/seed-data/updates/*.json): each applied once, in filename order, recorded in master_meta.
   const upd = await applyUpdates({ tx });
   if (upd.applied.length) console.log(`Applied content updates: ${upd.applied.join(", ")}.`);
+  // Rows the seed or an update just added get their family and kind (the schema step does the same for existing rows).
+  await require("./groups").apply(pool);
   await pool.end();
 })().catch((e) => {
   console.error(e);

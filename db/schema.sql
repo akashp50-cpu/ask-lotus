@@ -304,3 +304,67 @@ CREATE TABLE IF NOT EXISTS sop_drafts (
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sop_drafts_user ON sop_drafts (user_id, updated_at DESC);
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- Brand groups. SOP libraries are shared inside a group = brand + PMS (hotels.brand + hotels.system).
+-- hotels.brand holds brands.id and hotels.system holds pms.id (old values 'hilton'/'independent' and 'pep'/'hotelkey' ARE the seed ids).
+-- ---------------------------------------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS brands (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS brands_name_lower_idx ON brands (lower(name));
+
+-- A property management system: its name, what staff call it, and the wording rules the AI follows when it writes or answers for a hotel on it.
+CREATE TABLE IF NOT EXISTS pms (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  staff_name  TEXT NOT NULL DEFAULT '',
+  rules       TEXT NOT NULL DEFAULT '',
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS pms_name_lower_idx ON pms (lower(name));
+
+INSERT INTO brands (id, name, sort) VALUES ('hilton','Hilton',0), ('ihg','IHG',1), ('independent','Independent',2) ON CONFLICT DO NOTHING;
+INSERT INTO pms (id, name, staff_name, rules, sort) VALUES
+  ('pep', 'PEP', 'PEP', 'PEP is Hilton''s name for HotelKey NextGen. Say "PEP" and never "OnQ" or "the PMS". The folio is V2. Use "Copy Reservation". Night audit is the Night Audit tab, then Start.', 0),
+  ('hotelkey', 'HotelKey NextGen', 'HotelKey', 'Say "HotelKey".', 1)
+ON CONFLICT DO NOTHING;
+
+-- Where a hotel's SOPs are copied from when it is set up (a hotel id). Chosen when the hotel is added; filled in for older hotels by the groups migration.
+ALTER TABLE hotels ADD COLUMN IF NOT EXISTS copy_source TEXT;
+
+-- family = the same SOP across hotels (master copies use the master id, hotel-only SOPs 'hotel:id'). kind = 'pms' | 'general' | 'brand'.
+-- requires = the amenity a SOP depends on (breakfast, pool, ...). All filled in by db/groups.js; null means "not classified yet".
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS family   TEXT;
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS kind     TEXT;
+ALTER TABLE sops ADD COLUMN IF NOT EXISTS requires TEXT;
+CREATE INDEX IF NOT EXISTS sops_family_idx ON sops (family);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'sops'::regclass AND conname = 'sops_kind_check') THEN
+    ALTER TABLE sops ADD CONSTRAINT sops_kind_check CHECK (kind IS NULL OR kind IN ('pms','general','brand'));
+  END IF;
+END $$;
+
+-- Suggestions inside a group. When a GM publishes a new SOP or saves a change to a live one, every other live hotel in the same group gets a
+-- row here. Nothing changes at a hotel until its GM chooses (add / use / keep / skip). A newer open suggestion for the same SOP from the same
+-- hotel replaces the older one (status 'superseded').
+CREATE TABLE IF NOT EXISTS sop_suggestions (
+  id           SERIAL PRIMARY KEY,
+  to_hotel     TEXT NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
+  from_hotel   TEXT NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
+  family       TEXT NOT NULL,
+  from_sop     TEXT NOT NULL,
+  snapshot     JSONB NOT NULL,        -- { title, category, steps, script, flag, keywords, kind, requires }
+  status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','added','used','kept','skipped','superseded')),
+  created_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at  TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS sop_suggestions_to_idx ON sop_suggestions (to_hotel, status);
+CREATE INDEX IF NOT EXISTS sop_suggestions_fam_idx ON sop_suggestions (family, from_hotel, to_hotel, status);

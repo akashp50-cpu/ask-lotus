@@ -267,20 +267,28 @@ const Glass = (function () {
     } catch (e) { if (mine === token) { $("dashBody").innerHTML = `<div class="dcard dempty"><h2>Couldn't load the dashboard</h2><p>${esc(e.message)}</p></div>`; } }
   }
   /* ---------- Needs you: what waits on the GM at this hotel (GM and Owner) ---------- */
-  const CHANGED = { title: "title", category: "category", steps: "steps", script: "what to say", flag: "when to call a manager", keywords: "search words" };
   let needs = null, needsTok = 0, needsBusy = false, nsKind = null;
   const canNeeds = () => isGM() && hotelObj().ready;
+  const SG_INLINE = 3;
   const some = (list, max) => list.slice(0, max).join(", ") + (list.length > max ? ` and ${list.length - max} more` : "");
   function needRows(H) {
-    const rows = [], pend = H.updates.filter((u) => !u.kept), kept = H.updates.filter((u) => u.kept);
-    if (pend.length) rows.push({ k: "upd", icon: "upd", title: `${plural(pend.length, "update")} from Lotus`, sub: some(pend.map((u) => u.title), 3) + (kept.length ? `. ${kept.length} more on SOPs you edited.` : ""), btns: [["Review", "review-upd"], ["Accept all", "accept-all", 1]] });
-    else if (kept.length) rows.push({ k: "upd", icon: "upd", title: `Lotus changed ${plural(kept.length, "SOP")} you edited`, sub: some(kept.map((u) => u.title), 3), btns: [["Review", "review-upd", 1]] });
-    if (H.fresh.length === 1) { const m = H.fresh[0]; rows.push({ k: "new", icon: "add", title: `New from Lotus: ${m.title}`, sub: `${m.cat} · not at your hotel yet`, btns: [["Skip", "skip", 0, m.id], ["Add", "add", 1, m.id]] }); }
-    else if (H.fresh.length) rows.push({ k: "new", icon: "add", title: `${H.fresh.length} new SOPs from Lotus`, sub: some(H.fresh.map((m) => m.title), 3), btns: [["Review", "review-new", 1]] });
+    const rows = [], sg = H.suggestions || [];
+    // Suggestions from the other hotels in the brand group: the first few here, the rest in the review sheet.
+    for (const x of sg.slice(0, SG_INLINE)) rows.push({ k: "sg" + x.id, sg: x });
+    if (sg.length > SG_INLINE) rows.push({ k: "sgmore", icon: "add", title: `${plural(sg.length - SG_INLINE, "more suggestion")} from your sister hotels`, sub: some(sg.slice(SG_INLINE).map((x) => x.title), 3), btns: [["Review all", "review-sg", 1]] });
     if (H.drafts) rows.push({ k: "drafts", icon: "draft", title: `${plural(H.drafts, "draft")} to review`, sub: "Staff can't see drafts until you turn them on.", btns: [["Review drafts", "drafts", 1]] });
     for (const b of H.imports) rows.push({ k: "imp" + b.id, icon: "lib", title: `Upload waiting: ${some(b.files, 2) || "your upload"}`, sub: `${plural(b.open, "procedure")} to decide: use the guide's steps or keep yours.`, btns: [["Decide", "import", 1, b.id]] });
     if (H.missing.length) rows.push({ k: "missing", icon: "info", title: `${plural(H.missing.length, "hotel detail")} missing`, sub: `${some(H.missing, 4)}. Staff see "ask a manager" until they are filled in.`, btns: [["Fill in", "details", 1]] });
     return rows;
+  }
+  // One suggestion: where it came from and what it is, with Skip / Tweak / Add (new) or Keep mine / Tweak / Use (a change to ours).
+  const sgBtns = (x) => (x.type === "new"
+    ? [["Skip", "sg-skip", 0], ["Tweak", "sg-tweak", 0], ["Add", "sg-add", 1]]
+    : [["Keep mine", "sg-keep", 0], ["Tweak", "sg-tweak", 0], ["Use", "sg-use", 1]]);
+  const sgMeta = (x) => `${x.type === "new" ? "New" : x.label} · ${x.from.name}${x.cat ? " · " + x.cat : ""}`;
+  function sgRow(x) {
+    return `<li class="nrow sg"><span class="nico sgdot" aria-hidden="true"></span><div class="nbody"><div class="nrt">${esc(x.title)}</div><div class="nrs">${esc(sgMeta(x))}</div>
+      <div class="nacts">${sgBtns(x).map(([label, a, main]) => `<button type="button" class="nbtn press${main ? " main" : ""}" data-a="${a}" data-id="${x.id}" aria-label="${esc(label + ": " + x.title)}">${label}</button>`).join("")}</div></div></li>`;
   }
   function paintNeeds(enter) {
     const box = $("needsBody");
@@ -289,7 +297,7 @@ const Glass = (function () {
     box.hidden = false; box.classList.toggle("rise", !!enter);
     box.innerHTML = html`<div class="nhd"><div class="nt"><h2>Needs you</h2>${rows.length ? `<span class="nbadge" role="status" aria-label="${rows.length} waiting">${rows.length}</span>` : ""}</div>
       <div class="nq"><button type="button" class="gbtn sm press" data-a="details">${ic("info", 2)}Hotel details</button><button type="button" class="gbtn sm press" data-a="kit">${ic("kit", 2)}Welcome kit</button></div></div>
-      ${rows.length ? `<ul class="nrows">${rows.map((r) => `<li class="nrow"><span class="nico" aria-hidden="true">${ic(r.icon, 2)}</span><div class="nbody"><div class="nrt">${esc(r.title)}</div><div class="nrs">${esc(r.sub)}</div>
+      ${rows.length ? `<ul class="nrows">${rows.map((r) => r.sg ? sgRow(r.sg) : `<li class="nrow"><span class="nico" aria-hidden="true">${ic(r.icon, 2)}</span><div class="nbody"><div class="nrt">${esc(r.title)}</div><div class="nrs">${esc(r.sub)}</div>
         <div class="nacts">${r.btns.map(([label, a, main, id]) => `<button type="button" class="nbtn press${main ? " main" : ""}" data-a="${a}" ${id !== undefined ? `data-id="${esc(id)}"` : ""}>${label}</button>`).join("")}</div></div></li>`).join("")}</ul>`
       : `<p class="nclear" role="status">All caught up. Nothing is waiting on you at this hotel.</p>`}`;
     if (focus) { const b = box.querySelector(`[data-a="${focus}"]`); if (b) b.focus({ preventScroll: true }); }
@@ -324,33 +332,37 @@ const Glass = (function () {
     const b = e.target.closest("[data-a]"); if (!b || needsBusy) return;
     const a = b.dataset.a, id = b.dataset.id;
     if (a === "details" || a === "kit") goSetup(a);
-    else if (a === "review-upd") openSheet("upd");
-    else if (a === "review-new") openSheet("new");
+    else if (a === "review-sg") openSheet("sg");
     else if (a === "drafts") { libDraft = true; cat = ""; renderCatPills(); navTo("sops"); }
     else if (a === "import") studioOpenBatch(+id);
-    else if (a === "accept-all") needsRun(async () => { for (const u of needs.updates.filter((x) => !x.kept)) await post(`/api/updates/${enc(u.sopId)}/accept`); }, "Accepted all updates");
-    else if (a === "add") needsRun(() => post(`/api/updates/new/${enc(id)}/add`), "Added. Staff can ask about it now");
-    else if (a === "skip") needsRun(() => post(`/api/updates/new/${enc(id)}/skip`), "Skipped. It's in your Off list if you change your mind");
+    else if (a.startsWith("sg-")) sgAct(a.slice(3), +id);
   }
-  // The review sheets: every update (Keep mine / Accept), or every new SOP (Add / Skip).
+  const SG_MSG = { add: "Added. Staff can ask about it now", use: "Updated to the group's wording", keep: "Kept yours", skip: "Skipped" };
+  async function sgAct(act, id) {
+    if (act === "tweak") {
+      if (needsBusy) return; needsBusy = true;
+      try {
+        const out = await api(`/api/suggestions/${id}/seed`);
+        needsBusy = false; if (!sheet.hidden) hideSheet();
+        studioOpen({ target: STATE.hotel, seed: out.draft, sopId: out.sopId, suggestion: out.id });
+      } catch (e) { needsBusy = false; fail(e); await handled(); }
+      return;
+    }
+    needsRun(() => post(`/api/suggestions/${id}/${act}`), SG_MSG[act]);
+  }
+  // The review sheet: every suggestion, with the same buttons.
   function openSheet(kind) { nsKind = kind; paintSheet(); showSheet("needsEd"); }
   function paintSheet() {
-    const H = needs, up = nsKind === "upd", list = H ? (up ? H.updates : H.fresh) : [];
+    const list = needs ? needs.suggestions || [] : [];
     if (!list.length) { nsKind = null; if (!sheet.hidden) hideSheet(); return; }
-    $("needsTitle").textContent = up ? "Updates from Lotus" : "New from Lotus";
-    $("needsList").innerHTML = `<div class="group">${up ? list.map((u) => `<div class="cell upd"><span class="body"><span class="t wrap">${esc(u.title)}</span><span class="m wrapm">${esc(u.sopId)} · v${u.have} to v${u.latest} · ${u.relevant ? (u.changed.length ? "Changed: " + esc(u.changed.map((k) => CHANGED[k] || k).join(", ")) : "Updated") : "No change to what your staff see"}${u.kept ? " · You edited this one" : ""}${u.status === "off" ? " · Off at your hotel" : ""}</span></span>
-        <span class="acts"><button type="button" class="pillbtn press" data-keep="${esc(u.sopId)}">Keep mine</button><button type="button" class="pillbtn tint press" data-accept="${esc(u.sopId)}">Accept</button></span></div>`).join("")
-      : list.map((m) => `<div class="cell upd"><span class="body"><span class="t wrap">${esc(m.title)}</span><span class="m wrapm">${esc(m.id)} · ${esc(m.cat)}</span></span>
-        <span class="acts"><button type="button" class="pillbtn press" data-skip="${esc(m.id)}">Skip</button><button type="button" class="pillbtn tint press" data-add="${esc(m.id)}">Add</button></span></div>`).join("")}</div>`;
-    $("needsFoot").textContent = up ? "Accept replaces your copy with Lotus's latest wording. Keep mine leaves your copy as it is." : "Add turns the SOP on for your staff. Skip leaves it in your Off list.";
+    $("needsTitle").textContent = "From your sister hotels";
+    $("needsList").innerHTML = `<div class="group">${list.map((x) => `<div class="cell upd"><span class="body"><span class="t wrap">${esc(x.title)}</span><span class="m wrapm">${esc(sgMeta(x))}</span></span>
+      <span class="acts">${sgBtns(x).map(([label, a, main]) => `<button type="button" class="pillbtn press${main ? " tint" : ""}" data-sg="${a}" data-id="${x.id}" aria-label="${esc(label + ": " + x.title)}">${label}</button>`).join("")}</span></div>`).join("")}</div>`;
+    $("needsFoot").textContent = "Add and Use put the group's wording at your hotel. Keep mine and Skip leave your SOPs as they are. Tweak opens it in the studio first.";
   }
   function sheetClick(e) {
-    const b = e.target.closest("button"); if (!b || needsBusy) return;
-    const d = b.dataset;
-    if (d.accept) needsRun(() => post(`/api/updates/${enc(d.accept)}/accept`), "Accepted the update");
-    else if (d.keep) needsRun(() => post(`/api/updates/${enc(d.keep)}/keep`), "Kept yours");
-    else if (d.add) needsRun(() => post(`/api/updates/new/${enc(d.add)}/add`), "Added. Staff can ask about it now");
-    else if (d.skip) needsRun(() => post(`/api/updates/new/${enc(d.skip)}/skip`), "Skipped. It's in your Off list if you change your mind");
+    const b = e.target.closest("button[data-sg]"); if (!b || needsBusy) return;
+    sgAct(b.dataset.sg.slice(3), +b.dataset.id);
   }
   new MutationObserver(() => { if (sheet.hidden) nsKind = null; }).observe(sheet, { attributes: true, attributeFilter: ["hidden"] });
 

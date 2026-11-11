@@ -2,6 +2,7 @@
 const { best, rank } = require("./match");
 const { forModel } = require("./tokens");
 const ai = require("./ai");
+const groups = require("./groups");
 
 // convo: { turns:[...prior turns], last_sop, asks }; hotel: { name, system, details }.
 // Returns { result, by, aiError, turns } where turns already includes the new staff message.
@@ -42,7 +43,7 @@ async function runTurn({ cfg, hotel, sops, contacts, convo, question, expert, fa
     const emergency = ai.isEmergency(question);
     const raw = await ai.converse(cfg, {
       hotelName: hotel.name,
-      system: hotel.system === "pep" ? "PEP (Hilton's name for HotelKey NextGen)" : "HotelKey",
+      system: groups.pmsLine(groups.pmsOf(hotel, hotel.pms)), // the hotel's PMS name and wording rules
       turns, candidates: short.map((r) => forModel(r.s, contacts, hotel.details)), lastSop, expert,
       catalog: sops.map((x) => ({ id: x.id, title: x.title })), asks: convo.asks || 0,
       minutes: ai.responseMinutes((hotel.chat_names || {}).response_minutes),

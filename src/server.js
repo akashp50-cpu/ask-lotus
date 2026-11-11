@@ -17,6 +17,8 @@ const { ROUTES } = require("./defaults");
 const imp = require("./importer");
 const dash = require("./dashboard");
 const ob = require("./onboard");
+const grp = require("./groups");
+const share = require("./share");
 
 const PORT = process.env.PORT || 3000;
 const PROD = process.env.NODE_ENV === "production";
@@ -141,7 +143,12 @@ function publicSettings(s, full) {
   };
 }
 
-const hotelRow = async (id) => (await q("SELECT id, name, ready, brand, system, setup, accent, details, chat_names FROM hotels WHERE id=$1", [id])).rows[0];
+// The hotel with its PMS (name, what staff call it, wording rules for the AI). Hotels on a PMS that isn't in the table fall back to the old built-in wording.
+const hotelRow = async (id) => {
+  const h = (await q("SELECT h.id, h.name, h.ready, h.brand, h.system, h.setup, h.accent, h.details, h.chat_names, h.copy_source, to_jsonb(p) AS pms FROM hotels h LEFT JOIN pms p ON p.id = h.system WHERE h.id=$1", [id])).rows[0];
+  if (h) h.pms = grp.pmsOf(h, h.pms);
+  return h;
+};
 // The names staff see for the two WhatsApp chats. Default: "<short hotel name> FD" / "<short hotel name> HK" (Hampton FD, Merriam HK);
 // the short name drops "Hotel Lotus", "Inn" and brand words. A saved name wins; blank means the default.
 const SHORT_NAME = { hop: "Hampton" };
@@ -169,6 +176,9 @@ const sopOut = (r) => ({
   updated: r.updated_at,
   master: r.master_id || null,
   kept: !!r.kept,
+  family: r.family || r.master_id || `${r.hotel_id}:${r.id}`,
+  kind: r.kind || "general",
+  requires: r.requires || null,
 });
 
 // ---------- auth ----------
@@ -206,7 +216,11 @@ app.get(
     const hotels = (
       await q("SELECT id, name, ready, brand, system, setup, accent FROM hotels WHERE id = ANY($1) ORDER BY name", [req.user.hotels])
     ).rows;
-    res.json({ user: req.user, hotels, pdfjs: PDFJS_VERSION });
+    const [brands, pms] = await Promise.all([
+      q("SELECT id, name FROM brands ORDER BY sort, name"),
+      q("SELECT id, name, staff_name AS staff FROM pms ORDER BY sort, name"),
+    ]);
+    res.json({ user: req.user, hotels, brands: brands.rows, pms: pms.rows, pdfjs: PDFJS_VERSION });
   })
 );
 
@@ -241,7 +255,7 @@ app.get(
     ]);
     res.json({
       hotel: req.hotel,
-      info: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup, ready: h.ready, accent: h.accent || null },
+      info: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup, ready: h.ready, accent: h.accent || null, pms: h.pms.name, pmsStaff: h.pms.staff_name || h.pms.name },
       details: h.details || {},
       chats: chatNames(h),
       chatDefaults: chatDefaults(h),
@@ -491,7 +505,15 @@ function validSop(b) {
     flag: String(b.flag || "").trim().slice(0, 1000),
     kw: String(b.kw || "").trim().slice(0, 1000),
     status: b.status === "draft" ? "draft" : b.status === "off" ? "off" : "live",
+    kind: grp.KINDS.includes(b.kind) ? b.kind : null,
+    hotelOnly: b.hotelOnly === true,
+    suggestion: Number.isInteger(b.suggestion) ? b.suggestion : null,
   };
+}
+
+// Tells the rest of the group about a SOP that was published or changed. Never fails the save.
+async function tellGroup(c, hotelId, row, userId) {
+  try { return await share.suggest(c, { hotelId, row, userId }); } catch (e) { console.error("Suggesting to the group failed:", e.message); return 0; }
 }
 
 app.post(
@@ -506,20 +528,35 @@ app.post(
     const cat = (await q("SELECT prefix FROM categories WHERE hotel_id=$1 AND name=$2", [req.hotel, d.cat])).rows[0];
     if (!cat) return bad(res, 400, "Pick a category.");
     const out = await tx(async (c) => {
+      // A SOP written from a suggestion (Tweak) keeps the suggestion's family, so the group sees it as the same SOP.
+      let family = null, sg = null;
+      if (d.suggestion) {
+        sg = (await c.query("SELECT * FROM sop_suggestions WHERE id=$1 AND to_hotel=$2 AND status='open' FOR UPDATE", [d.suggestion, req.hotel])).rows[0];
+        if (sg) {
+          if (await share.ownByFamily(c, req.hotel, sg.family)) return { err: "This hotel already has that SOP. Use the update instead." };
+          family = sg.family;
+        }
+      }
       const { rows } = await c.query(
         "SELECT id FROM sops WHERE hotel_id=$1 AND id LIKE $2 FOR UPDATE",
         [req.hotel, cat.prefix + "-%"]
       );
       const n = Math.max(0, ...rows.map((r) => parseInt(r.id.split("-")[1], 10) || 0)) + 1;
       const id = `${cat.prefix}-${String(n).padStart(2, "0")}`;
+      const kind = d.kind || grp.classifyKind({ title: d.title, steps: d.steps, script: d.script, flag: d.flag });
       const r = await c.query(
-        `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [req.hotel, id, d.cat, d.title, JSON.stringify(d.steps), d.script, d.flag, d.kw, d.status, req.user.id]
+        `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by, family, kind)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [req.hotel, id, d.cat, d.title, JSON.stringify(d.steps), d.script, d.flag, d.kw, d.status, req.user.id, family || `${req.hotel}:${id}`, kind]
       );
-      return r.rows[0];
+      const row = r.rows[0];
+      if (sg) await share.closeSuggestion(c, sg.id, req.hotel, "added", req.user.id);
+      // A new SOP that goes live is suggested to the other hotels in the group, unless this save is "this hotel only".
+      const told = row.status === "live" && !d.hotelOnly ? await tellGroup(c, req.hotel, row, req.user.id) : 0;
+      return { row, told };
     });
-    res.json(sopOut(out));
+    if (out.err) return bad(res, 400, out.err);
+    res.json({ ...sopOut(out.row), suggested: out.told });
   })
 );
 
@@ -535,23 +572,27 @@ app.put(
       const cur = (await c.query("SELECT * FROM sops WHERE hotel_id=$1 AND id=$2 FOR UPDATE", [req.hotel, req.params.id])).rows[0];
       if (!cur) return null;
       if (d.status === "off" && cur.status !== "off" && !isGM(req.user)) d.status = "draft";
-      // Only a change to the wording marks a master-linked copy as "kept"; switching it on or off does not.
-      const norm = (x) => JSON.stringify([x.title, x.cat ?? x.category, (x.steps || []).map((t) => [t.t || "", t.img || null]), x.script || "", x.flag || "", x.kw ?? x.keywords ?? ""]);
-      const contentChanged = norm({ ...d, cat: d.cat || cur.category }) !== norm({ ...cur, cat: cur.category });
+      const kind = d.kind || cur.kind || grp.classifyKind({ title: d.title, steps: d.steps, script: d.script, flag: d.flag });
+      const next = { title: d.title, category: d.cat || cur.category, steps: d.steps, script: d.script, flag: d.flag, keywords: d.kw, kind };
+      const contentChanged = grp.changedFields(share.snapOf(cur), next).length > 0;
       await c.query("INSERT INTO sop_history (hotel_id, sop_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4,$5)", [
         req.hotel, cur.id, cur.version, JSON.stringify(sopOut(cur)), req.user.id,
       ]);
       const r = await c.query(
         `UPDATE sops SET category=$3, title=$4, steps=$5, script=$6, flag=$7, keywords=$8, status=$9,
-                version=version+1, updated_at=now(), updated_by=$10,
-                kept = (kept OR ($11 AND master_id IS NOT NULL))
+                version=version+1, updated_at=now(), updated_by=$10, kind=$11, family=COALESCE(family, master_id, hotel_id || ':' || id)
           WHERE hotel_id=$1 AND id=$2 RETURNING *`,
-        [req.hotel, req.params.id, d.cat || cur.category, d.title, JSON.stringify(d.steps), d.script, d.flag, d.kw, d.status, req.user.id, contentChanged]
+        [req.hotel, req.params.id, next.category, d.title, JSON.stringify(d.steps), d.script, d.flag, d.kw, d.status, req.user.id, kind]
       );
-      return r.rows[0];
+      const row = r.rows[0];
+      if (d.suggestion) await share.closeSuggestion(c, d.suggestion, req.hotel, "used", req.user.id);
+      // Published (a draft going live) or a live SOP whose wording changed: suggest it to the group. Switching on/off alone never does.
+      const publishes = row.status === "live" && (cur.status === "draft" || (cur.status === "live" && contentChanged) || (cur.status === "off" && contentChanged));
+      const told = publishes && !d.hotelOnly ? await tellGroup(c, req.hotel, row, req.user.id) : 0;
+      return { row, told };
     });
     if (!out) return bad(res, 404, "That SOP no longer exists.");
-    res.json(sopOut(out));
+    res.json({ ...sopOut(out.row), suggested: out.told });
   })
 );
 
@@ -958,21 +999,7 @@ function cleanDraft(b) {
 }
 const draftOut = (d) => (d && d.title ? d : null);
 
-async function authorContext(user, hotelId, target) {
-  if (target === "master") {
-    const [cats, dk, roles] = await Promise.all([
-      q("SELECT name FROM master_categories ORDER BY sort"),
-      q("SELECT key, example FROM master_details ORDER BY sort, key"),
-      q("SELECT DISTINCT role FROM contacts ORDER BY role"),
-    ]);
-    return {
-      hotelName: "Lotus Hospitality hotels",
-      system: "PEP (Hilton's name for HotelKey NextGen). Write the default PEP wording; HotelKey wording for other hotels is added separately by the Owner",
-      categories: cats.rows.map((r) => r.name),
-      detailKeys: dk.rows.map((r) => r.key),
-      roles: roles.rows.map((r) => r.role),
-    };
-  }
+async function authorContext(user, hotelId) {
   const [h, cats, roles] = await Promise.all([
     hotelRow(hotelId),
     q("SELECT name FROM categories WHERE hotel_id=$1 ORDER BY sort", [hotelId]),
@@ -981,7 +1008,8 @@ async function authorContext(user, hotelId, target) {
   const det = Object.entries(h.details || {}).filter(([, v]) => String(v ?? "").trim()).map(([k, v]) => `${k} (${String(v).trim().slice(0, 40)})`);
   return {
     hotelName: h.name,
-    system: h.system === "pep" ? "PEP (Hilton's name for HotelKey NextGen)" : "HotelKey",
+    system: grp.pmsLine(h.pms), // the hotel's PMS name and wording rules (Owner > Portfolio > PMS)
+    pmsRules: grp.pmsRulesClause(h.pms),
     categories: cats.rows.map((r) => r.name),
     detailKeys: det.map((d) => d.replace(/ \(.*\)$/s, "")),
     detailHints: det,
@@ -990,10 +1018,8 @@ async function authorContext(user, hotelId, target) {
 }
 
 // What the AI is told about the SOPs that already exist (so it can say "this matches your SOP ...").
-async function authorCatalog(target, hotelId) {
-  const rows = target === "master"
-    ? (await q("SELECT id, title, category, keywords FROM master_sops ORDER BY id")).rows
-    : (await q("SELECT id, title, category, keywords FROM sops WHERE hotel_id=$1 AND status <> 'off' ORDER BY id", [hotelId])).rows;
+async function authorCatalog(hotelId) {
+  const rows = (await q("SELECT id, title, category, keywords FROM sops WHERE hotel_id=$1 AND status <> 'off' ORDER BY id", [hotelId])).rows;
   return rows.map((r) => ({ id: r.id, title: r.title, category: r.category, kw: String(r.keywords || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 5).join(", ").slice(0, 80) }));
 }
 const pdfLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many PDFs. Wait a few minutes and try again." } });
@@ -1011,8 +1037,6 @@ const authorHandler = wrap(async (req, res) => {
 });
 
 async function authorRun(req, res, state) {
-    const target = req.body.target === "master" ? "master" : "hotel";
-    if (target === "master" && !isOwner(req.user)) return bad(res, 403, "Only the Owner can write master library SOPs.");
     const message = String(req.body.message || "").trim().slice(0, 3000);
     const imageIds = [...new Set((Array.isArray(req.body.imageIds) ? req.body.imageIds : []).map(String))].slice(0, MAX_AUTHOR_IMAGES);
     const isPdf = req.path === "/api/author/pdf";
@@ -1021,7 +1045,7 @@ async function authorRun(req, res, state) {
     if (!message && !imageIds.length && !isPdf) return bad(res, 400, "Tell me about the procedure, or attach a photo.");
     const cfg = aiConfig(await settingsRow(), "writing") || (ai.mockEnabled() ? { provider: "mock" } : null);
     if (!cfg) return bad(res, 400, "AI isn't switched on. Use Write it myself.");
-    const hotelKey = target === "master" ? null : req.hotel;
+    const hotelKey = req.hotel;
 
     // An attached PDF guide: the browser already read it and uploaded its screenshots. Check everything it says, then the writing model gets a compact listing.
     let pdfTurn = null;
@@ -1052,9 +1076,7 @@ async function authorRun(req, res, state) {
       let sopId = req.body.sopId ? String(req.body.sopId).slice(0, 40) : null;
       let draft = cleanDraft(req.body.seed);
       if (sopId && !(req.body.seed && req.body.seed.title)) {
-        const cur = target === "master"
-          ? (await q("SELECT id, category, title, steps, script, flag, keywords FROM master_sops WHERE id=$1", [sopId])).rows[0]
-          : (await q("SELECT id, category, title, steps, script, flag, keywords FROM sops WHERE hotel_id=$1 AND id=$2", [req.hotel, sopId])).rows[0];
+        const cur = (await q("SELECT id, category, title, steps, script, flag, keywords FROM sops WHERE hotel_id=$1 AND id=$2", [req.hotel, sopId])).rows[0];
         if (!cur) return bad(res, 404, "That SOP no longer exists.");
         draft = cleanDraft(sopOut(cur));
       }
@@ -1083,12 +1105,12 @@ async function authorRun(req, res, state) {
 
     let asks = 0;
     for (let i = turns.length - 2; i >= 0 && turns[i].role === "assistant" && turns[i].kind === "ask"; i -= 2) asks++;
-    const ctx = await authorContext(req.user, req.hotel, target);
-    const catalog = turns.some((t) => t.pdf) ? await authorCatalog(target, req.hotel) : [];
+    const ctx = await authorContext(req.user, req.hotel);
+    const catalog = turns.some((t) => t.pdf) ? await authorCatalog(req.hotel) : [];
     let out;
     try {
       out = await ai.authorSop(cfg, {
-        hotelName: ctx.hotelName, system: ctx.system, categories: ctx.categories, detailKeys: ctx.detailKeys, roles: ctx.roles,
+        hotelName: ctx.hotelName, system: ctx.system, pmsRules: ctx.pmsRules, categories: ctx.categories, detailKeys: ctx.detailKeys, roles: ctx.roles,
         existingSop: row.sop_id ? { id: row.sop_id, title: draft && draft.title, category: draft && draft.category } : null,
         draft, turns, images, allowedImages: [...onSteps, ...sessionImgs.map((i) => i.id), ...pdfImageIds], asks, catalog,
       });
@@ -1155,311 +1177,43 @@ app.post(
   })
 );
 
-// ---------- master library (Owner) ----------
+// ---------- SOP groups: suggestions inside a brand group (GM and up) ----------
 const AMENITIES = ["breakfast", "pool", "pets", "laundry", "market"];
+const FIELD_NAMES = grp.FIELD_LABEL;
 
-const masterOut = (r) => ({
-  id: r.id,
-  cat: r.category,
-  title: r.title,
-  steps: r.steps,
-  script: r.script,
-  script_hk: r.script_hk,
-  flag: r.flag,
-  flag_hk: r.flag_hk,
-  kw: r.keywords,
-  applies: r.applies,
-  requires: r.requires,
-  hk_status: r.hk_status,
-  status: r.status || "live",
-  ver: r.version,
-  updated: r.updated_at,
-});
-
-const nullIfBlank = (x, max) => {
-  const t = String(x ?? "").trim().slice(0, max);
-  return t ? t : null;
-};
-
-function validMaster(b) {
-  const steps = (Array.isArray(b.steps) ? b.steps : [])
-    .map((s) => ({ t: String(s.t || "").trim().slice(0, 1000), hk: nullIfBlank(s.hk, 1000), img: s.img ? String(s.img) : null }))
-    .filter((s) => s.t || s.img);
-  return {
-    title: String(b.title || "").trim().slice(0, 200),
-    cat: String(b.cat || "").trim(),
-    steps,
-    script: String(b.script || "").trim().slice(0, 1000),
-    script_hk: nullIfBlank(b.script_hk, 1000),
-    flag: String(b.flag || "").trim().slice(0, 1000),
-    flag_hk: nullIfBlank(b.flag_hk, 1000),
-    kw: String(b.kw || "").trim().slice(0, 1000),
-    applies: b.applies === "hilton" ? "hilton" : "all",
-    requires: AMENITIES.includes(b.requires) ? b.requires : null,
-  };
-}
-
-// The part of a master SOP that is HotelKey-specific, to tell when its wording changed.
-const hkSig = (steps, scriptHk, flagHk) => JSON.stringify([(steps || []).map((s) => s.hk || null), scriptHk || null, flagHk || null]);
-const hasHk = (steps, scriptHk, flagHk) => (steps || []).some((s) => s.hk) || !!scriptHk || !!flagHk;
-
+// Open suggestions for this hotel: "New" (the hotel doesn't have the SOP) or a change to one it has.
 app.get(
-  "/api/master",
-  auth("Owner"),
+  "/api/suggestions",
+  auth("GM"),
+  hotel,
+  wrap(async (req, res) => res.json(await share.listSuggestions({ query: (...a) => q(...a) }, req.hotel)))
+);
+
+// The suggestion's wording, ready for the studio ("Tweak"). Pictures are copied into this hotel so they show.
+app.get(
+  "/api/suggestions/:id(\\d+)/seed",
+  auth("GM"),
+  hotel,
   wrap(async (req, res) => {
-    const [cats, sops, dk, roles] = await Promise.all([
-      q("SELECT name, prefix FROM master_categories ORDER BY sort"),
-      q("SELECT * FROM master_sops ORDER BY id"),
-      q("SELECT key, example FROM master_details ORDER BY sort, key"),
-      q("SELECT DISTINCT role FROM contacts"),
-    ]);
-    // Detail names = the ones the master file lists plus any {Token} used in SOP text that isn't a contact role.
-    const contactRoles = new Set(roles.rows.map((r) => tokKey(r.role)));
-    const uses = {};
-    for (const s of sops.rows) {
-      const text = JSON.stringify([s.steps, s.script, s.script_hk, s.flag, s.flag_hk]);
-      for (const m of text.matchAll(/\{([^{}"\\]+)\}/g)) {
-        const k = m[1].trim();
-        if (!contactRoles.has(tokKey(k))) uses[k] = (uses[k] || 0) + 1;
-      }
-    }
-    const details = dk.rows.map((d) => ({ key: d.key, example: d.example, uses: uses[d.key] || 0 }));
-    for (const k of Object.keys(uses)) if (!details.some((d) => tokKey(d.key) === tokKey(k))) details.push({ key: k, example: "", uses: uses[k] });
-    res.json({ cats: cats.rows, details, sops: sops.rows.map(masterOut) });
+    const out = await tx((c) => share.seedFromSuggestion(c, +req.params.id, req.hotel));
+    if (out.error) return bad(res, out.error[0], out.error[1]);
+    res.json({ id: out.sg.id, type: out.own ? "change" : "new", sopId: out.own ? out.own.id : null, from: out.sg.from_hotel, draft: out.draft });
   })
 );
 
-app.put(
-  "/api/master/:id",
-  auth("Owner"),
-  wrap(async (req, res) => {
-    const d = validMaster(req.body);
-    if (!d.title) return bad(res, 400, "Add a title.");
-    if (!d.steps.length) return bad(res, 400, "Add at least one step.");
-    const out = await tx(async (c) => {
-      const cur = (await c.query("SELECT * FROM master_sops WHERE id=$1 FOR UPDATE", [req.params.id])).rows[0];
-      if (!cur) return null;
-      const cat = d.cat || cur.category;
-      if (!(await c.query("SELECT 1 FROM master_categories WHERE name=$1", [cat])).rows.length) throw Object.assign(new Error("cat"), { status: 400 });
-      let hk = cur.hk_status;
-      if (!hasHk(d.steps, d.script_hk, d.flag_hk)) hk = "same";
-      else if (hkSig(d.steps, d.script_hk, d.flag_hk) !== hkSig(cur.steps, cur.script_hk, cur.flag_hk) || cur.hk_status === "same") hk = "draft";
-      await c.query("INSERT INTO master_history (master_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4)", [
-        cur.id, cur.version, JSON.stringify(cur), req.user.id,
-      ]);
-      const r = await c.query(
-        `UPDATE master_sops SET category=$2, title=$3, steps=$4, script=$5, script_hk=$6, flag=$7, flag_hk=$8, keywords=$9,
-                applies=$10, requires=$11, hk_status=$12, version=version+1, updated_at=now(), updated_by=$13
-          WHERE id=$1 RETURNING *`,
-        [cur.id, cat, d.title, JSON.stringify(d.steps), d.script, d.script_hk, d.flag, d.flag_hk, d.kw, d.applies, d.requires, hk, req.user.id]
-      );
-      return r.rows[0];
-    }).catch((e) => (e.status === 400 ? "badcat" : Promise.reject(e)));
-    if (out === "badcat") return bad(res, 400, "Pick a category.");
-    if (!out) return bad(res, 404, "That master SOP no longer exists.");
-    const n = (await q("SELECT count(DISTINCT hotel_id)::int AS n FROM sops WHERE master_id=$1 AND master_version < $2", [out.id, out.version])).rows[0].n;
-    res.json({ ...masterOut(out), hotelsWithUpdate: n });
-  })
-);
-
-app.post(
-  "/api/master",
-  auth("Owner"),
-  wrap(async (req, res) => {
-    const d = validMaster(req.body);
-    if (!d.title) return bad(res, 400, "Add a title.");
-    if (!d.steps.length) return bad(res, 400, "Add at least one step.");
-    const cat = (await q("SELECT prefix FROM master_categories WHERE name=$1", [d.cat])).rows[0];
-    if (!cat) return bad(res, 400, "Pick a category.");
-    const out = await tx(async (c) => {
-      await c.query("LOCK TABLE master_sops IN SHARE ROW EXCLUSIVE MODE");
-      // Next number across the master and every hotel's copies, so a hotel-only SOP never clashes later.
-      const { rows } = await c.query(
-        `SELECT id FROM master_sops WHERE id LIKE $1 UNION SELECT id FROM sops WHERE id LIKE $1`,
-        [cat.prefix + "-%"]
-      );
-      const n = Math.max(0, ...rows.map((r) => parseInt(r.id.split("-")[1], 10) || 0)) + 1;
-      const id = `${cat.prefix}-${String(n).padStart(2, "0")}`;
-      const r = await c.query(
-        `INSERT INTO master_sops (id, category, title, steps, script, script_hk, flag, flag_hk, keywords, applies, requires, hk_status, updated_by, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'draft') RETURNING *`,
-        [id, d.cat, d.title, JSON.stringify(d.steps), d.script, d.script_hk, d.flag, d.flag_hk, d.kw, d.applies, d.requires,
-          hasHk(d.steps, d.script_hk, d.flag_hk) ? "draft" : "same", req.user.id]
-      );
-      return r.rows[0];
-    });
-    res.json(masterOut(out));
-  })
-);
-
-app.post(
-  "/api/master/:id/approve-hk",
-  auth("Owner"),
-  wrap(async (req, res) => {
-    const r = await q("UPDATE master_sops SET hk_status='approved' WHERE id=$1 AND hk_status='draft' RETURNING *", [req.params.id]);
-    if (!r.rows.length) {
-      const cur = (await q("SELECT * FROM master_sops WHERE id=$1", [req.params.id])).rows[0];
-      if (!cur) return bad(res, 404, "That master SOP no longer exists.");
-      return res.json(masterOut(cur)); // nothing to approve
-    }
-    res.json(masterOut(r.rows[0]));
-  })
-);
-
-// Offer a draft master SOP to hotels (they see it as "New from Lotus"). Not reversible from the app: once hotels copy it, it is theirs to switch off.
-app.post(
-  "/api/master/:id/publish",
-  auth("Owner"),
-  wrap(async (req, res) => {
-    const r = await q("UPDATE master_sops SET status='live', updated_at=now(), updated_by=$2 WHERE id=$1 AND status='draft' RETURNING *", [req.params.id, req.user.id]);
-    if (!r.rows.length) {
-      const cur = (await q("SELECT * FROM master_sops WHERE id=$1", [req.params.id])).rows[0];
-      if (!cur) return bad(res, 404, "That master SOP no longer exists.");
-      return res.json(masterOut(cur)); // already published
-    }
-    res.json(masterOut(r.rows[0]));
-  })
-);
-
-// ---------- updates from the master (GM and up) ----------
-// What a hotel copy would look like if rebuilt from a master row: the hotel's system picks the HotelKey wording or the default.
-// A step (or script/flag) whose chosen text is exactly SKIP_TEXT is left out at that hotel.
-const SKIP_TEXT = "Skip this step at this hotel.";
-function variantOf(m, system) {
-  const pick = (t, hk) => (system === "hotelkey" && hk != null && hk !== "" ? hk : t);
-  const one = (t, hk) => { const x = pick(t, hk); return x === SKIP_TEXT ? "" : x; };
-  return {
-    title: m.title,
-    category: m.category,
-    steps: (m.steps || [])
-      .map((x) => ({ t: pick(x.t, x.hk), img: x.img || null }))
-      .filter((x) => x.t !== SKIP_TEXT),
-    script: one(m.script, m.script_hk),
-    flag: one(m.flag, m.flag_hk),
-    keywords: m.keywords,
-  };
-}
-const FIELD_NAMES = { title: "title", category: "category", steps: "steps", script: "script", flag: "flag", keywords: "keywords" };
-
-// SOPs at a hotel whose master has moved on (master_version < master.version).
-async function pendingUpdates(hotelId) {
-  const { rows } = await q(
-    `SELECT s.id, s.title, s.status, s.kept, s.master_id, s.master_version AS have,
-            m.version AS latest, m.title AS master_title, m.updated_at AS master_updated,
-            to_jsonb(m) AS cur, h.system
-       FROM sops s
-       JOIN master_sops m ON m.id = s.master_id
-       JOIN hotels h ON h.id = s.hotel_id
-      WHERE s.hotel_id = $1 AND s.master_version < m.version
-      ORDER BY s.id`,
-    [hotelId]
+// add (a new SOP) / use (replace the hotel's copy) / keep (keep ours) / skip. Nothing changes at the hotel until one of these.
+for (const action of ["add", "use", "keep", "skip"]) {
+  app.post(
+    `/api/suggestions/:id(\\d+)/${action}`,
+    auth("GM"),
+    hotel,
+    wrap(async (req, res) => {
+      const out = await tx((c) => share.resolveSuggestion(c, +req.params.id, req.hotel, action, req.user.id));
+      if (out.error) return bad(res, out.error[0], out.error[1]);
+      res.json({ ok: true, action, sop: out.row ? sopOut(out.row) : null });
+    })
   );
-  const out = [];
-  for (const r of rows) {
-    const hist = (await q("SELECT snapshot FROM master_history WHERE master_id=$1 AND version=$2 ORDER BY id DESC LIMIT 1", [r.master_id, r.have])).rows[0];
-    let changed = [];
-    let relevant = true;
-    if (hist) {
-      const a = variantOf(hist.snapshot, r.system), b = variantOf(r.cur, r.system);
-      changed = Object.keys(FIELD_NAMES).filter((k) => JSON.stringify(a[k]) !== JSON.stringify(b[k]));
-      relevant = changed.length > 0;
-    }
-    out.push({
-      sopId: r.id, title: r.title, masterTitle: r.master_title, status: r.status, kept: r.kept,
-      have: r.have, latest: r.latest, changed, relevant, updated: r.master_updated,
-    });
-  }
-  return out;
 }
-
-// Copies a master step's photo into the hotel so the hotel owns it (images are scoped per hotel).
-async function ownImages(c, steps, hotelId) {
-  const out = [];
-  for (const s of steps) {
-    let img = s.img || null;
-    if (img) {
-      const row = (await c.query("SELECT hotel_id, mime, data FROM images WHERE id=$1", [img])).rows[0];
-      if (!row) img = null;
-      else if (row.hotel_id !== hotelId) {
-        img = crypto.randomUUID();
-        await c.query("INSERT INTO images (id, hotel_id, mime, data, created_by) VALUES ($1,$2,$3,$4,NULL)", [img, hotelId, row.mime, row.data]);
-      }
-    }
-    out.push({ t: s.t, img });
-  }
-  return out;
-}
-
-// Makes sure the hotel has a category (named like the master's), appended at the end.
-async function ensureCategory(c, hotelId, name) {
-  if ((await c.query("SELECT 1 FROM categories WHERE hotel_id=$1 AND name=$2", [hotelId, name])).rows.length) return;
-  const mc = (await c.query("SELECT prefix, sort FROM master_categories WHERE name=$1", [name])).rows[0];
-  const mx = (await c.query("SELECT COALESCE(max(sort),-1)+1 AS n FROM categories WHERE hotel_id=$1", [hotelId])).rows[0].n;
-  await c.query("INSERT INTO categories (hotel_id, name, prefix, sort) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [hotelId, name, mc ? mc.prefix : "SOP", mx]);
-}
-
-app.get(
-  "/api/updates",
-  auth("GM"),
-  hotel,
-  wrap(async (req, res) => {
-    res.json(await pendingUpdates(req.hotel));
-  })
-);
-
-// Load a hotel copy that is behind its master, locked for the update.
-async function lockUpdatable(c, hotelId, sopId) {
-  const sop = (await c.query("SELECT * FROM sops WHERE hotel_id=$1 AND id=$2 AND master_id IS NOT NULL FOR UPDATE", [hotelId, sopId])).rows[0];
-  if (!sop) return { err: [404, "That SOP isn't linked to the master library."] };
-  const m = (await c.query("SELECT * FROM master_sops WHERE id=$1", [sop.master_id])).rows[0];
-  if (!m) return { err: [404, "The master SOP no longer exists."] };
-  if (sop.master_version >= m.version) return { err: [400, "That SOP is already up to date."] };
-  return { sop, m };
-}
-
-app.post(
-  "/api/updates/:sopId/accept",
-  auth("GM"),
-  hotel,
-  wrap(async (req, res) => {
-    const out = await tx(async (c) => {
-      const { sop, m, err } = await lockUpdatable(c, req.hotel, req.params.sopId);
-      if (err) return { err };
-      const sys = (await c.query("SELECT system FROM hotels WHERE id=$1", [req.hotel])).rows[0].system;
-      const v = variantOf(m, sys);
-      await ensureCategory(c, req.hotel, v.category);
-      await c.query("INSERT INTO sop_history (hotel_id, sop_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4,$5)", [
-        req.hotel, sop.id, sop.version, JSON.stringify(sopOut(sop)), req.user.id,
-      ]);
-      const steps = await ownImages(c, v.steps, req.hotel);
-      const r = await c.query(
-        `UPDATE sops SET category=$3, title=$4, steps=$5, script=$6, flag=$7, keywords=$8,
-                version=version+1, updated_at=now(), updated_by=$9, master_version=$10, kept=FALSE
-          WHERE hotel_id=$1 AND id=$2 RETURNING *`,
-        [req.hotel, sop.id, v.category, v.title, JSON.stringify(steps), v.script, v.flag, v.keywords, req.user.id, m.version]
-      );
-      return { row: r.rows[0] };
-    });
-    if (out.err) return bad(res, out.err[0], out.err[1]);
-    res.json(sopOut(out.row));
-  })
-);
-
-app.post(
-  "/api/updates/:sopId/keep",
-  auth("GM"),
-  hotel,
-  wrap(async (req, res) => {
-    const out = await tx(async (c) => {
-      const { sop, m, err } = await lockUpdatable(c, req.hotel, req.params.sopId);
-      if (err) return { err };
-      const r = await c.query("UPDATE sops SET master_version=$3, kept=TRUE WHERE hotel_id=$1 AND id=$2 RETURNING *", [req.hotel, sop.id, m.version]);
-      return { row: r.rows[0] };
-    });
-    if (out.err) return bad(res, out.err[0], out.err[1]);
-    res.json(sopOut(out.row));
-  })
-);
 
 // ---------- setup and SOP switches (GM and up) ----------
 const NOT_OFFERED = "not offered at this hotel";
@@ -1480,15 +1234,13 @@ const DETAIL_SECTION = {};
   ["Tools & systems", ["Wi-Fi network", "Wi-Fi network name", "ID scanner", "DNR system", "Card authorization tool", "Log book app", "Key system", "Manual key steps", "Housekeeping chat app"]],
 ].forEach(([sec, keys]) => keys.forEach((k) => (DETAIL_SECTION[k] = sec)));
 
-// The plan's rule: a master SOP is suggested ON when (applies all, or the hotel is Hilton) and (no amenity needed, or the hotel has it).
-const fitsBrand = (m, brand) => m.applies === "all" || brand === "hilton";
-// Where a master SOP can be at all: right brand, and not an amenity the hotel said it doesn't have. (Unanswered amenities still count.)
-const appliesAt = (m, brand, amen) => fitsBrand(m, brand) && (!m.requires || amen[m.requires] !== false);
-const suggestedOn = (m, brand, amen) => fitsBrand(m, brand) && (!m.requires || !!amen[m.requires]);
-// Suggestion plus the GM's own switches (answers.selection = {on:[ids], off:[ids]}). Hilton-only SOPs never turn on at an independent hotel.
-function selectedIds(masters, brand, amen, sel) {
+// Setup candidates: the SOPs a hotel could start with. They come from its copy source (another hotel), through the group rules:
+// general SOPs always, PMS SOPs only if the PMS matches, brand SOPs only if the brand matches. A candidate is suggested ON when the
+// source has it live and (no amenity needed, or the hotel has it). The GM's own switches (answers.selection = {on:[families], off:[families]}) win.
+const suggestedOn = (m, amen) => m.srcStatus === "live" && (!m.requires || !!amen[m.requires]);
+function selectedIds(cands, amen, sel) {
   const on = new Set(sel.on || []), off = new Set(sel.off || []);
-  return masters.filter((m) => fitsBrand(m, brand) && (on.has(m.id) ? true : off.has(m.id) ? false : suggestedOn(m, brand, amen))).map((m) => m.id);
+  return cands.filter((m) => (on.has(m.id) ? true : off.has(m.id) ? false : m.srcStatus ? suggestedOn(m, amen) : m.st === "live")).map((m) => m.id);
 }
 
 // Setup state kept in hotels.answers: the five yes/no answers, the GM's switches, and where they left off.
@@ -1547,10 +1299,9 @@ function applyQuestionDefaults(details, question, yes, defaults) {
   return out;
 }
 
-// Detail names an SOP will show to staff at a hotel of this system (a step skipped there doesn't count).
-function detailsUsedBy(m, system, byKey) {
-  const v = variantOf(m, system);
-  const text = [v.title, ...v.steps.map((x) => x.t), v.script, v.flag].join("\n");
+// Detail names a SOP will show to staff (m has title, steps, script, flag).
+function detailsUsedBy(m, byKey) {
+  const text = [m.title, ...(m.steps || []).map((x) => (typeof x === "string" ? x : x.t)), m.script, m.flag].join("\n");
   const out = new Set();
   for (const mt of text.matchAll(/\{([^{}]+)\}/g)) {
     const d = byKey.get(tokKey(mt[1]));
@@ -1559,7 +1310,47 @@ function detailsUsedBy(m, system, byKey) {
   return [...out];
 }
 
-const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, chat_names FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
+const hotelFull = async (id, c) => ((c || { query: (...a) => q(...a) }).query("SELECT id, name, brand, system, setup, ready, answers, details, chat_names, copy_source FROM hotels WHERE id=$1", [id])).then((r) => r.rows[0]);
+
+// The hotel SOPs are copied from at setup: the one chosen (answers.copyFrom, then hotels.copy_source) if it is still there, else the hotel in the
+// same group with the most live SOPs, else any hotel with SOPs (then only general SOPs are copied). null when there is nothing to copy from.
+async function sourceHotel(h, c) {
+  const db = c || { query: (...a) => q(...a) };
+  const want = [readSetup(h).copyFrom, h.copy_source].filter(Boolean);
+  for (const id of want) {
+    const r = (await db.query("SELECT id, name, brand, system FROM hotels WHERE id=$1 AND id <> $2 AND EXISTS (SELECT 1 FROM sops WHERE hotel_id=$1)", [id, h.id])).rows[0];
+    if (r) return r;
+  }
+  const r = (await db.query(
+    `SELECT x.id, x.name, x.brand, x.system FROM hotels x WHERE x.id <> $1 AND EXISTS (SELECT 1 FROM sops WHERE hotel_id = x.id)
+      ORDER BY (x.brand = $2 AND x.system = $3) DESC, (SELECT count(*) FROM sops WHERE hotel_id = x.id AND status='live') DESC, x.id LIMIT 1`, [h.id, h.brand, h.system]
+  )).rows[0];
+  return r || null;
+}
+
+// The SOPs the setup screens list for a hotel: [{ id (= family), code, cat, title, kind, requires, steps, script, flag, st (this hotel's status or null), srcStatus (the source's) }]
+// plus the categories in the order the source uses them. Hotel-only SOPs the hotel has itself are listed too.
+async function setupCandidates(h) {
+  const src = await sourceHotel(h);
+  const map = new Map();
+  const cats = new Map();
+  if (src) {
+    const rows = (await q(`SELECT s.*, ${share.FAM} AS fam FROM sops s WHERE s.hotel_id=$1 AND s.status IN ('live','off') ORDER BY s.id`, [src.id])).rows;
+    for (const r of rows) {
+      const kind = r.kind || grp.classifyKind(r);
+      if (!grp.copies(kind, src, h)) continue;
+      map.set(r.fam, { id: r.fam, code: r.id, cat: r.category, title: r.title, kind, requires: r.requires || null, steps: r.steps, script: r.script, flag: r.flag, st: null, srcStatus: r.status });
+    }
+    for (const c of (await q("SELECT name, prefix, sort FROM categories WHERE hotel_id=$1 ORDER BY sort", [src.id])).rows) cats.set(c.name, c);
+  }
+  for (const r of (await q(`SELECT s.*, ${share.FAM} AS fam FROM sops s WHERE s.hotel_id=$1 ORDER BY s.id`, [h.id])).rows) {
+    const m = map.get(r.fam);
+    if (m) { m.st = r.status; m.code = r.id; }
+    else map.set(r.fam, { id: r.fam, code: r.id, cat: r.category, title: r.title, kind: r.kind || grp.classifyKind(r), requires: r.requires || null, steps: r.steps, script: r.script, flag: r.flag, st: r.status, srcStatus: null });
+  }
+  for (const c of (await q("SELECT name, prefix, sort FROM categories WHERE hotel_id=$1 ORDER BY sort", [h.id])).rows) if (!cats.has(c.name)) cats.set(c.name, { ...c, sort: 1000 + c.sort });
+  return { src, cands: [...map.values()], cats: [...cats.values()].sort((a, b) => a.sort - b.sort) };
+}
 
 // ----- guided onboarding: readiness, template hotel, document suggestions -----
 const touchSetup = (id) =>
@@ -1647,17 +1438,17 @@ async function setupExtras(h, req) {
 // Readiness for one hotel: the score, the checklist and what is missing. `h` is the hotel row when the caller already has it.
 async function hotelReadiness(hotelId, h) {
   h = h || (await hotelFull(hotelId));
-  const [defs, masters, contacts, fd] = await Promise.all([
+  const [defs, setupSet, contacts, fd] = await Promise.all([
     detailDefs(),
-    q("SELECT id, category, title, applies, requires, steps, script, script_hk, flag, flag_hk, keywords FROM master_sops WHERE status='live' ORDER BY id"),
+    setupCandidates(h),
     q("SELECT role, name, phone FROM contacts WHERE hotel_id=$1", [hotelId]),
     q("SELECT count(*)::int AS n FROM users u JOIN user_hotels uh ON uh.user_id=u.id WHERE uh.hotel_id=$1 AND u.role='Front Desk' AND u.status='active'", [hotelId]),
   ]);
   const st = readSetup(h);
   const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
-  const sel = new Set(selectedIds(masters.rows, h.brand, st.amen, st.selection));
+  const sel = new Set(selectedIds(setupSet.cands, st.amen, st.selection));
   const used = new Set();
-  for (const m of masters.rows) if (sel.has(m.id)) detailsUsedBy(m, h.system, byKey).forEach((k) => used.add(k));
+  for (const m of setupSet.cands) if (sel.has(m.id)) detailsUsedBy(m, byKey).forEach((k) => used.add(k));
   const cn = (h.chat_names && typeof h.chat_names === "object") ? h.chat_names : {};
   const a = objOf(h.answers);
   const r = ob.readiness({
@@ -1674,14 +1465,12 @@ app.get(
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
     const sdef = await setupDefaults();
-    const [cats, ms, defs, cur, srcs, cc] = await Promise.all([
-      q("SELECT name, prefix FROM master_categories ORDER BY sort"),
-      q("SELECT id, category, title, applies, requires, steps, script, script_hk, flag, flag_hk, keywords, version FROM master_sops WHERE status='live' ORDER BY id"),
+    const [setupSet, defs, srcs, cc] = await Promise.all([
+      setupCandidates(h),
       detailDefs(sdef),
-      q("SELECT master_id, status FROM sops WHERE hotel_id=$1 AND master_id IS NOT NULL", [req.hotel]),
       q(
         `SELECT h.id, h.name, h.brand, h.system,
-                (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id AND s.status = 'live' AND s.master_id IS NOT NULL) AS live
+                (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id AND s.status = 'live') AS live
            FROM hotels h WHERE h.setup = 'live' AND h.id = ANY($1) AND h.id <> $2 ORDER BY h.name`,
         [req.user.hotels, req.hotel]
       ),
@@ -1689,21 +1478,21 @@ app.get(
     ]);
     const st = readSetup(h);
     const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
-    const have = new Map(cur.rows.map((r) => [r.master_id, r.status]));
     res.json({
       hotel: { id: h.id, name: h.name, brand: h.brand, system: h.system, setup: h.setup },
       stage: st.stage,
       copyFrom: st.copyFrom,
+      source: setupSet.src ? { id: setupSet.src.id, name: setupSet.src.name, sameGroup: setupSet.src.brand === h.brand && setupSet.src.system === h.system } : null,
       answers: { ...st.amen, ...st.qa },
       qkeys: questionKeys(sdef),
       chats: chatNames(h), chatDefaults: chatDefaults(h),
       selection: st.selection,
       details: h.details || {},
-      cats: cats.rows,
+      cats: setupSet.cats.map((c) => ({ name: c.name, prefix: c.prefix })),
       detailDefs: defs,
-      sops: ms.rows.map((m) => ({
-        id: m.id, cat: m.category, title: m.title, applies: m.applies, requires: m.requires,
-        uses: detailsUsedBy(m, h.system, byKey), st: have.get(m.id) || null,
+      sops: setupSet.cands.map((m) => ({
+        id: m.id, code: m.code, cat: m.cat, title: m.title, kind: m.kind, applies: "all", requires: m.requires,
+        uses: detailsUsedBy(m, byKey), st: m.st,
       })),
       sources: srcs.rows,
       contacts: cc.rows[0].n,
@@ -1727,12 +1516,13 @@ app.post(
       if (!from || from === req.hotel || !req.user.hotels.includes(from)) return bad(res, 400, "Pick a hotel to copy from.");
       const src = (await q("SELECT setup FROM hotels WHERE id=$1", [from])).rows[0];
       if (!src || src.setup !== "live") return bad(res, 400, "You can only copy a hotel that is live.");
-      const live = new Set((await q("SELECT master_id FROM sops WHERE hotel_id=$1 AND status='live' AND master_id IS NOT NULL", [from])).rows.map((r) => r.master_id));
-      const all = (await q("SELECT id, requires FROM master_sops WHERE status='live' ORDER BY id")).rows;
-      patch = { stage: "review", copyFrom: from, selection: { on: all.filter((m) => live.has(m.id)).map((m) => m.id), off: all.filter((m) => !live.has(m.id)).map((m) => m.id) } };
+      // The source's live SOPs that the group rules let through become the starting selection.
+      const set = await setupCandidates({ ...h, copy_source: from, answers: { ...objOf(h.answers), copyFrom: from } });
+      const liveAtSrc = new Set(set.cands.filter((m) => m.srcStatus === "live").map((m) => m.id));
+      patch = { stage: "review", copyFrom: from, selection: { on: set.cands.filter((m) => liveAtSrc.has(m.id)).map((m) => m.id), off: set.cands.filter((m) => m.srcStatus && !liveAtSrc.has(m.id)).map((m) => m.id) } };
       // The amenity answers follow what the source hotel turned on; the GM confirms them on the Amenities screen.
       const old = objOf(h.answers), pre = {};
-      for (const k of ob.AMENITIES) if (old[k] === undefined) { patch[k] = all.some((m) => m.requires === k && live.has(m.id)); pre[k] = from; }
+      for (const k of ob.AMENITIES) if (old[k] === undefined) { patch[k] = set.cands.some((m) => m.requires === k && liveAtSrc.has(m.id)); pre[k] = from; }
       patch.prefilled = { ...objOf(old.prefilled), ...pre };
     } else {
       patch = { stage: "about" };
@@ -1743,6 +1533,7 @@ app.post(
     const tmpl = req.body.template ? String(req.body.template) : null;
     const out = await tx(async (c) => {
       await c.query("UPDATE hotels SET setup='setup', ready=FALSE, answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [req.hotel, JSON.stringify(patch)]);
+      if (patch.copyFrom) await c.query("UPDATE hotels SET copy_source=$2 WHERE id=$1", [req.hotel, patch.copyFrom]);
       await ensureRoutes(c, req.hotel);
       return tmpl ? await applyTemplate(c, req.hotel, tmpl) : { count: 0 };
     });
@@ -1900,7 +1691,7 @@ app.put(
   hotel,
   wrap(async (req, res) => {
     const out = await tx(async (c) => {
-      const h = (await c.query("SELECT id, brand, system, setup, answers, details FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const h = (await c.query("SELECT id, brand, system, setup, answers, details, copy_source FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
       if (h.setup === "live") return { err: "This hotel is already live. Change details from the Dashboard." };
       const old = readSetup(h);
       const given = req.body.answers && typeof req.body.answers === "object" ? req.body.answers : {};
@@ -1910,7 +1701,7 @@ app.put(
       const changed = AMENITIES.filter((k) => !!old.amen[k] !== !!amen[k]);
       let selection = old.selection;
       if (changed.length) {
-        const drop = new Set((await c.query("SELECT id FROM master_sops WHERE requires = ANY($1)", [changed])).rows.map((r) => r.id));
+        const drop = new Set((await setupCandidates(h)).cands.filter((m) => m.requires && changed.includes(m.requires)).map((m) => m.id));
         selection = { on: selection.on.filter((id) => !drop.has(id)), off: selection.off.filter((id) => !drop.has(id)) };
       }
       // Details: merge what was sent, then settle the amenity groups ("no" fills the empty ones with a plain note).
@@ -1956,7 +1747,7 @@ app.put(
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
     if (h.setup === "live") return bad(res, 400, "This hotel is already live. Use the SOP switches in Library.");
-    const valid = new Set((await q("SELECT id FROM master_sops WHERE status='live'")).rows.map((r) => r.id));
+    const valid = new Set((await setupCandidates(h)).cands.map((m) => m.id));
     const pick = (x) => [...new Set((Array.isArray(x) ? x : []).map(String).filter((id) => valid.has(id)))];
     const on = pick(req.body.on), onSet = new Set(on);
     const off = pick(req.body.off).filter((id) => !onSet.has(id));
@@ -1964,28 +1755,6 @@ app.put(
     res.json({ selection: { on, off } });
   })
 );
-
-// Build and insert hotel copies of master SOPs. Steps follow the hotel's system; skipped steps are left out; photos are copied.
-async function insertMasterCopies(c, hotelId, system, masters, statusOf, userId) {
-  const rows = [];
-  for (const m of masters) {
-    const v = variantOf(m, system);
-    const steps = await ownImages(c, v.steps, hotelId);
-    rows.push([hotelId, m.id, v.category, v.title, JSON.stringify(steps), v.script, v.flag, v.keywords, statusOf(m), userId, m.id, m.version]);
-  }
-  let n = 0;
-  for (let i = 0; i < rows.length; i += 80) {
-    const part = rows.slice(i, i + 80), params = [];
-    const vals = part.map((r, j) => { params.push(...r); const b = j * 12; return `(${Array.from({ length: 12 }, (_, k) => "$" + (b + k + 1)).join(",")},FALSE)`; });
-    const r = await c.query(
-      `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by, master_id, master_version, kept)
-       VALUES ${vals.join(",")} ON CONFLICT (hotel_id, id) DO NOTHING`,
-      params
-    );
-    n += r.rowCount;
-  }
-  return n;
-}
 
 app.post(
   "/api/setup/go-live",
@@ -1999,54 +1768,30 @@ app.post(
       return res.status(400).json({ error: `Finish these first: ${left.join("; ")}.`, missing: left });
     }
     const out = await tx(async (c) => {
-      const h = (await c.query("SELECT id, brand, system, setup, answers FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
+      const h = (await c.query("SELECT id, name, brand, system, setup, answers, copy_source FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
       if (h.setup === "live") return { err: "This hotel is already live." };
-      const masters = (await c.query("SELECT * FROM master_sops WHERE status='live' ORDER BY id")).rows;
+      const set = await setupCandidates(h);
       const st = readSetup(h);
-      const sel = new Set(selectedIds(masters, h.brand, st.amen, st.selection));
+      const sel = new Set(selectedIds(set.cands, st.amen, st.selection));
       if (!sel.size) return { err: "Turn on at least one SOP before going live." };
-      const mcats = (await c.query("SELECT name, prefix, sort FROM master_categories ORDER BY sort")).rows;
-      for (const mc of mcats) {
-        await c.query("INSERT INTO categories (hotel_id, name, prefix, sort) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING", [h.id, mc.name, mc.prefix, mc.sort]);
+      // SOPs the hotel already has (copied when it was added): on or off by the selection. The rest are copied from the source with the group rules.
+      for (const m of set.cands) {
+        if (m.st === "live" || m.st === "off") await c.query(`UPDATE sops s SET status=$3, updated_by=$4 WHERE s.hotel_id=$1 AND ${share.FAM} = $2`, [h.id, m.id, sel.has(m.id) ? "live" : "off", req.user.id]);
       }
-      await insertMasterCopies(c, h.id, h.system, masters, (m) => (sel.has(m.id) ? "live" : "off"), req.user.id);
-      if (!(await c.query("SELECT 1 FROM routes WHERE hotel_id=$1 LIMIT 1", [h.id])).rows.length) {
-        let i = 0;
-        for (const [id, label, sub, first, then, joiner] of ROUTES) {
-          await c.query("INSERT INTO routes (hotel_id, id, label, sub, first_role, then_role, joiner, sort) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)", [h.id, id, label, sub, first, then, joiner, i++]);
-        }
-      }
+      if (set.src) await share.copySops(c, { src: set.src, dst: h, userId: req.user.id, statusOf: (r) => (sel.has(r.fam) ? "live" : "off") });
+      await ensureRoutes(c, h.id);
       // An amenity the GM never answered (the copy path) is taken from what ended up on.
       const patch = { stage: "live" };
-      for (const k of AMENITIES) if (st.amen[k] === undefined) patch[k] = masters.some((m) => m.requires === k && sel.has(m.id));
+      for (const k of AMENITIES) if (st.amen[k] === undefined) patch[k] = set.cands.some((m) => m.requires === k && sel.has(m.id));
       await c.query("UPDATE hotels SET setup='live', ready=TRUE, answers = COALESCE(answers,'{}'::jsonb) || $2::jsonb WHERE id=$1", [h.id, JSON.stringify(patch)]);
-      return { on: sel.size, off: masters.length - sel.size };
+      return { on: sel.size, off: set.cands.length - sel.size };
     });
     if (out.err) return bad(res, 400, out.err);
     res.json({ ok: true, ...out });
   })
 );
 
-// Switch master SOPs on or off at a hotel. A master SOP the hotel doesn't have yet is added on demand (live when switching on, an Off copy otherwise).
-async function toggleMasters(hotelId, ids, on, userId) {
-  return tx(async (c) => {
-    const h = (await c.query("SELECT id, brand, system FROM hotels WHERE id=$1 FOR UPDATE", [hotelId])).rows[0];
-    const masters = (await c.query("SELECT * FROM master_sops WHERE id = ANY($1) AND status='live'", [ids])).rows;
-    const mine = new Map((await c.query("SELECT id, master_id FROM sops WHERE hotel_id=$1 AND id = ANY($2)", [hotelId, ids])).rows.map((r) => [r.id, r.master_id]));
-    let changed = 0, skipped = 0;
-    const missing = [];
-    for (const m of masters) {
-      if (on && !fitsBrand(m, h.brand)) { skipped++; continue; } // Hilton-only SOPs stay off at an independent hotel
-      if (!mine.has(m.id)) { missing.push(m); continue; }
-      if (mine.get(m.id) !== m.id) { skipped++; continue; } // a hotel-only SOP that reuses the id
-      const r = await c.query("UPDATE sops SET status=$3, updated_by=$4 WHERE hotel_id=$1 AND id=$2 AND status <> $3", [hotelId, m.id, on ? "live" : "off", userId]);
-      changed += r.rowCount;
-    }
-    for (const m of missing) await ensureCategory(c, hotelId, m.category);
-    if (missing.length) changed += await insertMasterCopies(c, hotelId, h.system, missing, () => (on ? "live" : "off"), userId);
-    return { changed, skipped };
-  });
-}
+// Switch SOPs on or off at this hotel (GM and up). `ids` are SOP families (what the setup screens use) or this hotel's own SOP ids.
 app.post(
   "/api/hotel/sops-toggle",
   auth("GM"),
@@ -2055,48 +1800,15 @@ app.post(
     const ids = [...new Set((Array.isArray(req.body.ids) ? req.body.ids : []).map(String))].slice(0, 400);
     const on = req.body.on === true;
     if (!ids.length) return bad(res, 400, "Pick at least one SOP.");
-    res.json(await toggleMasters(req.hotel, ids, on, req.user.id));
+    const out = await tx(async (c) => {
+      const own = (await c.query(`SELECT s.id, ${share.FAM} AS fam FROM sops s WHERE s.hotel_id=$1 AND (s.id = ANY($2) OR ${share.FAM} = ANY($2))`, [req.hotel, ids])).rows;
+      const byId = new Map(own.map((r) => [r.id, r.fam]));
+      const families = [...new Set(ids.map((i) => byId.get(i) || i))];
+      return share.toggleFamilies(c, { hotelId: req.hotel, families, on, userId: req.user.id });
+    });
+    res.json(out);
   })
 );
-
-// Master SOPs this hotel has no copy of yet and that suit it (brand and amenities).
-async function freshMasters(hotelId) {
-  const h = await hotelFull(hotelId);
-  const amen = readSetup(h).amen;
-  const { rows } = await q(
-    `SELECT m.id, m.title, m.category, m.applies, m.requires, m.version, m.updated_at
-       FROM master_sops m WHERE m.status='live' AND NOT EXISTS (SELECT 1 FROM sops s WHERE s.hotel_id=$1 AND s.id=m.id) ORDER BY m.id`,
-    [hotelId]
-  );
-  return rows
-    .filter((m) => appliesAt(m, h.brand, amen))
-    .map((m) => ({ id: m.id, title: m.title, cat: m.category, version: m.version, updated: m.updated_at }));
-}
-
-app.get("/api/updates/new", auth("GM"), hotel, wrap(async (req, res) => res.json(await freshMasters(req.hotel))));
-
-// Add a new master SOP to this hotel (live) or skip it (kept as an Off copy so it isn't offered again).
-for (const [verb, status] of [["add", "live"], ["skip", "off"]]) {
-  app.post(
-    `/api/updates/new/:id/${verb}`,
-    auth("GM"),
-    hotel,
-    wrap(async (req, res) => {
-      const out = await tx(async (c) => {
-        const h = (await c.query("SELECT id, brand, system FROM hotels WHERE id=$1 FOR UPDATE", [req.hotel])).rows[0];
-        const m = (await c.query("SELECT * FROM master_sops WHERE id=$1 AND status='live'", [req.params.id])).rows[0];
-        if (!m) return { err: [404, "That SOP no longer exists in the master library."] };
-        if (!fitsBrand(m, h.brand)) return { err: [400, "That SOP is for Hilton hotels only."] };
-        if ((await c.query("SELECT 1 FROM sops WHERE hotel_id=$1 AND id=$2", [req.hotel, m.id])).rows.length) return { err: [400, "This hotel already has that SOP."] };
-        await ensureCategory(c, req.hotel, m.category);
-        await insertMasterCopies(c, req.hotel, h.system, [m], () => status, req.user.id);
-        return { ok: true };
-      });
-      if (out.err) return bad(res, out.err[0], out.err[1]);
-      res.json({ ok: true, status });
-    })
-  );
-}
 
 // Everything the Dashboard's Needs you card shows in one call.
 app.get(
@@ -2105,12 +1817,11 @@ app.get(
   hotel,
   wrap(async (req, res) => {
     const h = await hotelFull(req.hotel);
-    const [updates, fresh, counts, defs, cc, imps, texts] = await Promise.all([
-      pendingUpdates(req.hotel),
-      freshMasters(req.hotel),
+    const [suggestions, counts, defs, cc, imps, texts] = await Promise.all([
+      share.listSuggestions({ query: (...a) => q(...a) }, req.hotel),
       q(
         `SELECT count(*) FILTER (WHERE status='live')::int AS live, count(*) FILTER (WHERE status='off')::int AS off,
-                count(*) FILTER (WHERE status='draft')::int AS draft, count(*) FILTER (WHERE master_id IS NULL)::int AS own
+                count(*) FILTER (WHERE status='draft')::int AS draft
            FROM sops WHERE hotel_id=$1`,
         [req.hotel]
       ),
@@ -2121,7 +1832,7 @@ app.get(
     ]);
     const det = h.details || {};
     const filled = defs.filter((d) => String(det[d.key] ?? "").trim()).length;
-    // What waits on the GM besides updates: drafts, import batches with undecided matches or new SOPs, and blanks the live SOPs use.
+    // What waits on the GM besides suggestions: drafts, import batches with undecided matches or new SOPs, and blanks the live SOPs use.
     const undecided = (r) => ["matches", "new"].reduce((n, g) => n + ((r || {})[g] || []).filter((x) => !x.state).length, 0);
     const imports = imps.rows.map((r) => ({ id: r.id, open: undecided(r.result), files: r.filenames || [] })).filter((r) => r.open > 0);
     const byKey = new Map(defs.map((d) => [tokKey(d.key), d.key]));
@@ -2129,22 +1840,33 @@ app.get(
     for (const s of texts.rows) for (const mt of JSON.stringify([s.title, s.steps, s.script, s.flag]).matchAll(/\{([^{}"\\]+)\}/g)) { const k = byKey.get(tokKey(mt[1])); if (k) used.add(k); }
     const blank = (k) => { const v = String(det[Object.keys(det).find((x) => tokKey(x) === tokKey(k))] ?? "").trim(); return !v || /\[FILL/.test(v); };
     const missing = defs.filter((d) => used.has(d.key) && blank(d.key)).map((d) => d.key);
-    res.json({ updates, fresh, counts: counts.rows[0], drafts: counts.rows[0].draft, imports, missing, details: { filled, total: defs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
+    res.json({ suggestions, counts: counts.rows[0], drafts: counts.rows[0].draft, imports, missing, details: { filled, total: defs.length }, contacts: cc.rows[0].n, system: h.system, brand: h.brand, setup: h.setup });
   })
 );
 
-// ---------- owner: portfolio of hotels ----------
+// ---------- owner: portfolio, brands, PMS and hotels ----------
+const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 24);
+const hotelIdFor = async (name) => {
+  // Short id from the initials of the name, e.g. "Hotel Lotus Merriam" -> hlm. Numbered if taken.
+  const words = name.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
+  let base = words.map((w) => w[0]).join("").slice(0, 4);
+  if (base.length < 2) base = (words.join("") || "hotel").slice(0, 4);
+  let id = base, n = 1;
+  while ((await q("SELECT 1 FROM hotels WHERE id=$1", [id])).rows.length) id = base + ++n;
+  return id;
+};
+const brandExists = async (id) => !!(await q("SELECT 1 FROM brands WHERE id=$1", [id])).rows.length;
+const pmsExists = async (id) => !!(await q("SELECT 1 FROM pms WHERE id=$1", [id])).rows.length;
+
 app.get(
   "/api/owner/hotels",
   auth("Owner"),
   wrap(async (req, res) => {
     const [hs, gms] = await Promise.all([
       q(
-        `SELECT h.id, h.name, h.brand, h.system, h.setup, h.ready,
+        `SELECT h.id, h.name, h.brand, h.system, h.setup, h.ready, h.copy_source,
                 (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id AND s.status = 'live') AS live,
-                (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id) AS total,
-                (SELECT count(*)::int FROM sops s JOIN master_sops m ON m.id = s.master_id
-                  WHERE s.hotel_id = h.id AND s.master_version < m.version) AS pending
+                (SELECT count(*)::int FROM sops s WHERE s.hotel_id = h.id) AS total
            FROM hotels h ORDER BY h.name`
       ),
       q(
@@ -2153,34 +1875,33 @@ app.get(
           WHERE u.role = 'GM' ORDER BY u.name`
       ),
     ]);
-    res.json(
-      hs.rows.map((h) => ({
-        ...h,
-        gms: gms.rows.filter((g) => g.hotel_id === h.id).map(({ hotel_id, ...g }) => g),
-      }))
-    );
+    res.json(hs.rows.map((h) => ({ ...h, gms: gms.rows.filter((g) => g.hotel_id === h.id).map(({ hotel_id, ...g }) => g) })));
   })
 );
 
+// Add a hotel: name, brand, PMS and (optionally) a hotel to copy SOPs from. Copies general SOPs always, PMS SOPs only if the PMS matches,
+// brand SOPs only if the brand matches. Copies keep family and kind and start as they are at the source (live or off; drafts are not copied).
 app.post(
   "/api/owner/hotels",
   auth("Owner"),
   wrap(async (req, res) => {
     const name = String(req.body.name || "").trim().slice(0, 80);
-    const brand = req.body.brand === "hilton" ? "hilton" : req.body.brand === "independent" ? "independent" : null;
-    const system = req.body.system === "pep" ? "pep" : req.body.system === "hotelkey" ? "hotelkey" : null;
+    const brand = String(req.body.brand || ""), system = String(req.body.system || "");
+    const from = req.body.copyFrom ? String(req.body.copyFrom) : null;
     if (!name) return bad(res, 400, "Add the hotel's name.");
-    if (!brand) return bad(res, 400, "Pick Hilton or Independent.");
-    if (!system) return bad(res, 400, "Pick PEP or HotelKey.");
+    if (!brand || !(await brandExists(brand))) return bad(res, 400, "Pick a brand.");
+    if (!system || !(await pmsExists(system))) return bad(res, 400, "Pick a PMS.");
     if ((await q("SELECT 1 FROM hotels WHERE lower(name)=lower($1)", [name])).rows.length) return bad(res, 400, "A hotel with that name already exists.");
-    // Short id from the initials of the name, e.g. "Hotel Lotus Merriam" -> hlm. Numbered if taken.
-    const words = name.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
-    let base = words.map((w) => w[0]).join("").slice(0, 4);
-    if (base.length < 2) base = (words.join("") || "hotel").slice(0, 4);
-    let id = base, n = 1;
-    while ((await q("SELECT 1 FROM hotels WHERE id=$1", [id])).rows.length) id = base + ++n;
-    await q("INSERT INTO hotels (id, name, brand, system, setup, ready) VALUES ($1,$2,$3,$4,'new',FALSE)", [id, name, brand, system]);
-    res.json({ id, name, brand, system, setup: "new", ready: false, live: 0, total: 0, pending: 0, gms: [] });
+    if (from && !(await q("SELECT 1 FROM hotels WHERE id=$1", [from])).rows.length) return bad(res, 400, "Pick a hotel to copy from.");
+    const id = await hotelIdFor(name);
+    const copied = await tx(async (c) => {
+      await c.query("INSERT INTO hotels (id, name, brand, system, setup, ready, copy_source) VALUES ($1,$2,$3,$4,'new',FALSE,$5)", [id, name, brand, system, from]);
+      if (!from) return null;
+      const src = await share.hotelOf(c, from);
+      return share.copySops(c, { src, dst: { id, brand, system }, userId: req.user.id });
+    });
+    const tot = copied ? copied.copied.pms + copied.copied.general + copied.copied.brand : 0;
+    res.json({ id, name, brand, system, setup: "new", ready: false, live: 0, total: tot, copySource: from, copied: copied ? copied.copied : null, left: copied ? copied.left : null, gms: [] });
   })
 );
 
@@ -2191,15 +1912,74 @@ app.put(
     const h = (await q("SELECT id, name, brand, system, setup, ready FROM hotels WHERE id=$1", [req.params.id])).rows[0];
     if (!h) return bad(res, 404, "That hotel no longer exists.");
     const name = req.body.name === undefined ? h.name : String(req.body.name || "").trim().slice(0, 80);
-    const brand = req.body.brand === undefined ? h.brand : req.body.brand === "hilton" ? "hilton" : req.body.brand === "independent" ? "independent" : null;
-    const system = req.body.system === undefined ? h.system : req.body.system === "pep" ? "pep" : req.body.system === "hotelkey" ? "hotelkey" : null;
+    const brand = req.body.brand === undefined ? h.brand : String(req.body.brand || "");
+    const system = req.body.system === undefined ? h.system : String(req.body.system || "");
     if (!name) return bad(res, 400, "Add the hotel's name.");
-    if (!brand) return bad(res, 400, "Pick Hilton or Independent.");
-    if (!system) return bad(res, 400, "Pick PEP or HotelKey.");
-    if (h.setup === "live" && (brand !== h.brand || system !== h.system)) return bad(res, 400, "Brand and system can't change once a hotel is live.");
+    if (!brand || !(await brandExists(brand))) return bad(res, 400, "Pick a brand.");
+    if (!system || !(await pmsExists(system))) return bad(res, 400, "Pick a PMS.");
+    if (h.setup === "live" && (brand !== h.brand || system !== h.system)) return bad(res, 400, "Brand and PMS can't change once a hotel is live.");
     if ((await q("SELECT 1 FROM hotels WHERE lower(name)=lower($1) AND id<>$2", [name, h.id])).rows.length) return bad(res, 400, "A hotel with that name already exists.");
     await q("UPDATE hotels SET name=$2, brand=$3, system=$4 WHERE id=$1", [h.id, name, brand, system]);
     res.json({ id: h.id, name, brand, system, setup: h.setup, ready: h.ready });
+  })
+);
+
+// Brands and PMS are lists the Owner adds to.
+app.post(
+  "/api/owner/brands",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const name = String(req.body.name || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!name) return bad(res, 400, "Add the brand's name.");
+    if ((await q("SELECT 1 FROM brands WHERE lower(name)=lower($1)", [name])).rows.length) return bad(res, 400, "That brand is already there.");
+    let id = slug(name) || "brand", n = 1;
+    while (await brandExists(id)) id = slug(name) + ++n;
+    const mx = (await q("SELECT COALESCE(max(sort),-1)+1 AS n FROM brands")).rows[0].n;
+    await q("INSERT INTO brands (id, name, sort) VALUES ($1,$2,$3)", [id, name, mx]);
+    res.json({ id, name });
+  })
+);
+const pmsFields = (b) => ({
+  name: String(b.name || "").replace(/\s+/g, " ").trim().slice(0, 40),
+  staff: String(b.staff ?? b.staff_name ?? "").replace(/\s+/g, " ").trim().slice(0, 40),
+  rules: String(b.rules || "").trim().slice(0, 1200),
+});
+app.post(
+  "/api/owner/pms",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const f = pmsFields(req.body);
+    if (!f.name) return bad(res, 400, "Add the PMS name.");
+    if ((await q("SELECT 1 FROM pms WHERE lower(name)=lower($1)", [f.name])).rows.length) return bad(res, 400, "That PMS is already there.");
+    let id = slug(f.name) || "pms", n = 1;
+    while (await pmsExists(id)) id = slug(f.name) + ++n;
+    const mx = (await q("SELECT COALESCE(max(sort),-1)+1 AS n FROM pms")).rows[0].n;
+    await q("INSERT INTO pms (id, name, staff_name, rules, sort) VALUES ($1,$2,$3,$4,$5)", [id, f.name, f.staff || f.name, f.rules, mx]);
+    res.json({ id, name: f.name, staff: f.staff || f.name, rules: f.rules });
+  })
+);
+app.put(
+  "/api/owner/pms/:id",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const f = pmsFields(req.body);
+    if (!f.name) return bad(res, 400, "Add the PMS name.");
+    if ((await q("SELECT 1 FROM pms WHERE lower(name)=lower($1) AND id<>$2", [f.name, req.params.id])).rows.length) return bad(res, 400, "That PMS is already there.");
+    const r = await q("UPDATE pms SET name=$2, staff_name=$3, rules=$4 WHERE id=$1 RETURNING id", [req.params.id, f.name, f.staff || f.name, f.rules]);
+    if (!r.rows.length) return bad(res, 404, "That PMS no longer exists.");
+    res.json({ id: req.params.id, name: f.name, staff: f.staff || f.name, rules: f.rules });
+  })
+);
+
+// What "Add hotel" would copy: General · PMS steps · Brand program, each Copied or Left out (or None when the source has none).
+app.get(
+  "/api/owner/copy-preview",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const from = String(req.query.from || ""), brand = String(req.query.brand || ""), system = String(req.query.system || "");
+    const src = from ? await share.hotelOf({ query: (...a) => q(...a) }, from) : null;
+    if (!src) return bad(res, 400, "Pick a hotel to copy from.");
+    res.json(await share.copyPreview({ query: (...a) => q(...a) }, { src, brand, system }));
   })
 );
 
@@ -2209,62 +1989,87 @@ const matrixShort = (name) => {
   if (w.join(" ").length > 14 && w.length > 1) w = [w[0], w.slice(1).map((x) => x[0].toUpperCase()).join("")];
   return w.join(" ") || String(name || "Hotel");
 };
-// The whole master library against every hotel in two queries: one cell per SOP and hotel.
-// States (the first that applies wins): na (doesn't apply there), hk (HotelKey wording awaits review), upd (copy is behind and not kept),
-// own (the hotel keeps its own wording), on / off (copy is live / off, draft or missing). lv is "1" where the hotel's copy is live.
+
+// The Portfolio: one group per brand + PMS; each group lists its hotels (columns) and every SOP family (rows) in collapsible sections.
+// Cell state: on (live), off (off or draft), sug (a suggestion is waiting there), none (the hotel doesn't have it). `b` is the state without the suggestion.
 app.get(
-  "/api/owner/matrix",
+  "/api/owner/portfolio",
   auth("Owner"),
   wrap(async (req, res) => {
-    const [hs, ms, cs, cats] = await Promise.all([
-      q("SELECT id, name, brand, system, setup, ready, answers FROM hotels ORDER BY name"),
-      q("SELECT id, category, title, status, applies, requires, hk_status, version, keywords FROM master_sops ORDER BY id"),
-      q("SELECT hotel_id, master_id, status, master_version, kept FROM sops WHERE master_id IS NOT NULL AND master_id = id"),
-      q("SELECT name FROM master_categories ORDER BY sort"),
+    const [hs, brands, pmsList, sops, cats, sugs] = await Promise.all([
+      q("SELECT id, name, brand, system, setup, ready, copy_source FROM hotels ORDER BY name"),
+      q("SELECT id, name FROM brands ORDER BY sort, name"),
+      q("SELECT id, name, staff_name AS staff, rules FROM pms ORDER BY sort, name"),
+      q(`SELECT s.hotel_id, s.id, s.category, s.title, s.kind, s.status, s.keywords, ${share.FAM} AS fam FROM sops s ORDER BY s.id`),
+      q("SELECT hotel_id, name, sort FROM categories ORDER BY sort"),
+      q("SELECT to_hotel, family, count(*)::int AS n FROM sop_suggestions WHERE status='open' GROUP BY 1, 2"),
     ]);
-    const copy = new Map(cs.rows.map((r) => [r.hotel_id + "\u0000" + r.master_id, r]));
-    const hotels = hs.rows.map((h) => ({ ...h, amen: readSetup(h).amen }));
-    const masters = ms.rows.map((m) => {
-      const st = [];
-      let lv = "";
-      for (const h of hotels) {
-        const c = copy.get(h.id + "\u0000" + m.id);
-        const live = !!c && c.status === "live";
-        lv += live ? "1" : "0";
-        st.push(
-          !appliesAt(m, h.brand, h.amen) ? "na"
-            : h.system === "hotelkey" && m.hk_status === "draft" ? "hk"
-            : c && c.master_version < m.version && !c.kept ? "upd"
-            : c && c.kept ? "own"
-            : live ? "on" : "off"
-        );
-      }
-      return { id: m.id, t: m.title, c: m.category, v: m.version, s: m.status, hk: m.hk_status, ap: m.applies, rq: m.requires, kw: m.keywords, st, lv };
-    });
-    res.json({
-      hotels: hotels.map((h) => ({ id: h.id, name: h.name, short: matrixShort(h.name), brand: h.brand, system: h.system, live: h.setup === "live" })),
-      cats: cats.rows.map((c) => c.name),
-      masters,
-    });
+    const prog = new Map();
+    await Promise.all(hs.rows.filter((h) => h.setup === "setup").map(async (h) => { try { prog.set(h.id, (await hotelReadiness(h.id)).readiness.score); } catch { /* shows plain "Setup" */ } }));
+    const sugSet = new Set(sugs.rows.map((r) => r.to_hotel + "\u0000" + r.family));
+    const byHotel = new Map();
+    for (const r of sops.rows) { if (!byHotel.has(r.hotel_id)) byHotel.set(r.hotel_id, new Map()); byHotel.get(r.hotel_id).set(r.fam, r); }
+    const groups = new Map();
+    for (const h of hs.rows) { const k = grp.groupKey(h); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(h); }
+    const bName = new Map(brands.rows.map((b) => [b.id, b.name])), pName = new Map(pmsList.rows.map((p) => [p.id, p.name]));
+    const bSort = new Map(brands.rows.map((b, i) => [b.id, i])), pSort = new Map(pmsList.rows.map((p, i) => [p.id, i]));
+    const out = [...groups.entries()].map(([key, list]) => {
+      const hotels = list.map((h) => ({
+        id: h.id, name: h.name, short: matrixShort(h.name), live: h.setup === "live", setup: h.setup, pct: prog.has(h.id) ? prog.get(h.id) : null,
+        status: h.setup === "live" ? "Live" : h.setup === "setup" ? (prog.has(h.id) ? `Setup ${prog.get(h.id)}%` : "Setup") : "Not started",
+        n: (byHotel.get(h.id) || new Map()).size,
+      }));
+      const fams = new Map();
+      for (const h of list) for (const [fam, r] of byHotel.get(h.id) || []) if (!fams.has(fam)) fams.set(fam, r);
+      // Section order: the categories of the group's biggest hotel first, then any others.
+      const order = [];
+      const big = [...list].sort((a, b) => (byHotel.get(b.id) || new Map()).size - (byHotel.get(a.id) || new Map()).size);
+      for (const h of big) for (const c of cats.rows.filter((x) => x.hotel_id === h.id)) if (!order.includes(c.name)) order.push(c.name);
+      for (const r of fams.values()) if (!order.includes(r.category)) order.push(r.category);
+      const sections = order.map((name) => ({
+        name,
+        sops: [...fams.entries()].filter(([, r]) => r.category === name).sort((a, b) => a[1].id.localeCompare(b[1].id, "en", { numeric: true })).map(([fam, r]) => ({
+          family: fam, title: r.title, kind: r.kind || "general", kw: r.keywords || "", code: r.id,
+          cells: list.map((h) => {
+            const row = (byHotel.get(h.id) || new Map()).get(fam);
+            const b = !row ? "none" : row.status === "live" ? "on" : "off";
+            return { s: sugSet.has(h.id + "\u0000" + fam) ? "sug" : b, b, id: row ? row.id : null, draft: !!row && row.status === "draft" };
+          }),
+        })),
+      })).filter((s) => s.sops.length);
+      const [brand, system] = key.split("|");
+      return { key, brand, pms: system, name: `${bName.get(brand) || brand} · ${pName.get(system) || system}`, hotels, sections };
+    }).sort((a, b) => (bSort.get(a.brand) ?? 99) - (bSort.get(b.brand) ?? 99) || (pSort.get(a.pms) ?? 99) - (pSort.get(b.pms) ?? 99));
+    res.json({ brands: brands.rows, pms: pmsList.rows, groups: out, hotels: hs.rows.map((h) => ({ id: h.id, name: h.name, short: matrixShort(h.name), brand: h.brand, system: h.system, setup: h.setup })) });
   })
 );
 
-// Owner: switch one master SOP on or off at one hotel, from the Portfolio chart. Same code as the GM's switches, so a missing copy is added from the master.
+// The Owner's switch for one SOP at one hotel, from the Portfolio. A family the hotel doesn't have is added from a hotel in the group that has it.
 app.put(
-  "/api/owner/hotels/:hotelId/sops/:masterId",
+  "/api/owner/hotels/:hotelId/sops/:family",
   auth("Owner"),
   wrap(async (req, res) => {
     if (typeof req.body.on !== "boolean") return bad(res, 400, "Say whether to turn it on or off.");
-    const h = (await q("SELECT id, name, brand, setup FROM hotels WHERE id=$1", [req.params.hotelId])).rows[0];
+    const h = (await q("SELECT id, name, setup FROM hotels WHERE id=$1", [req.params.hotelId])).rows[0];
     if (!h) return bad(res, 404, "That hotel no longer exists.");
     if (h.setup !== "live") return bad(res, 400, `${h.name} isn't live yet. Its GM picks the SOPs during setup.`);
-    const m = (await q("SELECT id, status, applies FROM master_sops WHERE id=$1", [req.params.masterId])).rows[0];
-    if (!m) return bad(res, 404, "That master SOP no longer exists.");
-    if (m.status !== "live") return bad(res, 400, "That master SOP is a draft. Publish it first.");
-    if (req.body.on && !fitsBrand(m, h.brand)) return bad(res, 400, "That SOP is for Hilton hotels only.");
-    const out = await toggleMasters(h.id, [m.id], req.body.on, req.user.id);
-    if (!out.changed && out.skipped) return bad(res, 400, "That hotel has its own SOP with the same number, so it can't be switched here.");
+    const out = await tx((c) => share.toggleFamilies(c, { hotelId: h.id, families: [req.params.family], on: req.body.on, userId: req.user.id }));
+    if (!out.changed && out.skipped) return bad(res, 400, "No hotel has that SOP in a form this hotel can use.");
     res.json({ ok: true, on: req.body.on, ...out });
+  })
+);
+
+// One SOP as each hotel has it (the Portfolio's view): the Owner can read the wording hotel by hotel.
+app.get(
+  "/api/owner/sop",
+  auth("Owner"),
+  wrap(async (req, res) => {
+    const family = String(req.query.family || "");
+    const { rows } = await q(
+      `SELECT s.*, h.name AS hotel_name, ${share.FAM} AS fam FROM sops s JOIN hotels h ON h.id = s.hotel_id WHERE ${share.FAM} = $1 ORDER BY h.name`, [family]
+    );
+    if (!rows.length) return bad(res, 404, "No hotel has that SOP any more.");
+    res.json({ family, hotels: rows.map((r) => ({ hotel: r.hotel_id, hotelName: r.hotel_name, ...sopOut(r) })) });
   })
 );
 
@@ -2326,48 +2131,32 @@ app.post(
   })
 );
 
-// ---------- import (Owner -> master library, GM -> their hotel) ----------
+// ---------- import (a GM or the Owner, into a hotel) ----------
 // Everything imported lands as a review item first. Hotel-only SOPs start as drafts; nothing goes live by itself.
 const importLimiter = rateLimit({ windowMs: 30 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: "Too many imports. Wait a few minutes and try again." } });
 
-// Where this request imports to: "master" (Owner only) or a hotel the user is assigned to.
+// Where this request imports to: a hotel the user is assigned to (the Owner counts as assigned to every hotel).
 const importTarget = (req, res, next) => {
-  const t = String(req.query.target || req.body?.target || (isOwner(req.user) ? "master" : req.user.hotels[0] || ""));
-  if (t === "master") {
-    if (!isOwner(req.user)) return bad(res, 403, "Only the Owner can import into the master library.");
-    req.target = null;
-  } else {
-    if (!req.user.hotels.includes(t)) return bad(res, 403, "You don't have access to that hotel.");
-    req.target = t;
-  }
+  const t = String(req.query.target || req.body?.target || req.query.hotel || req.user.hotels[0] || "");
+  if (!req.user.hotels.includes(t)) return bad(res, 403, "You don't have access to that hotel.");
+  req.target = t;
   next();
 };
 
-const canUseBatch = (u, b) => (b.hotel_id ? u.hotels.includes(b.hotel_id) : isOwner(u));
+const canUseBatch = (u, b) => !!b.hotel_id && u.hotels.includes(b.hotel_id);
 
 // What the AI and the spreadsheet match against: id, title, category of the target's SOPs, plus valid categories and detail names.
 async function importCtx(target) {
-  const [cat, dk] = await Promise.all([q("SELECT name FROM master_categories ORDER BY sort"), q("SELECT key FROM master_details ORDER BY sort, key")]);
+  const [cat, dk, h] = await Promise.all([
+    q("SELECT name FROM categories WHERE hotel_id=$1 ORDER BY sort", [target]),
+    q("SELECT key FROM master_details ORDER BY sort, key"),
+    hotelRow(target),
+  ]);
   const categories = cat.rows.map((r) => r.name);
   const detailKeys = dk.rows.map((r) => r.key);
-  let catalog;
-  let inSetup = false;
-  if (target) {
-    catalog = (await q("SELECT id, title, category FROM sops WHERE hotel_id=$1 ORDER BY id", [target])).rows;
-    // A hotel that hasn't gone live has no copies of the library yet, so match against the published master SOPs too.
-    inSetup = (await q("SELECT setup FROM hotels WHERE id=$1", [target])).rows[0]?.setup !== "live";
-    if (inSetup) {
-      const have = new Set(catalog.map((r) => r.id));
-      const ms = (await q("SELECT id, title, category FROM master_sops WHERE status='live' ORDER BY id")).rows;
-      catalog = [...catalog, ...ms.filter((r) => !have.has(r.id))].sort((a, b) => (a.id < b.id ? -1 : 1));
-    }
-    for (const r of (await q("SELECT name FROM categories WHERE hotel_id=$1 ORDER BY sort", [target])).rows) if (!categories.includes(r.name)) categories.push(r.name);
-    const h = (await q("SELECT details FROM hotels WHERE id=$1", [target])).rows[0];
-    for (const k of Object.keys((h && h.details) || {})) if (!detailKeys.some((x) => tokKey(x) === tokKey(k))) detailKeys.push(k);
-  } else {
-    catalog = (await q("SELECT id, title, category FROM master_sops ORDER BY id")).rows;
-  }
-  return { catalog, categories, detailKeys, inSetup, targetLabel: target ? (inSetup ? "the Lotus library" : "this hotel's SOPs") : "the master library" };
+  const catalog = (await q("SELECT id, title, category FROM sops WHERE hotel_id=$1 ORDER BY id", [target])).rows;
+  for (const k of Object.keys((h && h.details) || {})) if (!detailKeys.some((x) => tokKey(x) === tokKey(k))) detailKeys.push(k);
+  return { catalog, categories, detailKeys, inSetup: false, targetLabel: "this hotel's SOPs", pmsRules: grp.pmsRulesClause(h.pms), pmsName: h.pms.staff_name || h.pms.name };
 }
 
 const stepTexts = (steps) => (Array.isArray(steps) ? steps : []).map((x) => (typeof x === "string" ? x : x.t || "")).filter(Boolean);
@@ -2394,27 +2183,16 @@ async function batchView(row) {
   const ids = (r.matches || []).map((m) => m.sop_id);
   const ours = new Map();
   if (ids.length) {
-    const rows = row.hotel_id
-      ? (await q("SELECT id, title, category, steps, script, flag FROM sops WHERE hotel_id=$1 AND id = ANY($2)", [row.hotel_id, ids])).rows
-      : (await q("SELECT id, title, category, steps, script, flag FROM master_sops WHERE id = ANY($1)", [ids])).rows;
+    const rows = (await q("SELECT id, title, category, steps, script, flag FROM sops WHERE hotel_id=$1 AND id = ANY($2)", [row.hotel_id, ids])).rows;
     for (const s of rows) ours.set(s.id, { id: s.id, title: s.title, cat: s.category, steps: stepTexts(s.steps), script: s.script, flag: s.flag });
-    // Before go-live the hotel has no copy yet: show the library's wording ("Already in the library").
-    if (row.hotel_id && ctx.inSetup) {
-      const missing = ids.filter((id) => !ours.has(id));
-      if (missing.length) {
-        for (const s of (await q("SELECT id, title, category, steps, script, flag FROM master_sops WHERE id = ANY($1) AND status='live'", [missing])).rows) {
-          ours.set(s.id, { id: s.id, title: s.title, cat: s.category, steps: stepTexts(s.steps), script: s.script, flag: s.flag, library: true });
-        }
-      }
-    }
   }
   const by = row.created_by ? (await q("SELECT name FROM users WHERE id=$1", [row.created_by])).rows[0] : null;
   const cats = ctx.categories;
   return {
     cats,
-    id: row.id, target: row.hotel_id || "master", kind: row.kind, status: row.status, files: row.filenames, created: row.created_at, by: by ? by.name : null,
+    id: row.id, target: row.hotel_id, kind: row.kind, status: row.status, files: row.filenames, created: row.created_at, by: by ? by.name : null,
     meta: r.meta || {},
-    setup: !!(row.hotel_id && ctx.inSetup),
+    setup: false,
     matches: (r.matches || []).map((m, i) => ({ ...m, i, ours: ours.get(m.sop_id) || null })),
     new: (r.new || []).map((n, i) => ({ ...n, i })),
     details: (r.details || []).map((d, i) => ({ ...d, i })),
@@ -2449,7 +2227,6 @@ app.get(
     const hs = (await q("SELECT id, name, setup FROM hotels WHERE id = ANY($1) ORDER BY name", [req.user.hotels])).rows;
     res.json({
       aiOn: !!aiConfig(await settingsRow()) || ai.mockEnabled(),
-      canMaster: isOwner(req.user),
       hotels: hs,
       maxFiles: imp.MAX_FILES,
       maxPdfs: 20,
@@ -2463,7 +2240,8 @@ app.get(
   "/api/import/template.xlsx",
   auth("GM"),
   wrap(async (req, res) => {
-    const cats = (await q("SELECT name FROM master_categories ORDER BY sort")).rows.map((r) => r.name);
+    const hid = req.user.hotels.includes(String(req.query.hotel || "")) ? String(req.query.hotel) : req.user.hotels[0];
+    const cats = (await q("SELECT name FROM categories WHERE hotel_id=$1 ORDER BY sort", [hid])).rows.map((r) => r.name);
     const buf = await imp.buildTemplate(cats);
     res.set({
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2733,78 +2511,33 @@ app.post(
   })
 );
 
-// Next free SOP number for a prefix, counting the master and every hotel so ids never clash later.
-async function nextSopId(c, prefix) {
-  const { rows } = await c.query(`SELECT id FROM master_sops WHERE id LIKE $1 UNION SELECT id FROM sops WHERE id LIKE $1`, [prefix + "-%"]);
-  const n = Math.max(0, ...rows.map((r) => parseInt(r.id.split("-")[1], 10) || 0)) + 1;
-  return `${prefix}-${String(n).padStart(2, "0")}`;
-}
-async function prefixFor(c, hotelId, category) {
-  const m = (await c.query("SELECT prefix FROM master_categories WHERE name=$1", [category])).rows[0];
-  if (m) return m.prefix;
-  const h = hotelId ? (await c.query("SELECT prefix FROM categories WHERE hotel_id=$1 AND name=$2", [hotelId, category])).rows[0] : null;
-  return h ? h.prefix : "SOP";
-}
-
-// "Use theirs" on a master SOP: new steps (and script/flag if the import has them), version bumped so hotels see an update.
-async function importUseMaster(c, m, user) {
-  const cur = (await c.query("SELECT * FROM master_sops WHERE id=$1 FOR UPDATE", [m.sop_id])).rows[0];
-  if (!cur) return { err: [404, "That master SOP no longer exists."] };
-  const steps = carryOver(cur.steps, m.steps, m.imgs);
-  const script = m.script || cur.script, flag = m.flag || cur.flag;
-  const scriptHk = script !== cur.script ? null : cur.script_hk, flagHk = flag !== cur.flag ? null : cur.flag_hk;
-  if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag && !hasImgs(m)) return { same: true };
-  let hk = cur.hk_status;
-  if (!hasHk(steps, scriptHk, flagHk)) hk = "same";
-  else if (hkSig(steps, scriptHk, flagHk) !== hkSig(cur.steps, cur.script_hk, cur.flag_hk) || cur.hk_status === "same") hk = "draft";
-  await c.query("INSERT INTO master_history (master_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4)", [cur.id, cur.version, JSON.stringify(cur), user.id]);
-  const r = await c.query(
-    `UPDATE master_sops SET steps=$2, script=$3, script_hk=$4, flag=$5, flag_hk=$6, hk_status=$7, version=version+1, updated_at=now(), updated_by=$8 WHERE id=$1 RETURNING *`,
-    [cur.id, JSON.stringify(steps), script, scriptHk, flag, flagHk, hk, user.id]
-  );
-  const n = (await c.query("SELECT count(DISTINCT hotel_id)::int AS n FROM sops WHERE master_id=$1 AND master_version < $2", [cur.id, r.rows[0].version])).rows[0].n;
-  return { note: `Updated ${cur.id} to v${r.rows[0].version}${n ? ` · ${n} hotel${n === 1 ? " has" : "s have"} an update` : ""}` };
-}
-
 async function importUseHotel(c, hotelId, m, user) {
   const cur = (await c.query("SELECT * FROM sops WHERE hotel_id=$1 AND id=$2 FOR UPDATE", [hotelId, m.sop_id])).rows[0];
-  if (!cur) {
-    const inLib = (await c.query("SELECT 1 FROM master_sops WHERE id=$1", [m.sop_id])).rows.length;
-    return { err: [inLib ? 400 : 404, inLib ? "This SOP is still in the Lotus library. After you go live you can update its wording from the Library." : "That SOP no longer exists at this hotel."] };
-  }
+  if (!cur) return { err: [404, "That SOP no longer exists at this hotel."] };
   const steps = carryOver(cur.steps, m.steps, m.imgs).map((s) => ({ t: s.t, img: s.img }));
   const script = m.script || cur.script, flag = m.flag || cur.flag;
   if (sameText(stepTexts(cur.steps), m.steps) && script === cur.script && flag === cur.flag && !hasImgs(m)) return { same: true };
   await c.query("INSERT INTO sop_history (hotel_id, sop_id, version, snapshot, changed_by) VALUES ($1,$2,$3,$4,$5)", [hotelId, cur.id, cur.version, JSON.stringify(sopOut(cur)), user.id]);
   const r = await c.query(
-    `UPDATE sops SET steps=$3, script=$4, flag=$5, version=version+1, updated_at=now(), updated_by=$6, kept = (kept OR master_id IS NOT NULL)
+    `UPDATE sops SET steps=$3, script=$4, flag=$5, version=version+1, updated_at=now(), updated_by=$6, family=COALESCE(family, master_id, hotel_id || ':' || id)
       WHERE hotel_id=$1 AND id=$2 RETURNING *`,
     [hotelId, cur.id, JSON.stringify(steps), script, flag, user.id]
   );
-  return { note: `Updated ${cur.id} to v${r.rows[0].version}${r.rows[0].master_id ? " · marked as your own wording" : ""}` };
+  // A live SOP whose steps changed is suggested to the rest of the group, like any other change.
+  if (r.rows[0].status === "live") await tellGroup(c, hotelId, r.rows[0], user.id);
+  return { note: `Updated ${cur.id} to v${r.rows[0].version}` };
 }
 
-// Adds one reviewed "new" item. Master: a new master SOP (every hotel / Hilton, as the sheet said). Hotel: a hotel-only draft.
+// Adds one reviewed "new" item to the hotel as a draft; nothing goes live by itself.
 async function importAdd(c, hotelId, item, category, user) {
-  await c.query("LOCK TABLE master_sops IN SHARE ROW EXCLUSIVE MODE");
-  const prefix = await prefixFor(c, hotelId, category);
-  const id = await nextSopId(c, prefix);
+  await share.ensureCategory(c, hotelId, category);
+  const id = await share.nextId(c, hotelId, await share.prefixOf(c, hotelId, category));
   const title = item.title.slice(0, 200);
-  if (!hotelId) {
-    const steps = item.steps.map((t, i) => ({ t, hk: null, img: (item.imgs && item.imgs[i]) || null }));
-    await c.query(
-      `INSERT INTO master_sops (id, category, title, steps, script, flag, keywords, applies, requires, hk_status, updated_by, status)
-       VALUES ($1,$2,$3,$4,$5,$6,'',$7,$8,'same',$9,'draft')`,
-      [id, category, title, JSON.stringify(steps), item.script || "", item.flag || "", item.applies === "hilton" ? "hilton" : "all", AMENITIES.includes(item.requires) ? item.requires : null, user.id]
-    );
-    return { id, note: `Added ${id} to the master library as a draft. Publish it from the Master library when it is ready for hotels.` };
-  }
-  await ensureCategory(c, hotelId, category);
   const steps = item.steps.map((t, i) => ({ t, img: (item.imgs && item.imgs[i]) || null }));
   await c.query(
-    `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'','draft',$8)`,
-    [hotelId, id, category, title, JSON.stringify(steps), item.script || "", item.flag || "", user.id]
+    `INSERT INTO sops (hotel_id, id, category, title, steps, script, flag, keywords, status, updated_by, family, kind)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'','draft',$8,$9,$10)`,
+    [hotelId, id, category, title, JSON.stringify(steps), item.script || "", item.flag || "", user.id, `${hotelId}:${id}`, grp.classifyKind({ title, steps, script: item.script, flag: item.flag })]
   );
   return { id, note: `Added ${id} as a draft. Review it in the Library, then switch it live.` };
 }
@@ -2838,7 +2571,7 @@ app.post(
           item.state = "added"; added++;
         }
         if (!added && !needCat) return { err: [400, "Nothing left to add."] };
-        msgs.push(`Added ${added} as ${hid ? "drafts" : "master drafts"}${needCat ? ` · ${needCat} need a category first` : ""}`);
+        msgs.push(`Added ${added} as drafts${needCat ? ` · ${needCat} need a category first` : ""}`);
         await saveBatchResult(c, row, result);
         return { row: { ...row, result }, note: msgs[0] };
       }
@@ -2851,7 +2584,7 @@ app.post(
       if (action === "skip") item.state = "skipped";
       else if (group === "matches" && action === "keep") { item.state = "kept"; note = "Kept ours"; }
       else if (group === "matches" && action === "use") {
-        const r = hid ? await importUseHotel(c, hid, item, req.user) : await importUseMaster(c, item, req.user);
+        const r = await importUseHotel(c, hid, item, req.user);
         if (r.err) return r;
         item.state = "used"; note = r.same ? "Already the same wording" : r.note;
       } else if (group === "new" && action === "add") {
@@ -2903,6 +2636,7 @@ const INDEX = require("fs")
   .replace('src="/theme.js"', `src="/theme.js?v=${BUILD}"`)
   .replace('src="/dash.js"', `src="/dash.js?v=${BUILD}"`)
   .replace('src="/studio.js"', `src="/studio.js?v=${BUILD}"`)
+  .replace('src="/portfolio.js"', `src="/portfolio.js?v=${BUILD}"`)
   .replace('src="/setup.js"', `src="/setup.js?v=${BUILD}"`)
   .replace('src="/vendor/qrcode.js"', `src="/vendor/qrcode.js?v=${BUILD}"`);
 const sendIndex = (req, res) => res.set("Cache-Control", "no-store").type("html").send(INDEX);

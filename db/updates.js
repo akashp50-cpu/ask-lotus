@@ -9,7 +9,7 @@
 //      -> the step is appended to the master SOP and to hotel copies that are up to date and not "kept".
 // Per-hotel wording of a step: hotels[hotelId] (or "hampton" for hotel 'hop'), else the hotel system's wording (HotelKey: hk ?? t, PEP: t).
 // A step whose chosen text is exactly "Skip this step at this hotel." is left out of that hotel's copy.
-// A hotel copy marked kept (the hotel chose its own wording) is never overwritten; it stays a pending update.
+// A hotel copy marked kept (the hotel chose its own wording) is never overwritten, and no pending update is created for it.
 const fs = require("fs");
 const path = require("path");
 
@@ -132,7 +132,12 @@ async function propagateFull(c, upd, s, m, srcSteps, home, log) {
     // A new copy is only made where the SOP fits; a copy the hotel already has (even switched off) is kept current.
     if (!cur && (!fitsBrand(m.applies, h.brand) || !amenityOk(h, m.requires))) { counts.skipped++; continue; }
     if (cur && !cur.master_id) { console.warn(`  [${upd.id}] ${h.id} has its own hotel-only ${m.id}; left it alone.`); counts.skipped++; continue; }
-    if (cur && cur.master_id === m.id && cur.kept) { counts.pending++; log(`  ${h.id} ${m.id}: kept by the hotel, stays a pending update`); continue; }
+    // A copy the hotel changed itself is left as it is. Pending updates are gone (SOPs are shared inside a brand group by suggestions now),
+    // so it is marked as up to date with the master instead of being left behind.
+    if (cur && cur.master_id === m.id && cur.kept) {
+      await c.query("UPDATE sops SET master_version=$3 WHERE hotel_id=$1 AND id=$2 AND master_version < $3", [h.id, m.id, m.version]);
+      counts.pending++; log(`  ${h.id} ${m.id}: changed by the hotel, left alone`); continue;
+    }
     if (cur && cur.master_version >= m.version) { counts.skipped++; continue; }
     const steps = [];
     for (const x of srcSteps) {
@@ -181,8 +186,11 @@ async function applyPatch(c, upd, s, imgs, home, log) {
   const hotels = new Map((await c.query("SELECT id, system FROM hotels")).rows.map((h) => [h.id, h]));
   let n = 0, pend = 0;
   for (const cp of (await c.query("SELECT * FROM sops WHERE master_id=$1 FOR UPDATE", [cur.id])).rows) {
-    // Only copies that were up to date and are still the Lotus wording get the step; others stay pending updates.
-    if (cp.kept || cp.master_version !== cur.version) { pend++; continue; }
+    // Only copies that were up to date and are still the Lotus wording get the step; the others are left alone (no pending update is created).
+    if (cp.kept || cp.master_version !== cur.version) {
+      await c.query("UPDATE sops SET master_version=$3 WHERE hotel_id=$1 AND id=$2 AND master_version < $3", [cp.hotel_id, cp.id, m.version]);
+      pend++; continue;
+    }
     const h = hotels.get(cp.hotel_id);
     const t = stepTextFor({ ...step, t: mstep.t, hk: mstep.hk }, h);
     // Nothing to add at this hotel (step skipped there, or the same text is already last): just move the version marker.
@@ -198,7 +206,7 @@ async function applyPatch(c, upd, s, imgs, home, log) {
     );
     n++;
   }
-  log(`  ${s.id}: step appended to master (v${m.version}); ${n} hotel cop${n === 1 ? "y" : "ies"} got it${pend ? `, ${pend} left as pending updates` : ""}`);
+  log(`  ${s.id}: step appended to master (v${m.version}); ${n} hotel cop${n === 1 ? "y" : "ies"} got it${pend ? `, ${pend} left alone` : ""}`);
 }
 
 async function applyOne(c, upd, dir, log) {
@@ -213,7 +221,7 @@ async function applyOne(c, upd, dir, log) {
     const r = await upsertMaster(c, s, imgs);
     const m = r.master;
     const counts = await propagateFull(c, upd, s, m, r.steps, home, log);
-    log(`  ${s.id} ${r.created ? "created" : r.unchanged ? "unchanged" : "updated"} in master (v${m.version}); hotels: ${counts.inserted} added, ${counts.replaced} replaced, ${counts.pending} pending (kept)`);
+    log(`  ${s.id} ${r.created ? "created" : r.unchanged ? "unchanged" : "updated"} in master (v${m.version}); hotels: ${counts.inserted} added, ${counts.replaced} replaced, ${counts.pending} left alone (changed by the hotel)`);
   }
 }
 

@@ -351,7 +351,7 @@ function wzWelcome() {
       <p class="foot center">PDF, Word, Excel or text. We suggest answers; nothing is saved until you accept it.</p>`
       : `<p class="foot center">Reading documents needs an AI key. The Owner can add one in Settings, then you can fill this from your handbook.</p>`}
     <div class="wzalt"><button type="button" class="lnk" id="wzCopyToggle" aria-expanded="${WZ.copyOpen}">Copy another hotel instead</button>
-    ${WZ.copyOpen ? `<div class="wzcopy">${d.sources.length ? `<div class="group" role="radiogroup" aria-label="Hotel to copy">${d.sources.map((s) => `<button type="button" class="radio" role="radio" data-src="${esc(s.id)}" aria-checked="${s.id === (WZ.copyFrom || d.sources[0].id)}"><span class="body" style="flex:1"><span class="rt">${esc(s.name)}</span><span class="rs">${s.system === "pep" ? "PEP" : "HotelKey"} · ${plural(s.live, "SOP")} on</span></span>${checkSvg}</button>`).join("")}</div>
+    ${WZ.copyOpen ? `<div class="wzcopy">${d.sources.length ? `<div class="group" role="radiogroup" aria-label="Hotel to copy">${d.sources.map((s) => `<button type="button" class="radio" role="radio" data-src="${esc(s.id)}" aria-checked="${s.id === (WZ.copyFrom || d.sources[0].id)}"><span class="body" style="flex:1"><span class="rt">${esc(s.name)}</span><span class="rs">${esc(sysName(s))} · ${plural(s.live, "SOP")} on</span></span>${checkSvg}</button>`).join("")}</div>
       <button type="button" class="bigbtn ghost press" id="wzCopyGo">Copy and continue</button>` : `<div class="group"><div class="empty">No other hotel you manage is live yet, so there is nothing to copy.</div></div>`}</div>` : ""}
     <p class="foot center">Have your own binder? <button type="button" class="inlinebtn" id="wzImport">Turn it into SOPs</button></p></div>`;
 }
@@ -383,8 +383,8 @@ function wzHotel() {
   const d = SU.data, h = d.hotel, owner = d.isOwner;
   const opts = (o, cur) => o.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("");
   const rec = owner ? `<div class="sec"><span>Hotel record (Owner)</span></div><div class="group wzgrp"><div class="wzf"><label class="fld"><span>Hotel name in Ask Lotus</span><input id="su-name" value="${esc(h.name)}" autocomplete="off"></label></div>
-      <div class="wzf"><label class="fld"><span>Brand</span><select id="su-brand">${opts([["hilton", "Hilton"], ["independent", "Independent"]], h.brand)}</select></label></div>
-      <div class="wzf"><label class="fld"><span>Property system</span><select id="su-system">${opts([["pep", "PEP"], ["hotelkey", "HotelKey"]], h.system)}</select></label></div></div><p class="hint">As the Owner you can change these until the hotel goes live.</p>` : "";
+      <div class="wzf"><label class="fld"><span>Brand</span><select id="su-brand">${opts(STATE.brands.map((b) => [b.id, b.name]), h.brand)}</select></label></div>
+      <div class="wzf"><label class="fld"><span>Property system</span><select id="su-system">${opts(STATE.pms.map((p) => [p.id, p.name]), h.system)}</select></label></div></div><p class="hint">As the Owner you can change these until the hotel goes live.</p>` : "";
   const more = wzMoreBlock("hotel", wzMoreDefs("hotel"));
   return `${wzSections("hotel")}${more}${rec}`;
 }
@@ -415,7 +415,7 @@ function wzRooms() {
 }
 function wzSystems() {
   const h = SU.data.hotel;
-  const pms = `<div class="sec"><span>Property management system</span></div><div class="group"><div class="cell"><span class="body"><span class="t">${h.system === "pep" ? "PEP (HotelKey NextGen)" : "HotelKey"}</span><span class="m">Set when the hotel was added. SOP wording follows this. Ask an Owner if it is wrong.</span></span><span class="status ok">Read only</span></div></div>`;
+  const pms = `<div class="sec"><span>Property management system</span></div><div class="group"><div class="cell"><span class="body"><span class="t">${esc(pmsFullName(h))}</span><span class="m">Set when the hotel was added. SOP wording follows this. Ask an Owner if it is wrong.</span></span><span class="status ok">Read only</span></div></div>`;
   return `${pms}${wzSections("systems")}${wzMoreBlock("systems", wzMoreDefs("systems"))}`;
 }
 
@@ -582,7 +582,7 @@ function wzReview() {
   const d = SU.data, r = d.readiness, on = d.sops.filter(suOn).length;
   return `<div id="wzRev">${wzReviewInner(r, on)}</div>
     <button type="button" class="morebtn press" id="wzSopsBtn" aria-expanded="${WZ.sopsOpen}"><span class="body"><span class="t">SOPs that will be on: ${on}</span><span class="m">of ${d.sops.length}. Tap to switch categories or single SOPs.</span></span>${chev.replace('class="chev"', `class="chev ${WZ.sopsOpen ? "dn" : ""}"`)}</button>
-    <div class="wzmore" id="wzSops" ${WZ.sopsOpen ? "" : "hidden"}><div class="group" id="catList">${catRowsHtml()}</div><p class="foot">${d.hotel.brand === "hilton" ? "" : "Hilton-only SOPs stay off for independent hotels."}</p></div>
+    <div class="wzmore" id="wzSops" ${WZ.sopsOpen ? "" : "hidden"}><div class="group" id="catList">${catRowsHtml()}</div><p class="foot">Brand-program SOPs only come from hotels of the same brand, and PMS steps only from hotels on the same PMS.</p></div>
     <p class="hint">${esc(d.hotel.name)} opens to staff right away. You can switch SOPs, details and contacts any time from the Dashboard.</p>`;
 }
 function wzReviewInner(r, on) {

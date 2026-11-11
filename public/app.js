@@ -36,6 +36,7 @@ document.addEventListener("pointerdown", (e) => { const b = e.target.closest(".p
 /* ---------- utils ---------- */
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const chipify = (t) => esc(t).replace(/\{([^}]+)\}/g, '<span class="tokchip">$1</span>');
 const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 const fmtD = (d) => new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 const fmtDT = (d) => {
@@ -67,7 +68,7 @@ async function api(path, opts = {}) {
 }
 
 /* ---------- state ---------- */
-const STATE = { me: null, hotels: [], hotel: null, convos: [], cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], owner: { hotels: null, master: null, matrix: null } };
+const STATE = { me: null, hotels: [], hotel: null, convos: [], cats: [], sops: [], contacts: [], routes: [], details: {}, chats: {}, chatDefaults: {}, info: {}, settings: {}, log: [], users: [], brands: [], pms: [], owner: { hotels: null, portfolio: null } };
 const sop = (id) => STATE.sops.find((s) => s.id === id);
 const RANKS = { "Front Desk": 0, Manager: 1, GM: 2, Owner: 3 };
 const canManage = () => STATE.me && RANKS[STATE.me.role] >= 1;
@@ -78,8 +79,12 @@ const canGrant = (role) => !!STATE.me && (GRANTS[STATE.me.role] || []).includes(
 const ROLE_TITLE = { Owner: "Owner", GM: "General Manager", Manager: "Manager" };
 const hotelObj = (id) => STATE.hotels.find((h) => h.id === (id || STATE.hotel)) || {};
 const hotelName = (id) => (STATE.hotels.find((h) => h.id === id) || {}).name || id;
-const sysName = (h) => (h.system === "pep" ? "PEP" : "HotelKey");
-const brandName = (h) => (h.brand === "hilton" ? "Hilton" : "Independent");
+// Brands and PMS are lists the Owner edits (see /api/me). sysName is what staff call the PMS.
+const pmsRow = (h) => STATE.pms.find((p) => p.id === (h && h.system)) || null;
+const sysName = (h) => { const p = pmsRow(h); return p ? p.staff || p.name : (h && h.system) || ""; };
+const pmsFullName = (h) => { const p = pmsRow(h); return p ? p.name : (h && h.system) || ""; };
+const brandName = (h) => { const b = STATE.brands.find((x) => x.id === (h && h.brand)); return b ? b.name : (h && h.brand) || ""; };
+const KIND_NAME = { pms: "PMS", general: "General", brand: "Brand" };
 
 /* ---------- toast ---------- */
 let toastS, toastH;
@@ -131,7 +136,7 @@ function showScreen() {
 async function start() {
   try {
     const me = await api("/api/me", { hotel: false, quiet401: true });
-    STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs;
+    STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs; STATE.brands = me.brands || []; STATE.pms = me.pms || [];
   } catch { STATE.me = null; }
   if (!STATE.me) window.applyAccent(null); // the sign-in screen is always Lotus gold
   showScreen();
@@ -199,7 +204,7 @@ const go = (h) => (location.hash === "#" + h ? route() : (location.hash = h));
 
 async function refreshMe() {
   const me = await api("/api/me", { hotel: false });
-  STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs; renderPropMenu();
+  STATE.me = me.user; STATE.hotels = me.hotels; STATE.pdfjs = me.pdfjs; STATE.brands = me.brands || []; STATE.pms = me.pms || []; renderPropMenu();
 }
 
 function renderPropMenu() {
@@ -562,16 +567,44 @@ async function renderAdmin(refresh) {
   ({ dashboard: Glass.renderDashboard, sops: renderList, gaps: renderGaps, activity: renderActivity, team: renderTeam, contacts: renderContacts, settings: Glass.renderSettingsPage })[tab]();
 }
 
-function renderList() {
-  const f = norm($("filter").value);
-  const rows = STATE.sops.filter((s) => (!libDraft || s.status === "draft") && (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id).includes(f)))
-    .sort((a, b) => ({ draft: 0, live: 1, off: 2 }[a.status] - { draft: 0, live: 1, off: 2 }[b.status]) || a.id.localeCompare(b.id, "en", { numeric: true }));
-  $("libCount").textContent = rows.length + " SOP" + (rows.length === 1 ? "" : "s");
-  $("sopList").innerHTML = rows.length ? rows.map((s) => { const ph = s.steps.filter((x) => x.img).length;
-    return `<button type="button" class="cell" data-edit="${esc(s.id)}"><span class="dot ${s.status}"></span>
-    <span class="body"><span class="t">${esc(s.title)}</span><span class="m">${esc(s.id)} · v${s.ver}${cat ? "" : " · " + esc(s.cat)}${ph ? ` · <span class="ph">${IC.img}${ph}</span>` : ""} · ${fmtD(s.updated)}</span></span>${s.status === "draft" ? `<span class="status draft">Draft</span>` : s.status === "off" ? `<span class="status off">Off</span>` : ""}${chev}</button>`; }).join("") : `<div class="empty">No SOPs match that search.</div>`;
-  $("sopList").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => openSop(b.dataset.edit)));
+// The Library: SOPs in collapsible category sections (one line each, with a count). A search, the Drafts pill or a category pill opens the sections that match.
+// Which sections are open is remembered per hotel on this device.
+const libKey = () => "asklotus.lib." + STATE.hotel;
+let libOpen = null, libOpenFor = null;
+function libOpenGet() {
+  if (libOpenFor !== STATE.hotel) { libOpenFor = STATE.hotel; try { libOpen = JSON.parse(localStorage.getItem(libKey()) || "{}") || {}; } catch { libOpen = {}; } }
+  return libOpen;
 }
+function libOpenSave() { try { localStorage.setItem(libKey(), JSON.stringify(libOpen)); } catch { /* sections still open and close */ } }
+const kindTag = (k) => (k === "pms" ? `<span class="pftag">PMS</span>` : k === "brand" ? `<span class="pftag">BRAND</span>` : "");
+function renderList() {
+  const f = norm($("filter").value), open = libOpenGet(), filtering = !!(f || libDraft || cat);
+  const order = { draft: 0, live: 1, off: 2 };
+  const rows = STATE.sops.filter((s) => (!libDraft || s.status === "draft") && (!cat || s.cat === cat) && (!f || norm(s.title + " " + s.kw + " " + s.id + " " + s.cat).includes(f)))
+    .sort((a, b) => order[a.status] - order[b.status] || a.id.localeCompare(b.id, "en", { numeric: true }));
+  $("libCount").textContent = rows.length + " SOP" + (rows.length === 1 ? "" : "s");
+  const names = [...STATE.cats.map((c) => c.name), ...new Set(STATE.sops.map((s) => s.cat).filter((c) => !STATE.cats.some((x) => x.name === c)))];
+  const anyOpen = filtering || names.some((n) => open[n]);
+  $("libAll").textContent = anyOpen ? "Collapse all" : "Expand all"; $("libAll").disabled = filtering; $("libAll").hidden = !STATE.sops.length;
+  const cell = (s) => { const ph = s.steps.filter((x) => x.img).length;
+    return `<button type="button" class="cell" data-edit="${esc(s.id)}"><span class="dot ${s.status}"></span>
+    <span class="body"><span class="t">${esc(s.title)}${kindTag(s.kind)}</span><span class="m">${esc(s.id)} · v${s.ver}${ph ? ` · <span class="ph">${IC.img}${ph}</span>` : ""} · ${fmtD(s.updated)}</span></span>${s.status === "draft" ? `<span class="status draft">Draft</span>` : s.status === "off" ? `<span class="status off">Off</span>` : ""}${chev}</button>`; };
+  const secs = names.map((n) => {
+    const all = STATE.sops.filter((s) => s.cat === n), mine = rows.filter((s) => s.cat === n);
+    if (!mine.length && (filtering || !all.length)) return "";
+    const isOpen = filtering || !!open[n], on = all.filter((s) => s.status === "live").length;
+    const count = filtering ? mine.length : on === all.length ? `${all.length}` : `${on}/${all.length}`;
+    return `<section class="libsec"><button type="button" class="libhd" data-lc="${esc(n)}" aria-expanded="${isOpen}" ${filtering ? "disabled" : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg><span class="libname">${esc(n)}</span><span class="num" title="${on} of ${all.length} on">${count}</span></button>
+      ${isOpen ? `<div class="group libbody">${mine.map(cell).join("")}</div>` : ""}</section>`;
+  }).join("");
+  $("sopList").innerHTML = rows.length ? secs : `<div class="empty">No SOPs match that search.</div>`;
+  $("sopList").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => openSop(b.dataset.edit)));
+  $("sopList").querySelectorAll("[data-lc]").forEach((b) => (b.onclick = () => { open[b.dataset.lc] = !open[b.dataset.lc]; libOpenSave(); renderList(); const k = $("sopList").querySelector(`[data-lc="${CSS.escape(b.dataset.lc)}"]`); if (k) k.focus({ preventScroll: true }); }));
+}
+$("libAll").onclick = () => {
+  const open = libOpenGet(), names = [...new Set(STATE.sops.map((s) => s.cat))], any = names.some((n) => open[n]);
+  names.forEach((n) => (open[n] = !any)); libOpenSave(); renderList();
+};
 
 function renderGaps() {
   const g = gaps();
@@ -723,7 +756,7 @@ const cardEl = $("card"), sheet = $("sheet"), scrim = $("scrim"); let sheetH = 6
 const sheetS = Spring(0, (y) => { cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); });
 function showSheet(which) {
   const open = !sheet.hidden && sheetS.target === 0; // already on screen: just swap the form, no slide
-  ["editor", "userEd", "contactEd", "hotelEd", "masterEd", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
+  ["editor", "userEd", "contactEd", "hotelEd", "listEd", "sopView", "needsEd"].forEach((id) => ($(id).hidden = id !== which)); sheet.hidden = false; scrim.hidden = false; sheetH = cardEl.offsetHeight || 600;
   if (open) { sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0)); return; }
   if (!sheetS.raf && sheetS.value <= 0) sheetS.set(sheetH); sheetS.to(0, { damping: 1, response: 0.38 }); document.body.style.overflow = "hidden";
   sheet.querySelectorAll(".sbody").forEach((b) => (b.scrollTop = 0));
@@ -737,11 +770,12 @@ function dStart(e) { if (e.target.closest("button")) return; cancelAnimationFram
 function dMove(e) { if (!drag || e.pointerId !== drag.id) return; let y = drag.base + (e.clientY - drag.startY); if (y < 0) y = rubber(y, sheetH); sheetS.value = y; sheetS.velocity = 0; cardEl.style.transform = `translateY(${y}px)`; scrim.style.opacity = Math.max(0, Math.min(1, 1 - y / sheetH)); drag.hist.push({ y: e.clientY, t: e.timeStamp }); if (drag.hist.length > 6) drag.hist.shift(); }
 function dEnd(e) { if (!drag || e.pointerId !== drag.id) return; const h = drag.hist, a = h[0], b = h[h.length - 1], v = ((b.y - a.y) / Math.max(1, b.t - a.t)) * 1000; drag = null; if (sheetS.value + project(v) > sheetH * 0.45) hideSheet(v); else sheetS.to(0, { damping: v < -50 ? 0.8 : 1, response: 0.35, velocity: v }); }
 sheet.querySelectorAll(".grab,.sbar").forEach((el) => { el.addEventListener("pointerdown", dStart); el.addEventListener("pointermove", dMove); el.addEventListener("pointerup", dEnd); el.addEventListener("pointercancel", dEnd); });
+$("f-only").onclick = (e) => { const b = e.currentTarget; b.setAttribute("aria-checked", b.getAttribute("aria-checked") !== "true"); };
 $("f-status").onclick = (e) => { const b = e.currentTarget; b.setAttribute("aria-checked", b.getAttribute("aria-checked") !== "true"); };
 $("u-active").onclick = (e) => { const b = e.currentTarget; if (b.disabled) return; b.setAttribute("aria-checked", b.getAttribute("aria-checked") !== "true"); };
 
 /* ----- SOP editor ----- */
-let editing = null, fromLog = null, draftSteps = [], saving = false;
+let editing = null, fromLog = null, draftSteps = [], saving = false, editSug = null;
 const IC = {
   up: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4-4 4 4"/></svg>',
   down: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>',
@@ -768,7 +802,10 @@ function openSop(id, seedQ, logId, preset) {
   $("f-script").value = editing ? editing.script : ""; $("f-flag").value = editing ? editing.flag : "";
   $("f-kw").value = editing ? editing.kw : seedQ ? norm(seedQ) : "";
   $("f-status").setAttribute("aria-checked", editing ? editing.status === "live" : true);
-  $("f-statusNote").textContent = editing && editing.status === "off" ? "Turned off for this hotel. Staff can't see it." : editing && editing.master && isGM() ? "Switch off to hide it from staff. You can turn it back on any time." : "";
+  $("f-statusNote").textContent = editing && editing.status === "off" ? "Turned off for this hotel. Staff can't see it." : editing && editing.status === "live" && isGM() ? "Switch off to hide it from staff. You can turn it back on any time." : "";
+  $("f-kind").value = editing ? editing.kind || "general" : (preset && preset.kind) || "";
+  $("f-only").setAttribute("aria-checked", !!(preset && preset.hotelOnly)); editSug = preset && preset.suggestion || null;
+  $("f-only").closest(".form").hidden = !isGM() && !canManage();
   $("delEd").hidden = !editing; $("delEd").dataset.armed = ""; $("delEd").textContent = "Delete SOP";
   $("edAi").hidden = !STATE.settings.aiOn;
   if (preset) {
@@ -782,9 +819,9 @@ $("edAi").onclick = () => { hideSheet(); studioOpen({
   seed: { title: $("f-title").value.trim(), category: $("f-cat").value, steps: draftSteps.filter((x) => x.t.trim() || x.img).map((x) => ({ t: x.t.trim(), img: x.img })), script: $("f-script").value.trim(), flag: $("f-flag").value.trim(), kw: $("f-kw").value.trim() },
 }); };
 function grow(t) { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
-const growAll = () => document.querySelectorAll("#stepsEd textarea,#mSteps textarea").forEach(grow);
+const growAll = () => document.querySelectorAll("#stepsEd textarea").forEach(grow);
 addEventListener("resize", () => { if (!sheet.hidden) growAll(); });
-// Shared step editor. o.field is "t" (the text) or "hk" (the HotelKey wording, blank = same as PEP).
+// Step editor. o.field is "t" (the step text).
 function stepEditor(cont, steps, o) {
   const n = steps.length, hk = o.field === "hk", blank = () => ({ t: "", hk: null, img: null });
   cont.innerHTML = steps.map((s, i) => `<div class="stepRow" data-i="${i}"><span class="num">${i + 1}</span>
@@ -836,7 +873,7 @@ $("delEd").onclick = async () => {
 };
 $("editor").addEventListener("submit", async (e) => {
   e.preventDefault(); if (saving) return;
-  const d = { title: $("f-title").value.trim(), cat: $("f-cat").value, steps: draftSteps.map((s) => ({ t: s.t.trim(), img: s.img })).filter((s) => s.t || s.img), script: $("f-script").value.trim(), flag: $("f-flag").value.trim(), kw: $("f-kw").value.trim(), status: $("f-status").getAttribute("aria-checked") === "true" ? "live" : editing && editing.status === "off" ? "off" : editing && editing.status === "live" && editing.master && isGM() ? "off" : "draft" };
+  const d = { title: $("f-title").value.trim(), cat: $("f-cat").value, steps: draftSteps.map((s) => ({ t: s.t.trim(), img: s.img })).filter((s) => s.t || s.img), script: $("f-script").value.trim(), flag: $("f-flag").value.trim(), kw: $("f-kw").value.trim(), status: $("f-status").getAttribute("aria-checked") === "true" ? "live" : editing && editing.status === "off" ? "off" : editing && editing.status === "live" && isGM() ? "off" : "draft", ...($("f-kind").value ? { kind: $("f-kind").value } : {}), ...($("f-only").getAttribute("aria-checked") === "true" ? { hotelOnly: true } : {}), ...(editSug ? { suggestion: editSug } : {}) };
   if (!d.title) { $("f-title").focus(); toast("Add a title"); return; }
   if (!d.steps.length) { toast("Add at least one step"); return; }
   saving = true;
@@ -845,7 +882,7 @@ $("editor").addEventListener("submit", async (e) => {
     if (editing) Object.assign(editing, out); else STATE.sops.push(out);
     STATE.sops.sort((a, b) => a.id.localeCompare(b.id));
     if (fromLog) { try { await api(`/api/activity/${fromLog}/dismiss`, { body: {} }); markDismissed(fromLog); } catch {} }
-    toast(out.status === "live" ? `Published ${out.id} v${out.ver}` : `Saved ${out.id} as a draft`); hideSheet(); renderAdmin(); studioSaved(out, false);
+    toast(out.status === "live" ? `Published ${out.id} v${out.ver}${out.suggested ? ` · suggested to ${out.suggested} other hotel${out.suggested === 1 ? "" : "s"}` : ""}` : `Saved ${out.id} as a draft`); hideSheet(); portfolioStale(); renderAdmin(); studioSaved(out);
   } catch (x) { fail(x); }
   saving = false;
 });
@@ -878,7 +915,7 @@ $("contactEd").addEventListener("submit", async (e) => {
 
 /* ----- user editor ----- */
 let eu = null, draftRole = "Front Desk", draftHotels = [];
-const ROLES = { "Front Desk": "Chat only", Manager: "SOPs, team and activity for their hotels", GM: "Runs their hotel: setup, SOPs on and off, details, updates and team", Owner: "Everything at every hotel, including AI settings and the master library" };
+const ROLES = { "Front Desk": "Chat only", Manager: "SOPs, team and activity for their hotels", GM: "Runs their hotel: setup, SOPs on and off, details, suggestions from sister hotels and team", Owner: "Everything at every hotel, including AI settings, brands and PMS" };
 $("newUser").onclick = () => openUser(null);
 function renderRoles() {
   $("u-roles").innerHTML = Object.entries(ROLES).map(([r, d]) => { const dis = !canGrant(r); return `<button type="button" class="radio" role="radio" data-r="${r}" aria-checked="${r === draftRole}" ${dis ? "disabled" : ""}><span class="body" style="flex:1"><span style="display:block;font-weight:500;${dis ? "color:var(--label3)" : ""}">${r}</span><span style="font-size:.8rem;color:var(--label2)">${dis ? (r === "Owner" ? "Only an Owner can grant this" : "You can't grant this role") : d}</span></span>${checkSvg}</button>`; }).join("");
@@ -1151,288 +1188,7 @@ function paintDetails() {
 
 $("toSetup").onclick = () => go("chat");
 
-/* ---------- owner: Portfolio (hotels, and the master library by hotel) ---------- */
-let mFilter = "all";
-$("ownerBtn").onclick = () => { closeMenus(); go(mode === "owner" ? "admin" : "owner"); };
-
-async function loadOwnerHotels() { STATE.owner.hotels = await api("/api/owner/hotels", { hotel: false }); }
-async function loadMaster() { STATE.owner.master = await api("/api/master", { hotel: false }); }
-async function loadMatrix() { STATE.owner.matrix = await api("/api/owner/matrix", { hotel: false }); }
-// The full master SOPs (steps, scripts) are only needed to open one, so they load on first use.
-async function openMasterLoaded(id) { try { if (!STATE.owner.master) await loadMaster(); openMaster(id); } catch (e) { fail(e); } }
-
-async function renderOwner(refresh) {
-  if (!isOwner()) return;
-  if (refresh || !STATE.owner.hotels) $("ownerSub").textContent = STATE.owner.hotels ? $("ownerSub").textContent : "Loading…";
-  try { await Promise.all([refresh || !STATE.owner.hotels ? loadOwnerHotels() : null, refresh || !STATE.owner.matrix ? loadMatrix() : null]); } catch (e) { fail(e); }
-  if (mode !== "owner") return;
-  const hs = STATE.owner.hotels, X = STATE.owner.matrix;
-  if (hs && X) $("ownerSub").textContent = `${hs.length} hotel${hs.length === 1 ? "" : "s"} · ${X.masters.length} master SOP${X.masters.length === 1 ? "" : "s"}`;
-  renderHotelCards(); renderMatrix();
-  $("masterDetailsSec").hidden = false;
-}
-// A change to the master library (saved, published, imported) or to the hotels: the chart reloads next time it is drawn.
-const portfolioStale = () => { STATE.owner.matrix = null; STATE.owner.hotels = null; };
-
-/* ----- hotels ----- */
-function renderHotelCards() {
-  const hs = STATE.owner.hotels;
-  if (!hs) { $("hotelCards").innerHTML = ""; return; }
-  const pill = (h) => h.setup === "live" ? `<span class="ppill ok">Live</span>` : h.setup === "setup" ? `<span class="ppill warn">Setting up</span>` : `<span class="ppill">Not started</span>`;
-  $("hotelCards").innerHTML = hs.map((h, i) => {
-    const gms = h.gms.filter((g) => g.status === "active"), live = h.setup === "live";
-    const gm = gms.length ? `${gms.length === 1 ? "GM" : "GMs"}: ${gms.map((g) => esc(g.name) + (g.must_change_pw ? ' <small>(invited)</small>' : "")).join(", ")}` : "No GM yet";
-    return `<article class="dcard pcard lift rise" style="--d:${(0.05 + i * 0.05).toFixed(2)}s" data-id="${esc(h.id)}" aria-label="${esc(h.name)}">
-      <div class="pc-top"><div class="pc-id"><h2>${esc(h.name)}</h2><div class="pc-meta">${brandName(h)} · ${sysName(h)}</div></div>${pill(h)}</div>
-      ${live ? `<div class="pc-nums"><div><b data-live="${esc(h.id)}">${h.live}</b><span>SOPs on</span></div><div><b>${h.pending}</b><span>updates waiting</span></div></div>` : `<div data-prog="${esc(h.id)}">${ownerProgressHtml(h)}</div>`}
-      <div class="pc-gm">${gm}</div>
-      <div class="pc-acts"><button type="button" class="gbtn dark press" data-open="${esc(h.id)}" aria-label="Open ${esc(h.name)} as GM">Open as GM</button>${!gms.length ? `<button type="button" class="gbtn press" data-gm="${esc(h.id)}">Invite GM</button>` : live ? "" : `<button type="button" class="gbtn press" data-remind="${esc(h.id)}">Copy reminder</button>`}</div>
-    </article>`;
-  }).join("");
-  const box = $("hotelCards");
-  box.querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => selectHotel(b.dataset.open, "admin")));
-  box.querySelectorAll("[data-gm]").forEach((b) => (b.onclick = () => openUser(null, { role: "GM", hotels: [b.dataset.gm] })));
-  box.querySelectorAll(".pcard").forEach(wzBindCopy);
-  loadOwnerProgress();
-}
-
-let draftBrand = "independent", draftSystem = "hotelkey";
-function radios(el, opts, cur, pick) {
-  el.innerHTML = opts.map(([v, l, d]) => `<button type="button" class="radio" role="radio" data-v="${v}" aria-checked="${v === cur}"><span class="body" style="flex:1"><span style="display:block;font-weight:500">${l}</span><span style="font-size:.8rem;color:var(--label2)">${d}</span></span>${checkSvg}</button>`).join("");
-  el.querySelectorAll("[data-v]").forEach((b) => (b.onclick = () => pick(b.dataset.v)));
-}
-function renderHotelPick() {
-  radios($("h-brand"), [["hilton", "Hilton", "Hilton brand standards apply"], ["independent", "Independent", "Lotus brand, no franchise standards"]], draftBrand, (v) => { draftBrand = v; renderHotelPick(); });
-  radios($("h-system"), [["pep", "PEP", "Hilton's name for HotelKey NextGen"], ["hotelkey", "HotelKey", "Front desk says HotelKey"]], draftSystem, (v) => { draftSystem = v; renderHotelPick(); });
-}
-$("newHotel").onclick = () => { $("h-name").value = ""; draftBrand = "independent"; draftSystem = "hotelkey"; renderHotelPick(); showSheet("hotelEd"); setTimeout(() => $("h-name").focus(), 380); };
-$("hotelEd").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const body = { name: $("h-name").value.trim(), brand: draftBrand, system: draftSystem };
-  if (!body.name) { $("h-name").focus(); toast("Add the hotel's name"); return; }
-  try {
-    await api("/api/owner/hotels", { hotel: false, body });
-    hideSheet(); portfolioStale(); await refreshMe(); renderOwner(true); toast(`Added ${body.name}`);
-  } catch (x) { fail(x); }
-});
-
-/* ----- master library by hotel (the chart) ----- */
-const AMEN = { breakfast: "Breakfast", pool: "Pool", pets: "Pets", laundry: "Laundry", market: "Market" };
-// One state per cell; the first that applies wins (the server decides, see /api/owner/matrix).
-const MX = {
-  on: ["On", "On at this hotel"],
-  off: ["Off", "Off at this hotel"],
-  na: ["N/A", "Doesn't apply to this hotel"],
-  upd: ["Update", "A newer Lotus version is waiting at this hotel"],
-  own: ["Own", "The hotel uses its own wording"],
-  hk: ["Review", "HotelKey wording needs your review before it can go out"],
-};
-const MX_FILTERS = [
-  ["all", "All", () => true],
-  ["diff", "Differs between hotels", (m) => new Set(m.st.map((s, i) => (s === "na" ? null : s + m.lv[i])).filter(Boolean)).size > 1],
-  ["upd", "Updates waiting", (m) => m.st.includes("upd")],
-  ["hk", "HotelKey to review", (m) => m.st.includes("hk")],
-  ["own", "Hotels' own wording", (m) => m.st.includes("own")],
-  ["draft", "Master drafts", (m) => m.s === "draft"],
-];
-const mxBusy = new Set();
-const mxHotel = (hi) => STATE.owner.matrix.hotels[hi];
-// Words for one cell: what it is, why, and what a tap does.
-function mxWords(m, hi) {
-  const H = mxHotel(hi), s = m.st[hi], on = m.lv[hi] === "1";
-  let why = MX[s][1];
-  if (s === "na") why = m.ap === "hilton" && H.brand !== "hilton" ? `Hilton hotels only, and ${H.short} isn't one` : `${H.short} has no ${(AMEN[m.rq] || "amenity").toLowerCase()}`;
-  else if (s === "upd" || s === "own") why += on ? "" : ", and it is turned off";
-  const lock = s === "na" ? "" : s === "hk" ? "" : !H.live ? `${H.name} isn't live yet. Its GM picks SOPs during setup.` : m.s === "draft" ? "This master SOP is a draft. Publish it before hotels can use it." : "";
-  const act = s === "na" ? "" : s === "hk" ? "Tap to open the HotelKey review" : lock ? "" : `Tap to turn ${on ? "off" : "on"}`;
-  return { why, lock, act, title: [why, lock, act].filter(Boolean).join(". ") };
-}
-function mxCellHtml(m, hi) {
-  const s = m.st[hi], w = mxWords(m, hi), H = mxHotel(hi), dead = s === "na" || (s !== "hk" && !!w.lock), live = m.lv[hi] === "1";
-  return `<div role="cell" class="mx-cell"><button type="button" class="mxc ${s}${(s === "upd" || s === "own") && !live ? " dim" : ""}${mxBusy.has(m.id + "|" + hi) ? " busy" : ""}" data-m="${esc(m.id)}" data-h="${hi}" ${dead ? 'aria-disabled="true"' : ""} title="${esc(w.title)}" aria-label="${esc(`${m.t} at ${H.name}: ${w.title}`)}">${MX[s][0]}</button></div>`;
-}
-function mxRowHtml(m) {
-  const X = STATE.owner.matrix, ok = m.st.map((s) => s !== "na"), y = ok.filter(Boolean).length, x = [...m.lv].filter((c, i) => c === "1" && ok[i]).length;
-  const meta = `${esc(m.id)} · v${m.v}${m.ap === "hilton" ? " · Hilton only" : ""}${m.rq ? " · needs " + esc((AMEN[m.rq] || m.rq).toLowerCase()) : ""}${m.s === "draft" ? " · Draft" : ""}`;
-  return `<div role="row" class="mx-row" data-row="${esc(m.id)}"><div role="rowheader" class="mx-sop"><button type="button" class="mx-t" data-open="${esc(m.id)}" aria-label="Open ${esc(m.t)}, ${esc(m.id)}">${esc(m.t)}</button><span class="mx-m">${meta}</span></div>${X.hotels.map((_, hi) => mxCellHtml(m, hi)).join("")}<div role="cell" class="mx-on"><b>${y ? `${x} of ${y}` : "–"}</b></div></div>`;
-}
-function mxChips() {
-  const X = STATE.owner.matrix;
-  $("masterFilters").innerHTML = MX_FILTERS.map(([k, l, fn]) => `<button type="button" class="mxchip press" data-f="${k}" aria-pressed="${k === mFilter}">${l}<span class="cnt">${X.masters.filter(fn).length}</span></button>`).join("");
-  $("masterFilters").querySelectorAll("button").forEach((b) => (b.onclick = () => { mFilter = b.dataset.f; renderMatrix(); }));
-}
-function renderMatrix() {
-  const X = STATE.owner.matrix, root = $("mxBody");
-  if (!X) { root.innerHTML = `<div class="empty">Loading…</div>`; return; }
-  $("mxLegend").innerHTML = Object.entries(MX).map(([k, [l, d]]) => `<li><span class="mxc sw ${k}" aria-hidden="true">${l}</span>${d}</li>`).join("");
-  mxChips();
-  const fn = MX_FILTERS.find((f) => f[0] === mFilter)[2], f = norm($("mFilter").value);
-  const rows = X.masters.filter((m) => fn(m) && (!f || norm(m.t + " " + m.kw + " " + m.id + " " + m.c).includes(f)));
-  const cats = [...X.cats, ...new Set(rows.map((m) => m.c).filter((c) => !X.cats.includes(c)))];
-  const byId = (a, b) => a.id.localeCompare(b.id, "en", { numeric: true });
-  const body = cats.map((c) => { const l = rows.filter((m) => m.c === c).sort(byId); return l.length ? `<div role="row" class="mx-g"><div role="rowheader" class="mx-gh">${esc(c)}</div></div>${l.map(mxRowHtml).join("")}` : ""; }).join("");
-  root.style.setProperty("--n", X.hotels.length);
-  root.setAttribute("role", "table"); root.setAttribute("aria-label", "Master SOPs by hotel");
-  root.innerHTML = `<div role="row" class="mx-row mx-hd"><div role="columnheader" class="mx-sop">SOP</div>${X.hotels.map((h) => `<div role="columnheader" class="mx-col" title="${esc(h.name)}"><span>${esc(h.short)}</span><small>${h.live ? (h.system === "pep" ? "PEP" : "HotelKey") : "Setting up"}</small></div>`).join("")}<div role="columnheader" class="mx-on">On at</div></div>${body || `<div class="empty">No SOPs match.</div>`}`;
-  $("masterCount").textContent = `${rows.length} of ${X.masters.length} SOP${X.masters.length === 1 ? "" : "s"}`;
-}
-// Redraws one row in place (keeps scroll position and puts focus back on the tapped cell).
-function mxPatch(m, hi) {
-  const el = $("mxBody").querySelector(`[data-row="${CSS.escape(m.id)}"]`);
-  if (!el) return;
-  const had = document.activeElement && document.activeElement.dataset.h === String(hi) && el.contains(document.activeElement);
-  const t = document.createElement("template"); t.innerHTML = mxRowHtml(m); el.replaceWith(t.content.firstElementChild);
-  if (had) { const b = $("mxBody").querySelector(`[data-row="${CSS.escape(m.id)}"] [data-h="${hi}"]`); if (b) b.focus({ preventScroll: true }); }
-  mxChips();
-}
-async function mxToggle(mid, hi) {
-  const X = STATE.owner.matrix, m = X.masters.find((x) => x.id === mid), H = X.hotels[hi], key = mid + "|" + hi;
-  if (!m || mxBusy.has(key)) return;
-  const was = m.lv[hi] === "1", on = !was, before = m.st[hi];
-  const set = (live, st) => { m.lv = m.lv.slice(0, hi) + (live ? "1" : "0") + m.lv.slice(hi + 1); m.st[hi] = st; };
-  const stFor = (live) => (before === "on" || before === "off" ? (live ? "on" : "off") : before);
-  set(on, stFor(on)); mxBusy.add(key); mxPatch(m, hi);
-  const card = (d) => { const h = (STATE.owner.hotels || []).find((x) => x.id === H.id); if (h) { h.live += d; const el = document.querySelector(`[data-live="${CSS.escape(H.id)}"]`); if (el) el.textContent = h.live; } };
-  try {
-    await api(`/api/owner/hotels/${encodeURIComponent(H.id)}/sops/${encodeURIComponent(mid)}`, { hotel: false, method: "PUT", body: { on } });
-    card(on ? 1 : -1);
-    toast(`${m.t} is ${on ? "on" : "off"} at ${H.short}`);
-  } catch (e) { set(was, before); fail(e); }
-  mxBusy.delete(key); mxPatch(m, hi);
-}
-$("mxScroll").addEventListener("scroll", (e) => e.currentTarget.classList.toggle("mxsl", e.currentTarget.scrollLeft > 4), { passive: true });
-$("mxBody").addEventListener("click", (e) => {
-  const t = e.target.closest("[data-open]");
-  if (t) return openMasterLoaded(t.dataset.open);
-  const c = e.target.closest(".mxc[data-m]");
-  if (!c || c.getAttribute("aria-disabled") === "true" || c.classList.contains("sw")) { if (c && c.getAttribute("aria-disabled") === "true") toast(c.title.split(". ")[0]); return; }
-  const m = STATE.owner.matrix.masters.find((x) => x.id === c.dataset.m);
-  if (m.st[+c.dataset.h] === "hk") return openMasterLoaded(m.id);
-  mxToggle(m.id, +c.dataset.h);
-});
-$("mFilter").oninput = () => renderMatrix();
-$("masterDetailsSec").addEventListener("toggle", async (e) => {
-  if (!e.target.open) return;
-  try { if (!STATE.owner.master) await loadMaster(); } catch (x) { return fail(x); }
-  const det = STATE.owner.master.details;
-  $("masterDetails").innerHTML = det.map((d) => `<div class="cell"><span class="body"><span class="t"><span class="tokchip">${esc(d.key)}</span></span><span class="m">${d.example ? "e.g. " + esc(d.example) + " · " : ""}Used in ${d.uses} SOP${d.uses === 1 ? "" : "s"}</span></span></div>`).join("") || `<div class="empty">No details yet.</div>`;
-});
-$("newMaster").onclick = async () => {
-  try { if (!STATE.owner.master) await loadMaster(); } catch (e) { return fail(e); }
-  STATE.settings.aiOn ? studioOpen({ target: "master" }) : openMaster(null);
-};
-
-let em = null, mDraft = null, mView = "pep", mSaving = false;
-const mSeg = Seg($("mView"), (v) => { mView = v; mSeg(v); renderMasterView(); });
-const chipify = (t) => esc(t).replace(/\{([^}]+)\}/g, '<span class="tokchip">$1</span>');
-function openMaster(id, preset) {
-  const M = STATE.owner.master;
-  em = id ? M.sops.find((m) => m.id === id) : null;
-  mDraft = em ? { steps: em.steps.map((s) => ({ t: s.t, hk: s.hk ?? null, img: s.img || null })) } : { steps: [{ t: "", hk: null, img: null }] };
-  $("mTitleBar").textContent = em ? em.id : "New master SOP";
-  paintMasterStatus();
-  $("m-title").value = em ? em.title : "";
-  $("m-cat").innerHTML = M.cats.map((c) => `<option>${esc(c.name)}</option>`).join("");
-  $("m-cat").value = em ? em.cat : M.cats[0].name;
-  $("m-applies").value = em ? em.applies : "all";
-  $("m-requires").value = em && em.requires ? em.requires : "";
-  $("m-script").value = em ? em.script : ""; $("m-script-hk").value = em && em.script_hk ? em.script_hk : "";
-  $("m-flag").value = em ? em.flag : ""; $("m-flag-hk").value = em && em.flag_hk ? em.flag_hk : "";
-  $("m-kw").value = em ? em.kw : "";
-  mView = "pep";
-  $("mAi").hidden = !STATE.settings.aiOn;
-  showSheet("masterEd"); mSeg("pep", false); renderMasterView();
-  if (preset) fillMasterEditor(preset);
-}
-// Puts an AI draft into the open master editor. HotelKey wording is kept for steps whose PEP text did not change.
-function fillMasterEditor(p) {
-  const old = mDraft.steps, M = STATE.owner.master;
-  const steps = (p.steps || []).map((x) => { const o = old.find((y) => y.t === x.t); return { t: x.t, hk: o ? o.hk : null, img: x.img || null }; });
-  const dropped = old.filter((o) => o.hk && !steps.some((x) => x.hk === o.hk)).length;
-  mDraft.steps = steps.length ? steps : [{ t: "", hk: null, img: null }];
-  $("m-title").value = p.title || "";
-  if (p.category && M.cats.some((c) => c.name === p.category)) $("m-cat").value = p.category;
-  if ((p.script || "") !== $("m-script").value.trim()) $("m-script-hk").value = "";
-  if ((p.flag || "") !== $("m-flag").value.trim()) $("m-flag-hk").value = "";
-  $("m-script").value = p.script || ""; $("m-flag").value = p.flag || ""; $("m-kw").value = p.kw || "";
-  mView = "pep"; mSeg("pep", false); renderMasterView();
-  if (dropped) toast(`HotelKey wording was cleared on ${dropped} step${dropped === 1 ? "" : "s"} you changed. Check the HotelKey tab.`);
-}
-$("mAi").onclick = () => { hideSheet(); studioOpen({
-  target: "master", sopId: em ? em.id : null,
-  seed: { title: $("m-title").value.trim(), category: $("m-cat").value, steps: mDraft.steps.filter((x) => (x.t || "").trim() || x.img).map((x) => ({ t: (x.t || "").trim(), img: x.img })), script: $("m-script").value.trim(), flag: $("m-flag").value.trim(), kw: $("m-kw").value.trim() },
-}); };
-// Draft or live: drafts are not offered to hotels until published.
-function paintMasterStatus() {
-  const draft = !!em && em.status === "draft";
-  $("mStatusState").innerHTML = !em ? `<span class="status draft">Draft</span>` : draft ? `<span class="status draft">Draft</span>` : `<span class="status ok">Live</span>`;
-  $("mStatusHint").textContent = !em
-    ? "New SOPs start as drafts. Save it, finish writing, then publish it when it is ready for hotels."
-    : draft ? "Hotels can't see this yet. Publish it to offer it to every hotel as New from Lotus." : "Offered to hotels. Edits show up as updates they can accept or keep their own wording.";
-  $("mPublish").hidden = !draft;
-}
-function renderMasterView() {
-  const hk = mView === "hk";
-  stepEditor($("mSteps"), mDraft.steps, { field: hk ? "hk" : "t", focus: mDraft.focus, onInput: renderMasterPreview, redraw: (i) => { mDraft.focus = i; renderMasterView(); mDraft.focus = null; } });
-  $("m-script").closest(".fld").hidden = hk; $("m-flag").closest(".fld").hidden = hk;
-  $("m-script-hk").closest(".fld").hidden = !hk; $("m-flag-hk").closest(".fld").hidden = !hk;
-  $("mViewHint").textContent = hk
-    ? "This is what a HotelKey hotel's front desk reads. Leave a step blank to use the PEP wording."
-    : "The default wording. Hilton hotels that say PEP use this, and so does any HotelKey step left blank.";
-  const st = em ? em.hk_status : "same";
-  $("mHkRow").hidden = !em;
-  $("mHkState").innerHTML = st === "draft" ? `<span class="status draft">Needs review</span>` : st === "approved" ? `<span class="status ok">Approved</span>` : `<span class="status off">Same as PEP</span>`;
-  $("mApprove").hidden = st !== "draft";
-  renderMasterPreview();
-  growAll();
-}
-function renderMasterPreview() {
-  const hk = mView === "hk";
-  const pick = (t, h) => (hk && h ? h : t);
-  const lines = mDraft.steps.filter((s) => s.t || s.img).map((s, i) => `<div class="prevLine"><b>${i + 1}</b><span>${chipify(pick(s.t, s.hk))}</span></div>`);
-  const sc = hk ? $("m-script-hk").value || $("m-script").value : $("m-script").value, fl = hk ? $("m-flag-hk").value || $("m-flag").value : $("m-flag").value;
-  if (sc) lines.push(`<div class="prevLine"><b>Say</b><span>${chipify(sc)}</span></div>`);
-  if (fl) lines.push(`<div class="prevLine"><b>Call</b><span>${chipify(fl)}</span></div>`);
-  $("mPreview").innerHTML = lines.join("") || `<div class="empty">Nothing yet.</div>`;
-}
-["m-script", "m-script-hk", "m-flag", "m-flag-hk"].forEach((id) => ($(id).oninput = () => renderMasterPreview()));
-$("mAddStep").onclick = () => { mDraft.steps.push({ t: "", hk: null, img: null }); mDraft.focus = mDraft.steps.length - 1; renderMasterView(); mDraft.focus = null; };
-$("mPublish").onclick = async () => {
-  if (!em || em.status !== "draft") return;
-  if (!confirm(`Publish ${em.id} to hotels? Every hotel it fits will see it as New from Lotus.`)) return;
-  try {
-    const out = await api(`/api/master/${encodeURIComponent(em.id)}/publish`, { hotel: false, body: {} });
-    Object.assign(em, out); paintMasterStatus(); portfolioStale(); renderOwner(true); toast(`${em.id} published to hotels`);
-  } catch (e) { fail(e); }
-};
-$("mApprove").onclick = async () => {
-  if (!em) return;
-  try {
-    const out = await api(`/api/master/${encodeURIComponent(em.id)}/approve-hk`, { hotel: false, body: {} });
-    Object.assign(em, out); renderMasterView(); portfolioStale(); renderOwner(true); toast("HotelKey wording approved");
-  } catch (e) { fail(e); }
-};
-$("masterEd").addEventListener("submit", async (e) => {
-  e.preventDefault(); if (mSaving) return;
-  const d = {
-    title: $("m-title").value.trim(), cat: $("m-cat").value,
-    steps: mDraft.steps.map((s) => ({ t: (s.t || "").trim(), hk: (s.hk || "").trim() || null, img: s.img })).filter((s) => s.t || s.img),
-    script: $("m-script").value.trim(), script_hk: $("m-script-hk").value.trim() || null,
-    flag: $("m-flag").value.trim(), flag_hk: $("m-flag-hk").value.trim() || null,
-    kw: $("m-kw").value.trim(), applies: $("m-applies").value, requires: $("m-requires").value || null,
-  };
-  if (!d.title) { $("m-title").focus(); toast("Add a title"); return; }
-  if (!d.steps.length) { toast("Add at least one step"); return; }
-  mSaving = true;
-  try {
-    const out = em ? await api(`/api/master/${encodeURIComponent(em.id)}`, { hotel: false, method: "PUT", body: d }) : await api("/api/master", { hotel: false, body: d });
-    const M = STATE.owner.master;
-    if (em) Object.assign(em, out); else M.sops.push(out);
-    toast(`Saved ${out.id}${out.status === "draft" ? " as a draft" : ` v${out.ver}`}${out.hotelsWithUpdate ? ` · ${out.hotelsWithUpdate} hotel${out.hotelsWithUpdate === 1 ? " has" : "s have"} an update` : ""}`);
-    hideSheet(); portfolioStale(); renderOwner(true); studioSaved(out, true);
-  } catch (x) { fail(x); }
-  mSaving = false;
-});
+/* ---------- owner: Portfolio lives in portfolio.js ---------- */
 
 /* ---------- PDF guides: read on this device, screenshots uploaded, then only the structure goes to the server ---------- */
 // The server has little memory, so it never opens a PDF. pdf.js is loaded from the app the first time a PDF is attached.

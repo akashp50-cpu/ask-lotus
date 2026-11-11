@@ -111,7 +111,7 @@
       <div id="tab-sops" class="tabp" hidden>
         <div class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="7" cy="7" r="5"/><path d="m11 11 3.5 3.5"/></svg><input id="filter" placeholder="Search SOPs" aria-label="Search SOPs"></div>
         <div class="pills small" id="cats" style="padding-top:10px"></div>
-        <div class="sec"><span id="libCount">SOPs</span><span class="secb"><button id="libManage" hidden>SOPs on and off</button><button id="newSop">New SOP</button></span></div>
+        <div class="sec"><span id="libCount">SOPs</span><span class="secb"><button id="libAll">Expand all</button><button id="libManage" hidden>SOPs on and off</button><button id="newSop">New SOP</button></span></div>
         <div class="group" id="sopList"></div>
         <p class="foot">Saving publishes to the front desk chat and bumps the version number.</p>
       </div>
@@ -206,21 +206,22 @@
     <section id="owner" hidden>
       <div id="ownerPortfolio">
         <div class="dhead rise"><div><h1>Portfolio</h1><p id="ownerSub"></p></div>
-          <div class="dact"><button type="button" class="gbtn press" id="newHotel">Add hotel</button><button type="button" class="gbtn dark press" id="newMaster">New master SOP</button></div></div>
-        <div class="pgrid" id="hotelCards" aria-label="Hotels"></div>
-        <section class="dcard pmat" id="matrixCard" aria-labelledby="mxHead">
-          <div class="dhd"><div><h2 id="mxHead">Master library by hotel</h2><div class="dsub">Each SOP across your hotels. Tap a cell to turn it on or off there.</div></div>
-            <label class="mxsearch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="mFilter" type="search" placeholder="Search SOPs" aria-label="Search master SOPs by title, number, keyword or category" autocomplete="off"></label></div>
-          <div class="mxchips" id="masterFilters" role="group" aria-label="Show"></div>
-          <ul class="mxleg" id="mxLegend" aria-label="Key"></ul>
-          <div class="mxscroll" id="mxScroll" tabindex="0" role="region" aria-label="Master SOPs by hotel. Scrolls sideways on small screens."><div id="mxBody"></div></div>
-          <p class="mxfoot" id="masterCount" aria-live="polite"></p>
+          <div class="dact"><button type="button" class="gbtn dark press" id="newHotel">Add hotel</button></div></div>
+        <div class="pftabs rise" style="--d:.04s"><div class="pftabbar" id="pfTabs" role="tablist" aria-label="Brand group"></div>
+          <button type="button" class="pfplus press" id="pfPlus" aria-label="Add a brand or PMS" title="Add a brand or PMS"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></div>
+        <section class="dcard pmat rise" style="--d:.08s" id="matrixCard" aria-label="SOPs by hotel">
+          <div class="pftool">
+            <label class="mxsearch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="pfSearch" type="search" placeholder="Search" aria-label="Search SOPs by title, number, keyword or section" autocomplete="off"></label>
+            <div class="pfsegs" id="pfFilters" role="group" aria-label="Show"></div>
+            <span class="pfgrow"></span>
+            <div class="pfkey" id="pfKey" aria-label="Key"></div>
+          </div>
+          <div class="pfscroll" id="pfScroll" tabindex="0" role="region" aria-label="SOPs by hotel. Scrolls sideways on small screens."><div id="pfBody"></div></div>
+          <div class="pffoot"><button type="button" class="pfall press" id="pfAll">Expand all</button><button type="button" class="pfall press" id="pfAdd2">Add hotel</button></div>
         </section>
-        <details class="dcard pdet" id="masterDetailsSec" hidden>
-          <summary>Hotel details used in SOPs</summary>
-          <div class="group" id="masterDetails"></div>
-        </details>
-        <p class="foot">Editing a master SOP bumps its version. Each hotel then sees it as an update to accept or keep their own. New and imported SOPs start as drafts: hotels only see them once you publish.</p>
+        <div class="sec"><span>Hotels</span></div>
+        <div class="pgrid" id="hotelCards" aria-label="Hotels"></div>
+        <p class="foot">Suggestions go to the GMs of the other hotels in the same brand group. Nothing changes at a hotel until its GM adds, uses or tweaks it.</p>
       </div>
       <div style="height:40px"></div>
     </section>
@@ -289,7 +290,9 @@
         <div class="form">
           <label class="fld"><span>Title</span><input id="f-title"></label>
           <label class="fld"><span>Category</span><select id="f-cat"></select></label>
+          <label class="fld"><span>Type</span><select id="f-kind"><option value="">Pick for me</option><option value="general">General: same in any system</option><option value="pms">PMS: walks through screens</option><option value="brand">Brand: a brand program</option></select></label>
         </div>
+        <p class="hint">Type decides which hotels get this SOP when a new hotel copies from this one.</p>
         <div class="sec"><span>Steps</span><button type="button" id="edAi" hidden>Edit with AI</button></div>
         <div class="stepsEd" id="stepsEd"></div>
         <button type="button" class="plain press" id="addStep" style="margin-top:8px">Add Step</button>
@@ -305,6 +308,7 @@
         <p class="hint">Comma separated, e.g. "late check out, stay later, extend checkout".</p>
         <div class="sec"><span>Visibility</span></div>
         <div class="form"><div class="rowline"><span>Live for front desk<small id="f-statusNote"></small></span><button type="button" class="switch" id="f-status" role="switch" aria-label="Live for front desk"><i></i></button></div></div>
+        <div class="form"><div class="rowline"><span>This hotel only<small>Don't suggest this to the other hotels in the group.</small></span><button type="button" class="switch" id="f-only" role="switch" aria-checked="false" aria-label="This hotel only"><i></i></button></div></div>
         <button type="button" class="danger" id="delEd">Delete SOP</button>
       </div>
     </form>
@@ -319,45 +323,42 @@
       <div class="sbody">
         <div class="form"><label class="fld"><span>Hotel name</span><input id="h-name" autocomplete="off" placeholder="e.g. Hotel Lotus Westport"></label></div>
         <div class="sec"><span>Brand</span></div>
-        <div class="group" id="h-brand" role="radiogroup" aria-label="Brand"></div>
-        <div class="sec"><span>Property system</span></div>
-        <div class="group" id="h-system" role="radiogroup" aria-label="Property system"></div>
+        <div class="pfchips" id="h-brand"></div>
+        <div class="sec"><span>PMS</span></div>
+        <div class="pfchips" id="h-system"></div>
+        <div class="sec"><span>Copy SOPs from</span></div>
+        <div class="pfchips" id="h-from"></div>
+        <div id="h-prev"></div>
         <p class="hint">The hotel starts as Not started. Its GM sets it up, picks which procedures apply, and goes live.</p>
       </div>
     </form>
 
-    <form id="masterEd" hidden>
-      <div class="sbar"><button type="button" class="cancel">Cancel</button><h2 id="mTitleBar">Master SOP</h2><button type="submit" class="done">Save</button></div>
+    <form id="listEd" hidden>
+      <div class="sbar"><button type="button" class="cancel">Done</button><h2>Brands and PMS</h2><span style="min-width:68px"></span></div>
       <div class="sbody">
-        <div class="form">
-          <label class="fld"><span>Title</span><input id="m-title"></label>
-          <label class="fld"><span>Category</span><select id="m-cat"></select></label>
-          <label class="fld"><span>Applies to</span><select id="m-applies"><option value="all">Every hotel</option><option value="hilton">Hilton hotels only</option></select></label>
-          <label class="fld"><span>Only if the hotel has</span><select id="m-requires"><option value="">None</option><option value="breakfast">Breakfast</option><option value="pool">Pool</option><option value="pets">Pets</option><option value="laundry">Laundry</option><option value="market">Market</option></select></label>
+        <div class="pfchips" id="l-kind"></div>
+        <div class="group" id="l-list" style="margin-top:14px"></div>
+        <div id="l-brandf">
+          <div class="sec"><span>New brand</span></div>
+          <div class="form"><label class="fld"><span>Name</span><input id="l-bname" autocomplete="off" placeholder="e.g. Marriott"></label></div>
+          <button type="button" class="plain press" id="l-bsave" style="margin-top:8px">Add brand</button>
         </div>
-        <div class="sec"><span>Wording</span><button type="button" id="mAi" hidden>Edit with AI</button></div>
-        <div class="seg viewseg" id="mView" role="tablist" aria-label="Wording view"><span class="thumb"></span><button type="button" role="tab" data-v="pep" class="press">PEP</button><button type="button" role="tab" data-v="hk" class="press">HotelKey</button></div>
-        <p class="hint" id="mViewHint"></p>
-        <div class="stepsEd" id="mSteps" style="margin-top:10px"></div>
-        <button type="button" class="plain press" id="mAddStep" style="margin-top:8px">Add Step</button>
-        <div class="sec"><span>Guest-facing</span></div>
-        <div class="form">
-          <label class="fld"><span>What to say to the guest</span><textarea id="m-script" rows="2"></textarea></label>
-          <label class="fld" hidden><span>What to say to the guest (HotelKey)</span><textarea id="m-script-hk" rows="2" placeholder="Same as PEP"></textarea></label>
-          <label class="fld"><span>Call the manager if</span><textarea id="m-flag" rows="2"></textarea></label>
-          <label class="fld" hidden><span>Call the manager if (HotelKey)</span><textarea id="m-flag-hk" rows="2" placeholder="Same as PEP"></textarea></label>
+        <div id="l-pmsf" hidden>
+          <div class="sec"><span>PMS details</span></div>
+          <div class="form">
+            <label class="fld"><span>Name</span><input id="l-pname" autocomplete="off" placeholder="e.g. HotelKey NextGen"></label>
+            <label class="fld"><span>What staff call it</span><input id="l-pstaff" autocomplete="off" placeholder="e.g. HotelKey"></label>
+            <label class="fld"><span>Wording rules for the AI</span><textarea id="l-prules" rows="3" placeholder='e.g. Say "HotelKey". The folio is called the Guest Ledger.'></textarea></label>
+          </div>
+          <p class="hint">The AI follows these rules when it writes or imports SOPs for hotels on this PMS.</p>
+          <button type="button" class="plain press" id="l-psave" style="margin-top:8px">Add PMS</button>
         </div>
-        <div class="sec"><span>Matching</span></div>
-        <div class="form"><label class="fld"><span>Ways staff might ask</span><input id="m-kw"></label></div>
-        <p class="hint">Comma separated. Type {Role} for a contact or {Detail name} for a hotel detail, like {Breakfast hours}. Each hotel fills these in.</p>
-        <div class="sec" id="mStatusRow"><span>Status</span><span id="mStatusState"></span></div>
-        <p class="hint" id="mStatusHint" style="margin-top:0"></p>
-        <button type="button" class="plain press" id="mPublish" style="margin-top:4px" hidden>Publish to hotels</button>
-        <div class="sec" id="mHkRow"><span>HotelKey wording</span><span id="mHkState"></span></div>
-        <button type="button" class="plain press" id="mApprove" style="margin-top:4px" hidden>Approve HotelKey wording</button>
-        <div class="sec"><span>Preview</span></div>
-        <div class="group prev" id="mPreview"></div>
       </div>
+    </form>
+
+    <form id="sopView" hidden>
+      <div class="sbar"><button type="button" class="cancel">Close</button><h2 id="svTitle">SOP</h2><span style="min-width:68px"></span></div>
+      <div class="sbody"><div id="svBody"></div><p class="foot">Each hotel's own wording. Edit a SOP from that hotel's Library.</p></div>
     </form>
 
     <form id="contactEd" hidden>
@@ -402,5 +403,6 @@
 <script src="/dash.js"></script>
 <script src="/studio.js"></script>
 <script src="/app.js"></script>
+<script src="/portfolio.js"></script>
 </body>
 </html>

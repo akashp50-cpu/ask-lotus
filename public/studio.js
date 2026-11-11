@@ -5,7 +5,7 @@
 
 const ST_FRESH = () => ({
   thread: [], batches: {}, notes: {}, sel: null,
-  draft: null, draftId: null, last: null, updateId: null, sopId: null, seed: null, savedId: null, savedStatus: "", queue: [], picks: new Set(),
+  draft: null, draftId: null, last: null, updateId: null, sopId: null, seed: null, hotelOnly: false, suggestion: null, kind: null, savedId: null, savedStatus: "", queue: [], picks: new Set(),
   cardAu: {}, catPick: {}, hotelPick: {}, pending: [], docs: [], busy: "", acting: false, pane: "chat", editFor: null,
   list: null, popOpen: false, loadBatch: null, tok: ++ST_TOK,
 });
@@ -19,8 +19,8 @@ const stIsSheet = (f) => /\.(xlsx|csv)$/i.test(f.name);
 const stFmtSize = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
 const stCanDocs = () => isGM();
 const stAiOn = () => !!(STATE.settings && STATE.settings.aiOn);
-const stAuthorTarget = () => (ST.tgt === "master" ? "master" : "hotel");
-const stWhere = () => (ST.tgt === "master" ? "the master library" : hotelName(ST.tgt));
+const stAuthorTarget = () => "hotel";
+const stWhere = () => hotelName(ST.tgt);
 const stKey = (bid, g, i) => `${bid}:${g}:${i}`;
 // Text for a step: tokens as chips, [FILL] gaps marked, [CHECK] notes never shown.
 const stTxt = (t) => chipify(String(t || "").replace(/\[CHECK:[^\]]*\]|\[CHECK\]/gi, "")).replace(/\[FILL:?([^\]]*)\]/g, (m, x) => `<span class="stFill">[FILL${x ? ":" + x : ""}]</span>`);
@@ -42,13 +42,15 @@ function stIntro() {
     ? `What should we write? Tell me the procedure, send photos of the screens, or drop in documents. I'll turn them into SOPs for ${stWhere()}.`
     : `What should we write? Tell me the procedure or send photos of the screens. I'll turn them into an SOP for ${stWhere()}.`;
 }
-// target: "master" (Owner) or a hotel id. sopId/seed: edit that SOP with AI. batchId: open that waiting upload.
+// target: a hotel id. sopId/seed: edit that SOP with AI. batchId: open that waiting upload. suggestion: the id of a suggestion being tweaked (saving it closes it).
 function studioOpen(o = {}) {
   studioDiscard();
   const h = location.hash, back = !h || /^#(studio|import)$/.test(h) ? "#admin" : h;
   Object.assign(ST, ST_FRESH(), { active: true, back: mode === "studio" ? ST.back : back });
-  ST.tgt = o.target === "master" && isOwner() ? "master" : o.target && o.target !== "master" ? o.target : STATE.hotel;
+  ST.tgt = o.target || STATE.hotel;
+  ST.suggestion = o.suggestion || null; ST.kind = (o.seed && o.seed.kind) || null;
   ST.sopId = o.sopId || null;
+  if (o.sopId && sop(o.sopId) && o.suggestion) ST.updateId = o.sopId; // tweaking a change suggestion: saving replaces our copy
   if (o.seed && o.seed.title) { ST.seed = o.seed; ST.draft = o.seed; ST.sel = { k: "draft" }; }
   ST.thread = [{ role: "bot", text: stIntro() }];
   ST.loadBatch = o.batchId || null;
@@ -61,7 +63,7 @@ async function studioEnter() {
     Object.assign(ST, ST_FRESH(), { active: true, back: "#admin", tgt: STATE.hotel });
     ST.thread = [{ role: "bot", text: stIntro() }];
   }
-  if (ST.tgt !== "master" && ST.tgt !== STATE.hotel) ST.tgt = STATE.hotel;
+  if (ST.tgt !== STATE.hotel) ST.tgt = STATE.hotel;
   stRenderAll();
   if (stCanDocs() && !ST.info) {
     try { ST.info = await api("/api/import/info", { hotel: false }); stRenderHead(); stRenderComposer(); } catch (e) { /* the page still works without the limits */ }
@@ -80,9 +82,9 @@ function studioDiscard() {
 /* ---------- header, target ---------- */
 function stRenderHead() {
   const editing = ST.sopId || (ST.seed && ST.seed.title);
-  $("stTitle").textContent = ST.sopId ? `Edit ${ST.sopId} with AI` : editing ? "Edit with AI" : ST.tgt === "master" ? "New master SOP with AI" : "New SOP with AI";
+  $("stTitle").textContent = ST.sopId ? `Edit ${ST.sopId} with AI` : editing ? "Edit with AI" : "New SOP with AI";
   $("stSub").textContent = editing ? "Tell me what to change. Attach a screenshot if it helps." : "Describe a procedure, attach photos, or drop documents and PDF guides, one or many.";
-  const opts = isOwner() && ST.info ? [["master", "Master library"], ...ST.info.hotels.map((h) => [h.id, h.name])] : [];
+  const opts = isOwner() && ST.info ? ST.info.hotels.map((h) => [h.id, h.name]) : [];
   const wrap = $("stTargetWrap"); wrap.hidden = opts.length < 2 || !!editing;
   if (!wrap.hidden) { $("stTarget").innerHTML = opts.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join(""); $("stTarget").value = ST.tgt; }
   $("stEarlier").hidden = !stCanDocs();
@@ -92,7 +94,7 @@ async function stSetTarget(v) {
   const has = ST.thread.length > 1 || ST.draft || Object.keys(ST.batches).length;
   if (has && !confirm("Switching clears this conversation. Uploads you haven't finished stay under Earlier uploads.")) { $("stTarget").value = ST.tgt; return; }
   studioDiscard();
-  if (v !== "master" && v !== STATE.hotel) {
+  if (v !== STATE.hotel) {
     try {
       STATE.hotel = v; try { localStorage.setItem("asklotus.hotel", v); } catch {}
       newChat(true); renderPropMenu(); await loadHotel();
@@ -145,14 +147,14 @@ function stBatchNotes(b, m) {
 }
 
 function stCardHtml(b, g, it, i) {
-  const key = stKey(b.id, g, i), on = ST.sel && ST.sel.k === "item" && ST.sel.bid === b.id && ST.sel.g === g && ST.sel.i === i, done = stDoneText(it, key), master = b.target === "master";
+  const key = stKey(b.id, g, i), on = ST.sel && ST.sel.k === "item" && ST.sel.bid === b.id && ST.sel.g === g && ST.sel.i === i, done = stDoneText(it, key);
   let title, meta, tag, tagCls, acts = "";
   if (g === "new") {
     title = it.title; tag = "New"; tagCls = "new";
     meta = [stSrc(b, it), plural(it.steps.length, "step"), it.imgs ? plural(stShots(it), "screenshot") : ""].filter(Boolean).join(" · ");
     if (!done) acts = `${it.category ? "" : `<select class="stSel" data-cat="${esc(key)}" aria-label="Category for ${esc(it.title)}"><option value="">Pick a category</option>${b.cats.map((c) => `<option${ST.catPick[key] === c ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>`}
       <button type="button" class="stBtn" data-act="skip" data-b="${b.id}" data-g="new" data-i="${i}" data-fk="act:${key}:skip">Skip</button>
-      <button type="button" class="stBtn dark" data-act="add" data-b="${b.id}" data-g="new" data-i="${i}" data-fk="act:${key}:add">${master ? "Add to master as draft" : "Add as draft"}</button>`;
+      <button type="button" class="stBtn dark" data-act="add" data-b="${b.id}" data-g="new" data-i="${i}" data-fk="act:${key}:add">Add as draft</button>`;
   } else if (g === "matches") {
     title = it.ours ? it.ours.title : it.title; tag = "Matches your SOP"; tagCls = "match";
     meta = [stSrc(b, it), plural(it.steps.length, "step"), it.imgs ? plural(stShots(it), "screenshot") : ""].filter(Boolean).join(" · ");
@@ -160,9 +162,8 @@ function stCardHtml(b, g, it, i) {
       <button type="button" class="stBtn dark" data-act="use" data-b="${b.id}" data-g="matches" data-i="${i}" data-fk="act:${key}:use" ${it.ours && !it.ours.library ? "" : "disabled"}>${it.imgs ? "Use the guide's steps" : "Use these steps"}</button>`;
   } else {
     title = it.key; tag = "Hotel detail"; tagCls = "det"; meta = it.value + (it.known ? "" : " · new detail name");
-    if (!done) acts = `${master ? `<select class="stSel" data-dh="${esc(key)}" aria-label="Hotel for ${esc(it.key)}"><option value="">Pick a hotel</option>${(ST.info ? ST.info.hotels : []).map((h) => `<option value="${esc(h.id)}"${ST.hotelPick[key] === h.id ? " selected" : ""}>${esc(h.name)}</option>`).join("")}</select>` : ""}
-      <button type="button" class="stBtn" data-act="skip" data-b="${b.id}" data-g="details" data-i="${i}" data-fk="act:${key}:skip">Skip</button>
-      <button type="button" class="stBtn dark" data-act="apply" data-b="${b.id}" data-g="details" data-i="${i}" data-fk="act:${key}:apply">${master ? "Save" : "Save for " + esc(hotelName(b.target))}</button>`;
+    if (!done) acts = `<button type="button" class="stBtn" data-act="skip" data-b="${b.id}" data-g="details" data-i="${i}" data-fk="act:${key}:skip">Skip</button>
+      <button type="button" class="stBtn dark" data-act="apply" data-b="${b.id}" data-g="details" data-i="${i}" data-fk="act:${key}:apply">Save for ${esc(hotelName(b.target))}</button>`;
   }
   return `<div class="stCard${on ? " on" : ""}${done ? " done" : ""}" data-card="${esc(key)}">
     <div class="stCardTop"><button type="button" class="stCardMain" data-sel="${esc(key)}" data-fk="sel:${esc(key)}" aria-pressed="${on}"><span class="stCardT">${esc(title)}</span><span class="stCardM">${esc(meta)}</span></button><span class="stTag ${tagCls}">${tag}</span></div>
@@ -176,7 +177,7 @@ function stResHtml(m) {
   return `<div class="stRes"><div class="stMsg bot">${esc(stFound(b))}</div>
     ${notes.map((n) => `<p class="stNote">${esc(n)}</p>`).join("")}
     <div class="stCards">${cards}</div>
-    ${openNew > 1 ? `<button type="button" class="stBtn dark stAll" data-all="${b.id}" data-fk="all:${b.id}">${b.target === "master" ? "Add all new to master as drafts" : "Add all new as drafts"}</button>` : ""}
+    ${openNew > 1 ? `<button type="button" class="stBtn dark stAll" data-all="${b.id}" data-fk="all:${b.id}">Add all new as drafts</button>` : ""}
     <button type="button" class="stLink" data-discard="${b.id}" data-fk="discard:${b.id}">Discard these results</button></div>`;
 }
 function stMsgHtml(m, i, liveIdx) {
@@ -222,27 +223,24 @@ function stRenderThread(scroll = "keep") {
 function stPaneModel() {
   const si = stSelItem();
   if (si) {
-    const { it, b, g, key } = si, done = stDoneText(it, key), master = b.target === "master";
+    const { it, b, g, key } = si, done = stDoneText(it, key);
     if (g === "new") return { kicker: "DRAFT PREVIEW", tag: ["new", "New"], title: it.title, sub: `${it.category || "Needs a category"} · from ${stSrc(b, it) || "your documents"}`, steps: it.steps, imgs: it.imgs, script: it.script, flag: it.flag, done, key, item: si,
-      acts: done ? [] : [["edit", "Edit", ""], ["add", master ? "Add to master as draft" : "Add as draft", "dark"]] };
+      acts: done ? [] : [["edit", "Edit", ""], ["add", "Add as draft", "dark"]] };
     if (g === "matches") return { kicker: "COMPARE WITH YOUR SOP", tag: ["match", "Matches your SOP"], title: it.ours ? it.ours.title : it.title, sub: `${it.sop_id}${it.difference ? " · " + it.difference : ""} · from ${stSrc(b, it) || "your documents"}`, steps: it.steps, imgs: it.imgs, script: it.script, flag: it.flag, done, key, item: si,
       cmp: it.ours ? { label: it.ours.library ? "In the library" : "Your SOP today", steps: it.ours.steps } : null, mineLabel: it.imgs ? "From the guide" : "Proposed steps",
       acts: done ? [] : [["edit", "Edit", "", !it.ours || it.ours.library], ["keep", "Keep mine", ""], ["use", it.imgs ? "Use the guide's steps" : "Use these steps", "dark", !it.ours || it.ours.library]] };
     return { kicker: "HOTEL DETAIL", tag: ["det", "Hotel detail"], title: it.key, sub: it.known ? "Fills {" + it.key + "} in SOPs" : "A new detail name", detail: it.value, done, key, item: si,
-      acts: done ? [] : [["skip", "Skip", ""], ["apply", master ? "Save" : "Save for " + hotelName(b.target), "dark"]] };
+      acts: done ? [] : [["skip", "Skip", ""], ["apply", "Save for " + hotelName(b.target), "dark"]] };
   }
   if (ST.draft) {
-    const d = ST.draft, master = ST.tgt === "master", exist = !master && ST.updateId ? sop(ST.updateId) : null, fill = stHasFill(d);
+    const d = ST.draft, exist = ST.updateId ? sop(ST.updateId) : null, fill = stHasFill(d);
     const acts = [["edit", "Edit", ""]];
-    if (master) {
-      if (!ST.updateId) acts.push(["save", "Save as draft", ""], ["publish", "Publish", "dark", fill]);
-      else if (ST.savedId === ST.updateId && ST.savedStatus === "draft") acts.push(["publish", "Publish", "dark", fill]);
-    } else if (!exist) acts.push(["save", "Save as draft", ""], ["publish", "Publish", "dark", fill]);
+    if (!exist) acts.push(["save", "Save as draft", ""], ["publish", "Publish", "dark", fill]);
     else { acts.push(["save", "Save changes", exist.status === "live" ? "dark" : ""]); if (exist.status !== "live") acts.push(["publish", "Publish", "dark", fill]); }
-    const tag = ST.updateId ? ["match", exist || master ? `Updating ${ST.updateId}` : "Saved"] : ["new", "New"];
+    const tag = ST.updateId ? ["match", exist ? `Updating ${ST.updateId}` : "Saved"] : ["new", ST.suggestion ? "From your group" : "New"];
     return { kicker: "DRAFT PREVIEW", tag, title: d.title || "Untitled", sub: `${d.category || "No category yet"} · from this conversation`, steps: (d.steps || []).map((x) => x.t), imgs: (d.steps || []).map((x) => x.img), script: d.script, flag: d.flag, kw: d.kw,
       missing: (ST.last && ST.last.missing) || [], fillBlock: fill, acts, draft: true,
-      note: master && ST.updateId ? "Open it in the editor to save changes to this master SOP." : "",
+      note: "",
       queue: ST.queue.length ? `${plural(ST.queue.length, "more SOP")} to write after this one: ${ST.queue.join("; ")}. Save this one and the next follows.` : "",
       done: ST.savedId && ST.savedId === ST.updateId ? `Saved as ${ST.savedId}${ST.savedStatus === "draft" ? " · draft, not visible to staff yet" : ST.savedStatus === "live" ? " · live" : ""}` : "" };
   }
@@ -262,7 +260,6 @@ function stRenderPane() {
     : `${stSteps(m.steps, m.imgs)}${lines("Say it like this", m.script)}${lines("Call the manager if", m.flag)}${lines("Ways staff might ask", m.kw)}`;
   const si = m.item;
   const catSel = si && si.g === "new" && !si.it.category && !m.done ? `<select class="stSel" data-cat="${esc(m.key)}" aria-label="Category">${`<option value="">Pick a category</option>` + si.b.cats.map((c) => `<option${ST.catPick[m.key] === c ? " selected" : ""}>${esc(c)}</option>`).join("")}</select>` : "";
-  const hotelSel = si && si.g === "details" && si.b.target === "master" && !m.done ? `<select class="stSel" data-dh="${esc(m.key)}" aria-label="Hotel"><option value="">Pick a hotel</option>${(ST.info ? ST.info.hotels : []).map((h) => `<option value="${esc(h.id)}"${ST.hotelPick[m.key] === h.id ? " selected" : ""}>${esc(h.name)}</option>`).join("")}</select>` : "";
   box.innerHTML = `<div class="stBackRow"><button type="button" class="stBack" data-pa="back" data-fk="pa:back">${stIcon.back}Chat</button></div>
     <div class="stSopHead"><div class="stKickRow"><span class="stKick">${m.kicker}</span><span class="stTag ${m.tag[0]}">${esc(m.tag[1])}</span></div>
       <h2 id="stSopHead" tabindex="-1">${esc(m.title)}</h2><div class="stSub">${esc(m.sub)}</div></div>
@@ -270,7 +267,7 @@ function stRenderPane() {
       ${m.missing && m.missing.length ? `<div class="stWarn">Still needed: ${m.missing.map(esc).join("; ")}</div>` : ""}
       ${m.fillBlock ? `<div class="stWarn">Fill in the highlighted [FILL] parts before you publish. Use Edit, or tell me the answer in the chat.</div>` : ""}
       ${m.note ? `<div class="stNote">${esc(m.note)}</div>` : ""}${m.queue ? `<div class="stNote">${esc(m.queue)}</div>` : ""}</div>
-    <div class="stSopActs">${catSel}${hotelSel}${m.acts.map(([id, label, cls, dis]) => `<button type="button" class="stBtn ${cls}" data-pa="${id}" data-fk="pa:${id}" ${dis ? "disabled" : ""}>${esc(label)}</button>`).join("")}${m.draft && m.done ? `<button type="button" class="stBtn" data-pa="again" data-fk="pa:again">Start another</button>` : ""}</div>`;
+    <div class="stSopActs">${catSel}${m.draft && !m.done ? `<label class="stOnly"><input type="checkbox" id="stOnly" ${ST.hotelOnly ? "checked" : ""}><span>This hotel only</span></label>` : ""}${m.acts.map(([id, label, cls, dis]) => `<button type="button" class="stBtn ${cls}" data-pa="${id}" data-fk="pa:${id}" ${dis ? "disabled" : ""}>${esc(label)}</button>`).join("")}${m.draft && m.done ? `<button type="button" class="stBtn" data-pa="again" data-fk="pa:again">Start another</button>` : ""}</div>`;
   const nb = box.querySelector(".stSopBody"); if (nb) nb.scrollTop = top;
   stRestoreFocus(fk);
 }
@@ -299,7 +296,7 @@ function stRenderComposer() {
 }
 function stGrow() { const t = $("stText"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 150) + "px"; }
 function stWriteMyself() {
-  if (ST.tgt === "master") { (STATE.owner.master ? Promise.resolve() : loadMaster()).then(() => openMaster(null)).catch(fail); } else openSop(null);
+  openSop(null);
 }
 
 /* ---------- phone panes ---------- */
@@ -364,7 +361,7 @@ function stNext() { // the next SOP of a "make these 3" list
 
 /* ---------- save, publish, edit (the conversation's draft) ---------- */
 function stDraftBody(d, status) {
-  return { title: d.title, cat: d.category, steps: (d.steps || []).map((x) => ({ t: x.t, img: x.img || null })), script: d.script || "", flag: d.flag || "", kw: d.kw || "", ...(status ? { status } : {}) };
+  return { title: d.title, cat: d.category, steps: (d.steps || []).map((x) => ({ t: x.t, img: x.img || null })), script: d.script || "", flag: d.flag || "", kw: d.kw || "", ...(ST.kind ? { kind: ST.kind } : {}), ...(ST.hotelOnly ? { hotelOnly: true } : {}), ...(ST.suggestion ? { suggestion: ST.suggestion } : {}), ...(status ? { status } : {}) };
 }
 async function stSave(publish) {
   const d = ST.draft; if (!d || ST.acting) return;
@@ -372,17 +369,7 @@ async function stSave(publish) {
   ST.acting = true; const tok = ST.tok;
   try {
     let msg;
-    if (ST.tgt === "master") {
-      let out;
-      if (ST.updateId) out = STATE.owner.master ? STATE.owner.master.sops.find((x) => x.id === ST.updateId) : { id: ST.updateId };
-      else {
-        out = await api("/api/master", { hotel: false, body: { ...stDraftBody(d), steps: (d.steps || []).map((x) => ({ t: x.t, hk: null, img: x.img || null })), applies: "all", requires: null } });
-        ST.updateId = ST.savedId = out.id; ST.savedStatus = "draft";
-      }
-      if (publish) { out = await api(`/api/master/${encodeURIComponent(ST.updateId)}/publish`, { hotel: false, body: {} }); ST.savedStatus = "live"; }
-      STATE.owner.master = null; portfolioStale();
-      msg = publish ? `Published ${ST.updateId} to hotels.` : `Saved ${ST.updateId} to the master library as a draft. Hotels don't see it until you publish it.`;
-    } else {
+    {
       const exist = ST.updateId ? sop(ST.updateId) : null;
       let out;
       if (exist) {
@@ -406,25 +393,23 @@ async function stSave(publish) {
 async function stOpenEditor() { // Edit: the existing SOP editor, with this draft in it
   const si = stSelItem();
   try {
-    if (ST.tgt === "master" || (si && si.b.target === "master")) { if (!STATE.owner.master) await loadMaster(); }
     if (si) {
       const { it, g, b } = si, d = { title: g === "matches" && it.ours ? it.ours.title : it.title, category: (it.ours && it.ours.cat) || it.category || "", steps: it.steps.map((t, i) => ({ t, img: (it.imgs && it.imgs[i]) || null })), script: it.script || "", flag: it.flag || "", kw: "" };
       ST.editFor = { k: "item", bid: si.bid, g, i: si.i };
-      if (b.target === "master") openMaster(g === "matches" ? it.sop_id : null, d); else openSop(g === "matches" ? it.sop_id : null, null, null, d);
+      openSop(g === "matches" ? it.sop_id : null, null, null, d);
     } else if (ST.draft) {
       const upd = ST.updateId; ST.editFor = { k: "draft" };
-      if (ST.tgt === "master") openMaster(upd && STATE.owner.master.sops.some((m) => m.id === upd) ? upd : null, ST.draft);
-      else openSop(upd && sop(upd) ? upd : null, null, null, ST.draft);
+      openSop(upd && sop(upd) ? upd : null, null, null, { ...ST.draft, kind: ST.kind, hotelOnly: ST.hotelOnly, suggestion: ST.suggestion });
       if (upd) toast(`Updating ${upd}. Review it, then save.`);
     }
   } catch (e) { ST.editFor = null; fail(e); }
 }
 // The editor saved something that came from the studio.
-function studioSaved(out, master) {
+function studioSaved(out) {
   const e = ST.editFor; ST.editFor = null; if (!e || !ST.active) return;
   if (e.k === "draft") {
     ST.updateId = ST.savedId = out.id; ST.savedStatus = out.status || "draft";
-    ST.thread.push({ role: "bot", text: `Saved ${out.id}${master ? "" : out.status === "live" ? ". It is live." : " as a draft."}` });
+    ST.thread.push({ role: "bot", text: `Saved ${out.id}${out.status === "live" ? ". It is live." : " as a draft."}` });
     stRenderThread("bottom"); stRenderPane();
     if (ST.queue.length) stNext();
   } else {
@@ -512,7 +497,7 @@ async function stReadDocs(text) {
   for (const f of files.filter(stIsPdf)) {
     try {
       if (f.size > I.maxMb * 1048576) throw new Error(`That PDF is over ${I.maxMb} MB.`);
-      const prep = await prepPdf(f, { hotelId: tgt === "master" ? undefined : tgt, onStatus: (t) => st(f, t) });
+      const prep = await prepPdf(f, { hotelId: tgt, onStatus: (t) => st(f, t) });
       st(f, prep.isGuide ? `Sorting ${prep.shots} screenshots into steps…` : "Reading the text…");
       // the screenshots are the server's from here on: it keeps the ones the drafts use and deletes the rest, also when this fails
       batch = await runJob("/api/import/pdf", { hotel: false, body: { target: tgt, batchId: bid(), ...prep.body } });
@@ -528,7 +513,6 @@ async function stReadDocs(text) {
   }
   prog.head = `Read ${plural(files.length - problems.length, "file")}${problems.length ? `, ${problems.length} failed` : ""}`;
   ST.batches[batch.id] = batch;
-  if (batch.target === "master") { STATE.owner.master = null; portfolioStale(); }
   ST.thread.push({ role: "res", bid: batch.id, problems });
   const first = stFirstOpen(batch);
   if (first) ST.sel = { k: "item", bid: batch.id, ...first };
@@ -547,8 +531,7 @@ async function stAct(bid, g, i, action, extra = {}) {
   try {
     const nb = await api(`/api/import/${bid}/act`, { hotel: false, body: { group: g, index: i, action, ...extra } });
     const note = nb.note; delete nb.note; ST.batches[bid] = nb;
-    if (nb.target === "master") { STATE.owner.master = null; portfolioStale(); }
-    else { SU.dirty = true; if (nb.target === STATE.hotel) loadHotel().catch(() => {}); }
+    SU.dirty = true; if (nb.target === STATE.hotel) loadHotel().catch(() => {});
     stRenderThread("keep"); stRenderPane(); stRenderComposer(); toast(note || "Done"); stSay(note || "Done");
   } catch (e) { fail(e); }
   ST.acting = false;
@@ -556,10 +539,6 @@ async function stAct(bid, g, i, action, extra = {}) {
 function stActFromEl(btn) {
   const bid = +btn.dataset.b, g = btn.dataset.g, i = +btn.dataset.i, action = btn.dataset.act, key = stKey(bid, g, i), extra = {};
   if (g === "new" && action === "add") { const s = document.querySelector(`#studio [data-cat="${CSS.escape(key)}"]`); const v = s ? s.value : ST.catPick[key]; if (v) extra.category = v; }
-  if (g === "details" && action === "apply" && stItem(bid, g, i) && ST.batches[bid].target === "master") {
-    const s = document.querySelector(`#studio [data-dh="${CSS.escape(key)}"]`); extra.hotel = (s ? s.value : ST.hotelPick[key]) || "";
-    if (!extra.hotel) return toast("Pick a hotel first");
-  }
   stAct(bid, g, i, action, extra);
 }
 
@@ -568,8 +547,8 @@ async function stOpenBatch(id) {
   const existing = ST.thread.findIndex((m) => m.role === "res" && m.bid === id);
   try {
     const b = await api(`/api/import/${id}`, { hotel: false });
-    if (b.target !== ST.tgt && !(b.target === "master" && ST.tgt === "master")) {
-      // a batch for another hotel or the master library: switch to it first (the Owner's Save to)
+    if (b.target !== ST.tgt) {
+      // a batch for another hotel: switch to it first (the Owner's Save to)
       if (isOwner()) { await stSetTargetQuiet(b.target); } else if (b.target !== ST.tgt) { ST.tgt = b.target; }
     }
     ST.batches[id] = b;
@@ -583,7 +562,7 @@ async function stOpenBatch(id) {
   } catch (e) { fail(e); }
 }
 async function stSetTargetQuiet(v) {
-  if (v !== "master" && v !== STATE.hotel) { STATE.hotel = v; try { localStorage.setItem("asklotus.hotel", v); } catch {} newChat(true); renderPropMenu(); await loadHotel(); }
+  if (v !== STATE.hotel) { STATE.hotel = v; try { localStorage.setItem("asklotus.hotel", v); } catch {} newChat(true); renderPropMenu(); await loadHotel(); }
   ST.tgt = v;
 }
 async function stTogglePop() {
@@ -675,6 +654,7 @@ function studioInit() {
   });
   // the SOP pane
   $("stSop").addEventListener("change", (e) => {
+    if (e.target.id === "stOnly") { ST.hotelOnly = e.target.checked; return; }
     const c = e.target.closest("[data-cat]"), h = e.target.closest("[data-dh]");
     if (c) ST.catPick[c.dataset.cat] = c.value; if (h) ST.hotelPick[h.dataset.dh] = h.value;
   });
