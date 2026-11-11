@@ -1301,3 +1301,11 @@ body.shell header.scrolled{background:var(--chrome);-webkit-backdrop-filter:blur
 }
 @media (max-width:640px){.pfpv{padding:9px 10px}.pfpv b{font-size:1.1rem}.pfpv span,.pfpv em{font-size:.7rem}}
 @media (prefers-reduced-motion:reduce){.pfdot,.pf-secbtn svg,.libhd svg{transition:none}.pfdot:hover{transform:none}}
+
+/* Invite email shown after creating someone or resetting their password */
+.invitebox{display:flex;flex-direction:column;gap:8px;margin-top:12px;padding:14px;border-radius:16px;background:var(--glass2,rgba(255,255,255,.4));border:1px solid var(--sep)}
+.invitebox>span{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3,var(--sub))}
+.invitebox input,.invitebox textarea{width:100%;box-sizing:border-box;border:1px solid var(--sep);border-radius:10px;background:var(--bg2,transparent);color:inherit;font:14px/1.45 inherit;padding:9px 11px;resize:vertical}
+.invitebox input{font-weight:600}
+.invite-acts{display:flex;gap:8px;flex-wrap:wrap}
+.invite-acts a.pillbtn{text-decoration:none;color:var(--ink,inherit);display:inline-flex;align-items:center;border:1px solid var(--sep)}

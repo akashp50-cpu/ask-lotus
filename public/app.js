@@ -926,7 +926,61 @@ function renderHotels() {
   $("u-hotels").innerHTML = mine.map((h) => `<button type="button" class="rowline" data-h="${esc(h.id)}"><span>${esc(h.name)}${h.ready ? "" : "<small>Not set up yet</small>"}</span><span class="switch" aria-hidden="true" ${draftHotels.includes(h.id) ? 'style="background:#34C759"' : ""}><i ${draftHotels.includes(h.id) ? 'style="transform:translateX(20px)"' : ""}></i></span></button>`).join("");
   $("u-hotels").querySelectorAll("[data-h]").forEach((b) => (b.onclick = () => { const id = b.dataset.h; draftHotels = draftHotels.includes(id) ? draftHotels.filter((x) => x !== id) : [...draftHotels, id]; renderHotels(); }));
 }
-function showTemp(pw) { $("u-temp").textContent = pw; $("u-tempBox").hidden = false; }
+function showTemp(pw, who) { $("u-temp").textContent = pw; $("u-tempBox").hidden = false; if (who) showInvite({ ...who, pw }); }
+// A ready-to-send invite: the site, their sign-in, what Ask Lotus is and what they need to do first.
+function inviteEmail(u) {
+  const site = location.origin, first = (u.name || "").split(" ")[0] || "there";
+  const names = (u.hotels || []).map((id) => (STATE.hotels.find((h) => h.id === id) || {}).name).filter(Boolean);
+  const where = names.length ? names.join(" and ") : "your hotel";
+  const notLive = (u.hotels || []).filter((id) => { const h = STATE.hotels.find((x) => x.id === id); return h && !h.ready; });
+  const from = (STATE.me && STATE.me.name) || "";
+  const manager = u.role === "GM" || u.role === "Owner";
+  const what = "Ask Lotus is our front desk guide. Staff type or tap a question (late checkout, a payment issue, a guest complaint) and get our hotel's own step-by-step answer, with screenshots, and who to message if they need a manager.";
+  const todo = manager
+    ? [
+        "Sign in with the username and temporary password above. You'll choose your own password right away.",
+        notLive.length ? `Finish setting up ${where}: hotel details (times, fees, Wi-Fi, locations), contacts, and which SOPs apply. The app walks you through it and shows what's left.` : `Look through the Library and turn off anything that doesn't apply at ${where}.`,
+        "Add your team from Team, and print the desk card (Welcome kit) so the front desk can get it on their phones.",
+        "Check Needs you on the Dashboard now and then. Suggestions from our other hotels show up there."
+      ]
+    : [
+        "Sign in with the username and temporary password above. You'll choose your own password right away.",
+        "Add it to your phone's home screen so it opens like an app.",
+        "Ask it anything about the desk. If something's missing, it tells your manager."
+      ];
+  const subject = manager ? `You're invited to Ask Lotus as GM of ${where}` : `Your Ask Lotus sign-in for ${where}`;
+  const body = [
+    `Hi ${first},`,
+    "",
+    manager ? `You're set up as GM of ${where} in Ask Lotus.` : `You're set up in Ask Lotus at ${where}.`,
+    "",
+    what,
+    "",
+    `Website: ${site}`,
+    `Username: ${u.username}`,
+    `Temporary password: ${u.pw}`,
+    "",
+    "What to do:",
+    ...todo.map((t, i) => `${i + 1}. ${t}`),
+    "",
+    "Reply to me with any questions.",
+    "",
+    ...(from ? ["Thanks,", from] : ["Thanks"])
+  ].join("\n");
+  return { subject, body };
+}
+function showInvite(u) {
+  const m = inviteEmail(u);
+  $("u-invSubject").value = m.subject; $("u-invBody").value = m.body; $("u-inviteBox").hidden = false;
+  const mail = $("u-invMail");
+  mail.hidden = !u.email;
+  if (u.email) mail.href = `mailto:${encodeURIComponent(u.email)}?subject=${encodeURIComponent(m.subject)}&body=${encodeURIComponent(m.body)}`;
+}
+$("u-invCopy").onclick = async () => {
+  const text = `Subject: ${$("u-invSubject").value}\n\n${$("u-invBody").value}`;
+  try { await navigator.clipboard.writeText(text); toast("Email copied"); }
+  catch { const t = $("u-invBody"); t.focus(); t.select(); toast("Selected. Copy it from here."); }
+};
 $("u-copy").onclick = async () => {
   try { await navigator.clipboard.writeText($("u-temp").textContent); toast("Copied"); }
   catch { const r = document.createRange(); r.selectNodeContents($("u-temp")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast("Selected. Copy it from here."); }
@@ -939,19 +993,19 @@ function openUser(id, preset) {
   renderRoles(); renderHotels();
   const act = $("u-active"); act.setAttribute("aria-checked", eu ? eu.status !== "off" : true); act.disabled = !!self;
   $("u-activeNote").textContent = self ? "You can't turn off your own account." : "Turn off when someone leaves. Their question history stays.";
-  $("u-reset").hidden = !eu; $("u-tempBox").hidden = true;
+  $("u-reset").hidden = !eu; $("u-tempBox").hidden = true; $("u-inviteBox").hidden = true;
   $("u-hint").textContent = eu ? (eu.must_change_pw ? "They haven't set their own password yet." : "") : "You'll get a temporary password to give them. They set their own the first time they sign in.";
   showSheet("userEd");
 }
 $("u-reset").onclick = async () => {
-  try { const r = await api(`/api/users/${eu.id}/reset`, { hotel: false, body: {} }); showTemp(r.tempPassword); $("u-hint").textContent = "Their old password and any open sessions no longer work."; } catch (e) { fail(e); }
+  try { const r = await api(`/api/users/${eu.id}/reset`, { hotel: false, body: {} }); showTemp(r.tempPassword, eu); $("u-hint").textContent = "Their old password and any open sessions no longer work."; } catch (e) { fail(e); }
 };
 $("userEd").addEventListener("submit", async (e) => {
   e.preventDefault();
   const body = { name: $("u-name").value.trim(), username: $("u-username").value.trim().toLowerCase(), email: $("u-email").value.trim(), role: draftRole, hotels: draftHotels, status: $("u-active").getAttribute("aria-checked") === "true" ? "active" : "off" };
   try {
     if (eu) { await api(`/api/users/${eu.id}`, { hotel: false, method: "PUT", body }); toast("Saved " + body.name); hideSheet(); }
-    else { const r = await api("/api/users", { hotel: false, body }); showTemp(r.tempPassword); $("u-hint").textContent = `${body.name} is set up. Sign-in: username ${body.username} with the temporary password above.`; $("uSave").textContent = "Done"; eu = { id: r.id, ...body }; }
+    else { const r = await api("/api/users", { hotel: false, body }); showTemp(r.tempPassword, body); $("u-hint").textContent = `${body.name} is set up. Copy the email above and send it, or give them the password in person.`; $("uSave").textContent = "Done"; eu = { id: r.id, ...body }; }
     STATE.users = await api("/api/users", { hotel: false }); renderAdmin();
     if (mode === "owner") { portfolioStale(); renderOwner(true); }
   } catch (x) { fail(x); }

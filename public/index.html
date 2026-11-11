@@ -390,6 +390,12 @@
         <div class="form"><div class="rowline"><span>Can sign in<small id="u-activeNote">Turn off when someone leaves. Their question history stays.</small></span><button type="button" class="switch" id="u-active" role="switch" aria-label="Can sign in"><i></i></button></div></div>
         <button type="button" class="plain press" id="u-reset">Reset Password</button>
         <div class="tempbox" id="u-tempBox" hidden><span>Temporary password</span><code id="u-temp"></code><button type="button" class="pillbtn tint press" id="u-copy">Copy</button><small>Give this to them in person or by text. They'll set their own password the first time they sign in. It won't be shown again.</small></div>
+        <div class="invitebox" id="u-inviteBox" hidden>
+          <span>Invite email</span>
+          <input type="text" id="u-invSubject" readonly aria-label="Email subject">
+          <textarea id="u-invBody" rows="12" readonly aria-label="Email text"></textarea>
+          <div class="invite-acts"><button type="button" class="pillbtn tint press" id="u-invCopy">Copy email</button><a class="pillbtn press" id="u-invMail" href="#" hidden>Open in Mail</a></div>
+        </div>
         <p class="hint" id="u-hint"></p>
       </div>
     </form>
