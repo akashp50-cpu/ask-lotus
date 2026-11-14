@@ -31,6 +31,9 @@ if (!process.env.APP_SECRET || process.env.APP_SECRET.length < 32) {
 }
 
 const app = express();
+// Last non-health request (used to skip background DB work while the app is idle).
+let lastUse = Date.now();
+app.use((req, res, next) => { if (req.path !== "/healthz") lastUse = Date.now(); next(); });
 app.set("trust proxy", 1);
 app.use(
   helmet({
@@ -280,8 +283,9 @@ const CONVO_TTL = "2 hours";
 const THREAD_KEEP = "48 hours";
 const pruneThreads = () =>
   q(`DELETE FROM conversations WHERE updated_at < now() - interval '${THREAD_KEEP}'`).catch((e) => console.error("Clearing old conversations failed:", e.message));
+// Only prune when someone used the app in the last hour, so an idle app never wakes the database.
 setTimeout(pruneThreads, 30 * 1000).unref();
-setInterval(pruneThreads, 60 * 60 * 1000).unref();
+setInterval(() => { if (Date.now() - lastUse < 60 * 60 * 1000) pruneThreads(); }, 60 * 60 * 1000).unref();
 const loadConvo = async (id, userId, hotelId) => {
   if (typeof id !== "string" || id.length > 64) return null;
   const r = await q(
@@ -2758,8 +2762,10 @@ app.post(
 );
 
 // ---------- static app ----------
+// Render calls /healthz every few seconds, so it must NOT touch the database: a DB ping here kept
+// Neon's free compute awake 24/7. /healthz?deep=1 also checks the database (for manual checks).
 app.get("/healthz", wrap(async (req, res) => {
-  await q("SELECT 1");
+  if (req.query.deep === "1") await q("SELECT 1");
   res.json({ ok: true });
 }));
 // index.html is never cached, and points at versioned app.js/style.css, so a new
