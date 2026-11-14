@@ -56,7 +56,7 @@ const pdfsteps = require("./pdfsteps");
 app.use((req, res, next) => (/^\/api\/(import\/(upload|sheet|pdf)|setup\/(extract|rooms-sheet)|author\/pdf)$/.test(req.path) ? next() : jsonSmall(req, res, next)));
 app.use(
   session({
-    store: new PgStore({ pool, tableName: "session" }),
+    store: new PgStore({ pool, tableName: "session", pruneSessionInterval: false }), // pruned in the activity-gated hourly job below
     secret: process.env.APP_SECRET,
     name: "asklotus.sid",
     resave: false,
@@ -281,8 +281,10 @@ app.get(
 const CONVO_TTL = "2 hours";
 // Full conversation threads are deleted this long after their last message, to keep the database small.
 const THREAD_KEEP = "48 hours";
-const pruneThreads = () =>
+const pruneThreads = () => {
   q(`DELETE FROM conversations WHERE updated_at < now() - interval '${THREAD_KEEP}'`).catch((e) => console.error("Clearing old conversations failed:", e.message));
+  q(`DELETE FROM "session" WHERE expire < now()`).catch((e) => console.error("Clearing expired sessions failed:", e.message));
+};
 // Only prune when someone used the app in the last hour, so an idle app never wakes the database.
 setTimeout(pruneThreads, 30 * 1000).unref();
 setInterval(() => { if (Date.now() - lastUse < 60 * 60 * 1000) pruneThreads(); }, 60 * 60 * 1000).unref();
